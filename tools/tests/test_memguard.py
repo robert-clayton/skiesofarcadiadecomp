@@ -84,6 +84,10 @@ void gxr_enable(int on) { (void)on; }
 void gxr_set_output(const char* p) { (void)p; }
 void watch_init(void) {}
 void gxr_export_install(void) {}
+void gxr_skip_until(unsigned frame) { (void)frame; } /* SOA_SKIP_TO: nothing here draws or keeps time */
+void clock_set_speed_at(unsigned speed, uint64_t host_ns) { (void)speed; (void)host_ns; }
+uint64_t clock_host_ns(void) { return 0; }
+unsigned hle_speed(void) { return 1; }
 void window_start(void) {}
 int window_toggle_fullscreen(void) { return 0; }
 const char* settings_root(void) { return "."; }

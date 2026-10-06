@@ -959,10 +959,60 @@ static void stall_at_frame(unsigned frame)
     plat_sleep_ms(secs * 1000u);
 }
 
+/* SOA_SKIP_TO=frame[@speed]: get to a frame fast and then carry on as
+ * usual. Until the game presents that frame its clock runs `speed` times
+ * the wall clock's (10 unless given) and nothing is rasterized; from there
+ * the speed is SOA_SPEED's again and every frame is drawn. For a scene a
+ * few minutes into a scripted run, under a window or a host that would
+ * otherwise have to sit through them: the frames, and what SOA_PAD presses
+ * at each, are the same ones. */
+static unsigned g_skip_to, g_skip_back = 1;
+static char g_skip_speed_was[16];
+void clock_set_speed_at(unsigned speed, uint64_t host_ns);
+uint64_t clock_host_ns(void);
+unsigned hle_speed(void);
+
+static void skip_parse(void)
+{
+    const char* p = getenv("SOA_SKIP_TO");
+    const char* was = getenv("SOA_SPEED");
+    char speed[16];
+    char* end;
+    unsigned long frame, fast = 10;
+    if (!p || !*p) return;
+    frame = strtoul(p, &end, 10);
+    if (end != p && *end == '@') {
+        const char* q = end + 1;
+        fast = strtoul(q, &end, 10);
+        if (end == q) fast = 0;
+    }
+    if (end == p || *end || !frame || !fast) {
+        fprintf(stderr, "[skip] SOA_SKIP_TO=%s is not frame or frame@speed; nothing is skipped\n", p);
+        return;
+    }
+    g_skip_to = (unsigned)frame;
+    g_skip_back = hle_speed();
+    snprintf(g_skip_speed_was, sizeof g_skip_speed_was, "%s", was ? was : "");
+    snprintf(speed, sizeof speed, "%lu", fast);
+    plat_setenv("SOA_SPEED", speed); /* the clock takes its speed from here when the guest first reads it */
+    gxr_skip_until(g_skip_to);
+    fprintf(stderr, "[skip] to frame %u at %lu times real speed, drawing nothing on the way\n", g_skip_to, fast);
+}
+
+static void skip_at_frame(unsigned frame)
+{
+    if (!g_skip_to || frame < g_skip_to) return;
+    plat_setenv("SOA_SPEED", g_skip_speed_was);
+    clock_set_speed_at(g_skip_back, clock_host_ns());
+    fprintf(stderr, "[skip] frame %u: at %u times real speed from here, and drawing\n", frame, g_skip_back);
+    g_skip_to = 0;
+}
+
 void poke_at_frame(CpuState* s, unsigned frame)
 {
     int i;
     hle_frame_mark();
+    skip_at_frame(frame);
     stall_at_frame(frame);
     peek_at_frame(s, frame);
     if (g_poke_n < 0) poke_parse();
@@ -1131,6 +1181,7 @@ static void usage(void)
             "  SOA_WINDOW=0|1   force the window off or on\n"
             "  SOA_FRAMES=n     run n video frames (numbered 0..n-1), then stop and print the report\n"
             "  SOA_SNAP=n       write build/frames/NNNN.png every n frames; needs SOA_RENDER=1\n"
+            "  SOA_SKIP_TO=n    get to frame n fast, drawing nothing on the way, then carry on (n@speed; 10)\n"
             "  SOA_WATCHDOG=s   report and stop after s seconds with no frame (default 20 headless,\n"
             "                   off when a window is open; 0 disables it)\n"
             "  SOA_MMIO=1       log the first few accesses of every hardware register\n"
@@ -1294,6 +1345,7 @@ int main(int argc, char** argv)
     poke_parse();
     peek_parse();
     uncap_parse();
+    skip_parse();
     watch_init(); /* here with the others, so SOA_WATCH is read before the disc is */
     gxr_export_install(); /* SOA_GXR_EXPORT (gxr_export.h) */
     gx_set_frame_hook(poke_at_frame);

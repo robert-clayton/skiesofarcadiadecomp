@@ -419,6 +419,15 @@ void gxr_draw_every_frame(void)
     g_draw_every = 1;
 }
 
+/* SOA_SKIP_TO (main.c): the frames before this one are not rasterized,
+ * window or not, which is most of what getting there fast takes. */
+static unsigned g_skip_until;
+
+void gxr_skip_until(unsigned frame)
+{
+    g_skip_until = frame;
+}
+
 static float xff(const uint32_t* xf, unsigned i)
 {
     float f;
@@ -2473,6 +2482,7 @@ static void gxr_draw_inner(CpuState* s, unsigned op, unsigned count, const uint8
      * window (g_draw_every) or a replay (g_png_path) wants every frame it
      * shows, whatever the interval says. */
     if (g_snap_every && !g_draw_every && !g_png_path[0] && !snap_frame(gx_frame_count())) return;
+    if (gx_frame_count() < g_skip_until) return; /* SOA_SKIP_TO: nothing is drawn on the way there */
     if (!g_started) { g_started = 1; workers_start(); }
     tex_set_memory(s);
 

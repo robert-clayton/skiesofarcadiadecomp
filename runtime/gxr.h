@@ -48,6 +48,7 @@ int gxr_enabled(void);
 void gxr_enable(int on);
 void gxr_set_output(const char* png_path);
 void gxr_draw_every_frame(void); /* a window is open: do not skip the frames SOA_SNAP is not writing */
+void gxr_skip_until(unsigned frame); /* SOA_SKIP_TO: rasterize nothing before this frame */
 void gxr_report(void);
 void gxr_reset_efb(void);
 void gxr_flush(void);
