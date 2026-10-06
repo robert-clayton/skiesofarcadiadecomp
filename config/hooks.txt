@@ -14,3 +14,4 @@
 0x80289210  CnkDrawModel2.ret
 0x8028AB48  CnkDrawModel3
 0x8028AD88  CnkDrawModel3.ret
+0x8029D0F4  CnkTexture            # a texture chunk: r4's low 13 bits are the id (runtime/ninja.c)

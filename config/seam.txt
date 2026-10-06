@@ -28,6 +28,7 @@ runtime hook_802890A4
 runtime hook_80289210
 runtime hook_8028AB48
 runtime hook_8028AD88
+runtime hook_8029D0F4
 runtime irq_poll
 runtime mmio_read8
 runtime mmio_read16

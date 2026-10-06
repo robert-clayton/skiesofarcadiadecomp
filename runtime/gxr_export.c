@@ -150,6 +150,15 @@ void gxr_export_note(const char* json)
     g_notes++;
 }
 
+/* Where texture map m's image is in guest memory: BP's texture image
+ * register 3 (0x94 for maps 0-3, 0xB4 for 4-7), in 32-byte units. */
+static uint32_t image_addr(unsigned m)
+{
+    const uint32_t* bp = gx_bp_regs();
+    uint32_t reg = (m < 4 ? 0x94u + m : 0xB4u + (m - 4)) & 0xFFu;
+    return 0x80000000u | ((bp[reg] & 0x00FFFFFFu) << 5);
+}
+
 static void export_draw(const DrawCmd* D, unsigned count)
 {
     const uint32_t* xf = gx_xf_regs();
@@ -206,9 +215,9 @@ static void export_draw(const DrawCmd* D, unsigned count)
         if (!((maps >> i) & 1) || !C->level[0]) continue;
         fprintf(g_json,
                 "%s{\"map\":%u,\"file\":\"%016llx.png\",\"w\":%d,\"h\":%d,\"wrap_s\":%u,\"wrap_t\":%u,\"linear\":%d,"
-                "\"mip\":%d,\"copy\":%u,\"scale\":[%.9g,%.9g]}",
+                "\"mip\":%d,\"copy\":%u,\"scale\":[%.9g,%.9g],\"addr\":%u}",
                 k++ ? "," : "", i, (unsigned long long)texture_file(C), C->lw[0], C->lh[0], C->wrap_s, C->wrap_t,
-                C->linear, C->mip, C->copy_image, C->scale_s, C->scale_t);
+                C->linear, C->mip, C->copy_image, C->scale_s, C->scale_t, image_addr(i));
     }
     fprintf(g_json, "]}\n");
     g_nverts += count;
