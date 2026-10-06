@@ -109,3 +109,12 @@
 0x801A2A8C  CardScanRepaired@r1     # card_scan overwriting its own status with 0 because CARDCheckExAsync reported work done and succeeded. Firing means the card WAS written -- a repair -- and that the format prompt will therefore never appear. This is what a --damage'd image does. r3 = 0, the CheckEx result; with SOA_TRACE_DUMP=1 word 4 of the dump is the xferBytes out-param at r1+16, which should read 8192
 0x80248134  CardCheckExErrors       # CARDCheckExAsync's own count, reached only if CARDVerifyID passed first: r31 = CARDVerifyDir's error count, r3 = CARDVerifyFat's, r5 = the sum it branches on. 0 nothing to repair, 1 the repair arm runs and writes a block, >1 it returns -6 BROKEN having written nothing. Not firing at all means CARDVerifyID answered first, which is what a blank card does
 0x802483AC  CardCheckExFatDirty     # reached only when the allocation table CheckEx rebuilt from the directory's block chains disagrees with the stored one, or the free-block count at fat[3] is wrong: a FAT block is about to be rewritten even though all four system-block checksums were valid. The one way a card the tools call healthy can still be written
+
+# ---- the model drawer (soa-ue5 graphics spike) ---------------------------------
+# Four chunk walkers call every polygon emitter; fn_80287610 also calls itself, as
+# njCnkDrawObject walks children. SOA_TRACE_DUMP=1 shows what r3 points at.
+0x802873BC  DrawObjectRoot
+0x80287610  DrawObject
+0x80287F00  DrawObjectB
+0x80289390  DrawObjectC
+0x8028AD9C  DrawObjectD

@@ -83,6 +83,7 @@ int gxr_enabled(void) { return 0; } /* main.c's gpu_start asks; no renderer here
 void gxr_enable(int on) { (void)on; }
 void gxr_set_output(const char* p) { (void)p; }
 void watch_init(void) {}
+void gxr_export_install(void) {}
 void window_start(void) {}
 int window_toggle_fullscreen(void) { return 0; }
 const char* settings_root(void) { return "."; }

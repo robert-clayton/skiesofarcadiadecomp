@@ -10,6 +10,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "gxr.h"
 #include "gxr_cmd.h"
+#include "gxr_export.h"
 #include "crmath.h"
 #include "plat.h"
 #include <math.h>
@@ -431,14 +432,8 @@ static uint32_t be32(const uint8_t* p) { return ((uint32_t)p[0] << 24) | ((uint3
 
 /* ---- vertex attributes ------------------------------------------------- */
 
-typedef struct {
-    float pos[3];
-    float nrm[3];
-    Color4 col[2];
-    float tex[8][2];
-    unsigned posidx, texidx[8];
-    int has_nrm, has_col[2], has_tex[8];
-} VertexIn;
+/* VertexIn, one vertex before the transform, is in gxr_export.h, which
+ * writes it out under SOA_GXR_EXPORT. */
 
 static unsigned comp_bytes(unsigned fmt) { return fmt == 4 ? 4 : (fmt >= 2 ? 2 : 1); }
 
@@ -2450,6 +2445,10 @@ void gxr_pair_report(void)
 }
 
 static void gxr_draw_inner(CpuState* s, unsigned op, unsigned count, const uint8_t* verts, unsigned vsize);
+/* The draw exporter (gxr_export.h), or NULL: set through a setter so the
+ * renderer still links alone (test_gxr_backend.py). */
+static const GxrDrawExport* g_export;
+void gxr_set_draw_export(const GxrDrawExport* e) { g_export = e; }
 
 void gxr_draw(CpuState* s, unsigned op, unsigned count, const uint8_t* verts, unsigned vsize)
 {
@@ -2520,7 +2519,9 @@ static void gxr_draw_inner(CpuState* s, unsigned op, unsigned count, const uint8
         VertexIn in;
         p = decode_vertex(s, p, vat, &in);
         transform(s, &in, &v[i]);
+        if (g_export) g_export->vertex(i, &in, &v[i]);
     }
+    if (g_export) g_export->draw(D, count);
     if (g_pair_flags) pair_positions(&D->rc, v, count, pc);
     if (prim <= 0xA0) g_tris += prim == 0x80 ? (count / 4) * 2 : (prim == 0x90 ? count / 3 : (count >= 2 ? count - 2 : 0));
     if (g_workers > 0) {
@@ -3205,6 +3206,7 @@ static void enqueue_copy(CpuState* s, const uint32_t* bp, uint32_t v)
     D->cp_v = v; D->cp_tl = bp[0x49]; D->cp_wh = bp[0x4A]; D->cp_dest = bp[0x4B]; D->cp_stride = bp[0x4D];
     D->cp_ar = bp[0x4F]; D->cp_gb = bp[0x50]; D->cp_z = bp[0x51];
     D->cp_f_up = f_up; D->cp_f_mid = f_mid; D->cp_f_dn = f_dn;
+    if (g_export) g_export->copy(v, x0, y0, w, h, dest, bytes);
     if (to_screen) { g_screen_w = w > EFB_W ? EFB_W : w; g_screen_h = h > EFB_H ? EFB_H : h; g_copies_xfb++; }
     else {
         if (bytes) {

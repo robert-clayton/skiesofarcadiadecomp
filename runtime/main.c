@@ -47,6 +47,7 @@ int gx_replay_pair(CpuState* s, const char* a, const char* b); /* H10: A, B and 
 void gxr_enable(int on);
 void gxr_set_output(const char* png_path);
 void watch_init(void);
+void gxr_export_install(void);
 void window_start(void);
 void gx_set_frame_limit(unsigned frames);
 void gx_set_frame_hook(void (*fn)(CpuState*, unsigned)); /* SOA_POKE; see gx.c */
@@ -1294,6 +1295,7 @@ int main(int argc, char** argv)
     peek_parse();
     uncap_parse();
     watch_init(); /* here with the others, so SOA_WATCH is read before the disc is */
+    gxr_export_install(); /* SOA_GXR_EXPORT (gxr_export.h) */
     gx_set_frame_hook(poke_at_frame);
 
     {

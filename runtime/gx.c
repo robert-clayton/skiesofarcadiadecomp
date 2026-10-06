@@ -648,9 +648,57 @@ static void dl_bracket(CpuState* s)
     g_dl_rec = rec;
 }
 
+/* SOA_GX_WRITERS=1: which guest code feeds the gather pipe, by the block
+ * doing the store and the link register at the time (its caller, for a leaf
+ * function), with the bytes each pair wrote; the busiest at exit. Finds the
+ * routines that emit vertices, which the address alone of a draw command
+ * cannot: the stream carries no return addresses. */
+#define WRITERS_CAP 4096
+typedef struct { uint32_t pc, lr; uint64_t bytes; } Writer;
+static Writer g_writers[WRITERS_CAP];
+static int g_writers_on = -1;
+
+static int writer_cmp(const void* a, const void* b)
+{
+    uint64_t x = ((const Writer*)a)->bytes, y = ((const Writer*)b)->bytes;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static void writers_report(void)
+{
+    unsigned i, n = 0;
+    uint64_t total = 0;
+    for (i = 0; i < WRITERS_CAP; i++)
+        if (g_writers[i].bytes) { g_writers[n++] = g_writers[i]; total += g_writers[i].bytes; }
+    qsort(g_writers, n, sizeof g_writers[0], writer_cmp);
+    fprintf(stderr, "[writers] %u block/caller pairs wrote %llu gather-pipe bytes; the busiest:\n", n,
+            (unsigned long long)total);
+    for (i = 0; i < n && i < 40; i++)
+        fprintf(stderr, "[writers]   block %08X lr %08X  %llu bytes (%.1f%%)\n", g_writers[i].pc, g_writers[i].lr,
+                (unsigned long long)g_writers[i].bytes, total ? 100.0 * g_writers[i].bytes / total : 0.0);
+}
+
+static void writer_note(const CpuState* s, unsigned size)
+{
+    unsigned h = ((s->pc * 2654435761u) ^ (s->lr * 40503u)) & (WRITERS_CAP - 1), k;
+    for (k = 0; k < WRITERS_CAP; k++, h = (h + 1) & (WRITERS_CAP - 1)) {
+        Writer* w = &g_writers[h];
+        if (w->bytes && (w->pc != s->pc || w->lr != s->lr)) continue;
+        w->pc = s->pc;
+        w->lr = s->lr;
+        w->bytes += size;
+        return;
+    }
+}
+
 void gx_pipe_write(CpuState* s, unsigned size, uint64_t v)
 {
     unsigned i;
+    if (g_writers_on < 0) {
+        const char* e = getenv("SOA_GX_WRITERS");
+        g_writers_on = e && atoi(e);
+    }
+    if (g_writers_on) writer_note(s, size);
     if (g_dl_rec) {
         dl_record(s, size, v);
         return;
@@ -749,6 +797,7 @@ void gx_report(void)
             g_dl_overflows ? ", some overflowed their buffers" : "");
     gx_dllog_report();
     gxr_report();
+    if (g_writers_on > 0) writers_report(); /* SOA_GX_WRITERS */
 }
 
 /* ---- replay ------------------------------------------------------------
