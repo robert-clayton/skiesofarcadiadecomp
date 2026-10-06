@@ -292,7 +292,9 @@ typedef struct {
     long frame;
     unsigned n, nt, nl;
     unsigned open[MAX_OPEN], n_open; /* the models whose drawers have not returned yet */
+    unsigned sent;                   /* how many of them have reached the GPU: the next one's place in that order */
     float proj[7];
+    uint32_t visit[MAX_MODELS];      /* ninja.c's number for each, which climbs with them */
     SoaHostModel m[MAX_MODELS];
     SoaHostTexture t[MAX_TEXTURES];
     SoaHostLight l[MAX_LIGHTS];
@@ -321,13 +323,12 @@ static ModelFrame* building(CpuState* s)
         memset(b->proj, 0, sizeof b->proj);
         b->proj[6] = 1.0f; /* none seen yet */
         b->frame = f;
-        b->n = b->nt = b->nl = b->n_open = 0;
+        b->n = b->nt = b->nl = b->n_open = b->sent = 0;
     }
     return b;
 }
 
-static void feed_model(CpuState* s, unsigned drawer, uint32_t model, uint32_t vlist, uint32_t plist, const float modelview[12],
-                       const float camera[12])
+static void feed_model(CpuState* s, const NinjaVisit* v)
 {
     ModelFrame* b = building(s);
     SoaHostModel* m;
@@ -344,16 +345,21 @@ static void feed_model(CpuState* s, unsigned drawer, uint32_t model, uint32_t vl
     if (b->n_open < MAX_OPEN) b->open[b->n_open] = b->n < MAX_MODELS ? b->n : ~0u;
     b->n_open++;
     if (b->n >= MAX_MODELS) { g_mf_dropped++; return; }
+    b->visit[b->n] = v->visit;
     m = &b->m[b->n++];
     memset(m, 0, sizeof *m);
-    m->model = model;
-    m->drawer = drawer;
-    m->vlist = vlist;
-    m->plist = plist;
+    m->model = v->model;
+    m->drawer = v->drawer;
+    m->mode = v->mode;
+    m->strip_and = v->strip_and;
+    m->strip_or = v->strip_or;
+    m->order = SOA_HOST_NOT_SENT;
+    m->vlist = v->vlist;
+    m->plist = v->plist;
     m->first_texture = b->nt;
     m->textures = 0;
-    memcpy(m->modelview, modelview, sizeof m->modelview);
-    memcpy(m->camera, camera, sizeof m->camera);
+    memcpy(m->modelview, v->modelview, sizeof m->modelview);
+    memcpy(m->camera, v->camera, sizeof m->camera);
 }
 
 static void feed_texture(CpuState* s, uint32_t id, uint32_t image, uint32_t format, uint32_t palette, uint32_t width,
@@ -387,23 +393,17 @@ static void read_light(const uint32_t* xf, unsigned index, SoaHostLight* out)
     memcpy(out->direction, L + 13, sizeof out->direction);
 }
 
-/* The drawer returns: GX's registers are as the model's last strip set
- * them, which is how the model was shaded. */
-static void feed_end(CpuState* s, int drawn)
+/* A model's strips have reached the GPU: GX's registers are as the last of
+ * them left them, which is how the model was shaded, and it takes the next
+ * place in the order the frame's models got there. */
+static void feed_strips(ModelFrame* b, SoaHostModel* m, unsigned strips)
 {
-    ModelFrame* b = &g_mf[g_build];
     const uint32_t* xf = gx_xf_regs();
     const uint32_t* bp = gx_bp_regs();
-    SoaHostModel* m;
     SoaHostLight found[8];
-    unsigned index, mask, i, n = 0;
-    (void)s;
-    if (!b->n_open) return; /* watching began inside a drawer */
-    b->n_open--;
-    if (b->n_open >= MAX_OPEN || (index = b->open[b->n_open]) >= b->n) return;
-    m = &b->m[index];
-    m->drawn = drawn ? 1u : 0u;
-    if (!drawn) return;
+    unsigned mask, i, n = 0;
+    m->strips = strips;
+    m->order = b->sent++;
     m->channels = xf[0x1009] & 3;
     m->chan_colour = xf[0x100E];
     m->chan_alpha = xf[0x1010];
@@ -412,14 +412,18 @@ static void feed_end(CpuState* s, int drawn)
     m->tev_stages = ((bp[0x00] >> 10) & 15) + 1;
     m->tev_colour = bp[0xC0] & 0x00FFFFFFu;
     m->tev_alpha = bp[0xC1] & 0x00FFFFFFu;
+    for (i = 0; i < 5; i++) m->fog[i] = bp[0xEE + i] & 0x00FFFFFFu;
     if (!m->channels || !(m->chan_colour & 2)) return;
     mask = ((m->chan_colour >> 2) & 15) | (((m->chan_colour >> 11) & 15) << 4);
     for (i = 0; i < 8; i++)
         if ((mask >> i) & 1) read_light(xf, i, &found[n++]);
-    /* models drawn one after another mostly share their lights: the last
-     * run in the frame's table is reused when it is the same */
-    if (n && b->nl >= n && memcmp(&b->l[b->nl - n], found, n * sizeof *found) == 0) {
-        m->first_light = b->nl - n;
+    /* a frame has a few sets of lights and most models share one: a set
+     * already in the frame's table is used again, so the same lights are the
+     * same place in it */
+    for (i = 0; n && i + n <= b->nl; i++)
+        if (memcmp(&b->l[i], found, n * sizeof *found) == 0) break;
+    if (n && i + n <= b->nl) {
+        m->first_light = i;
         m->lights = n;
     } else if (n && b->nl + n <= MAX_LIGHTS) {
         memcpy(&b->l[b->nl], found, n * sizeof *found);
@@ -431,7 +435,40 @@ static void feed_end(CpuState* s, int drawn)
     }
 }
 
-static const NinjaFeed g_ninja_feed = {feed_model, feed_texture, feed_end};
+/* The drawer returns. What it drew at once is at the GPU now; what GX
+ * recorded into a display list gets there when feed_sent says so. */
+static void feed_end(CpuState* s, unsigned visit, int drawn, int recorded, unsigned strips)
+{
+    ModelFrame* b = &g_mf[g_build];
+    SoaHostModel* m;
+    unsigned index;
+    (void)s;
+    (void)visit;
+    if (!b->n_open) return; /* watching began inside a drawer */
+    b->n_open--;
+    if (b->n_open >= MAX_OPEN || (index = b->open[b->n_open]) >= b->n) return;
+    m = &b->m[index];
+    m->drawn = drawn ? 1u : 0u;
+    if (!recorded && strips) feed_strips(b, m, strips);
+}
+
+/* The display list a visit's strips were recorded into is called, and the
+ * parser is past the last of them. */
+static void feed_sent(CpuState* s, unsigned visit, unsigned strips)
+{
+    ModelFrame* b = &g_mf[g_build];
+    unsigned lo = 0, hi = b->n;
+    (void)s;
+    if (b->frame != (long)gx_frame_count() || !strips) return;
+    while (lo < hi) { /* the visits' numbers climb */
+        unsigned mid = (lo + hi) / 2;
+        if (b->visit[mid] < visit) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < b->n && b->visit[lo] == visit) feed_strips(b, &b->m[lo], strips);
+}
+
+static const NinjaFeed g_ninja_feed = {feed_model, feed_texture, feed_end, feed_sent};
 
 void soa_host_watch_models(int on)
 {

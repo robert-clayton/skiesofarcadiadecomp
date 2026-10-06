@@ -239,6 +239,26 @@ void gx_set_frame_hook(void (*fn)(CpuState*, unsigned))
     g_frame_hook = fn;
 }
 
+/* Something that follows the game's display lists: runtime/ninja.c, for the
+ * models whose strips the game records into a list instead of drawing them
+ * (ninja.c's draw modes). `recording` is told when GXBeginDisplayList starts
+ * a list at `addr`, whatever that buffer held before. `called` is asked
+ * before the list at `addr`, `size` bytes long, is parsed, and again each
+ * time the parse reaches the point it named: `done` bytes are parsed, GX's
+ * registers are as the list's commands have left them so far, and it answers
+ * how many more bytes to parse before the next ask -- 0, or more than are
+ * left, for the rest. Pointers for the same reason as the frame hook above:
+ * the renderer links without ninja.c. */
+static void (*g_list_recording)(CpuState*, uint32_t);
+static uint32_t (*g_list_called)(CpuState*, uint32_t, uint32_t, uint32_t);
+
+void gx_set_list_hooks(void (*recording)(CpuState* s, uint32_t addr),
+                       uint32_t (*called)(CpuState* s, uint32_t addr, uint32_t size, uint32_t done))
+{
+    g_list_recording = recording;
+    g_list_called = called;
+}
+
 void gx_set_frame_limit(unsigned frames)
 {
     g_frame_limit = frames;
@@ -545,10 +565,20 @@ static size_t parse(CpuState* s, const uint8_t* p, size_t len, int in_display_li
                 if (p == g_pipe && size) cap_inline_list(len - off, body, size);
             }
             if (body && !in_display_list) {
-                size_t done;
+                size_t done = 0;
                 g_list_addr = addr; /* the draws inside say which list they came through (gx_draw_list) */
                 g_in_list = 1;
-                done = parse(s, body, size, 1);
+                if (!g_list_called) done = parse(s, body, size, 1);
+                else
+                    for (;;) { /* in the pieces the hook asks for (gx_set_list_hooks) */
+                        uint32_t left = size - (uint32_t)done, want = g_list_called(s, addr, size, (uint32_t)done);
+                        size_t n;
+                        if (!left) break;
+                        if (!want || want > left) want = left;
+                        n = parse(s, body + done, want, 1);
+                        done += n;
+                        if (n != want) break;
+                    }
                 g_in_list = 0;
                 if (size) { g_dl_nonempty++; g_dl_call_bytes += size; }
                 if (done != size) {
@@ -640,6 +670,7 @@ static void dl_bracket(CpuState* s)
     int rec = s->gpr[13] && mem_r32(s, s->gpr[13] + (uint32_t)GX_CPU_FIFO_SDA) == GX_DL_FIFO;
     if (rec && !g_dl_rec) {
         g_dl_recorded++;
+        if (g_list_recording) g_list_recording(s, 0x80000000u | (g_pi_fifo[0] & 0x03FFFFFFu));
         if (g_pipe_len) {
             static int warned;
             if (!warned++) fprintf(stderr, "[gx] a display list began with %zu byte(s) of a command unparsed\n", g_pipe_len);
@@ -807,6 +838,18 @@ unsigned gx_frame_count(void) { return g_frame; }
 const uint32_t* gx_cp_regs(void) { return g_cp; }
 const uint32_t* gx_xf_regs(void) { return g_xf; }
 const uint32_t* gx_bp_regs(void) { return g_bp; }
+
+/* Draws parsed so far, and whether the game is recording a display list
+ * right now (between GXBeginDisplayList and GXEndDisplayList), with the
+ * guest address its next byte goes to: what it draws meanwhile reaches the
+ * GPU only when the list is called. */
+unsigned long long gx_draw_count(void) { return g_draws; }
+
+int gx_list_recording(uint32_t* at)
+{
+    *at = 0x80000000u | (g_pi_fifo[2] & 0x03FFFFFFu);
+    return g_dl_rec;
+}
 
 /* 1, with the list's address, when the draw being parsed came through a
  * display list; 0 for a draw in the stream itself. */

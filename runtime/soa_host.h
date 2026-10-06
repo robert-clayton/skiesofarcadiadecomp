@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 4u
+#define SOA_HOST_ABI 5u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -95,14 +95,23 @@ SOA_HOST_API unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rat
 /* The rumble the game asks of port 1 now: 0 off, up to 65535. */
 SOA_HOST_API unsigned soa_host_motor(void);
 
-/* ---- the game's models (ABI 2; the lists in each record since 3, GX's state and the lights since 4) ----------
+/* ---- the game's models (ABI 2; the lists in each record since 3, GX's state and the lights since 4,
+ * ---- the draw mode and the order since 5) ----------------------------------------------------------
  * The chunk models Sega's Ninja library draws (runtime/ninja.h), so a host
- * can rebuild the scene with its own renderer: per frame, each model the
- * game handed a drawer -- culled or not -- with its matrices and the
- * textures its chunks selected. The host reads the model data and the
+ * can rebuild the scene with its own renderer: per frame, each time the
+ * game handed a model to a drawer -- culled or not -- with its matrices and
+ * the textures its chunks selected. The host reads the model data and the
  * images themselves with soa_host_read: the layouts are Ninja's, described
  * in soa-ue5's docs/ninja-models.md. Off until soa_host_watch_models(1); it
- * costs a copy of two matrices per model drawn. */
+ * costs a copy of two matrices per model drawn.
+ *
+ * A model is usually handed over twice a frame, at the same place: once
+ * for its opaque strips and once for the ones that use alpha (`mode`). The
+ * second kind the game does not draw then but records and draws later, in
+ * its own order, so the records come in the order the drawers ran and
+ * `order` says when each one's strips were really drawn. */
+#define SOA_HOST_NOT_SENT 0xFFFFFFFFu
+
 typedef struct {
     uint32_t model;         /* the NJS_CNK_MODEL's guest address: vlist, plist, centre, radius */
     uint32_t drawer;        /* which of Ninja's four drawers took it (0-3) */
@@ -112,10 +121,21 @@ typedef struct {
     uint32_t textures;
     float modelview[12];    /* 3x4, rows: the model's space to the game's view space */
     float camera[12];       /* 3x4, rows: the view matrix, world to view space (Ninja's stack level 1) */
-    /* How GX was set to shade it, as its last strip left the registers when
-     * the drawer returned. Not set for a model the drawer culled (drawn 0):
-     * it sent nothing, so these are whatever the model before it left. */
+    uint32_t mode;          /* which of its strips the drawer was set to draw: 1 all, 2 the opaque ones, 3 the
+                               ones that use alpha (a strip chunk's flag 0x08), 4 those twice (culled the
+                               other way round, then the usual way), 5 and 6 the first and the second of
+                               those passes alone; anything else, none */
+    uint32_t strip_and;     /* Ninja's constant attribute: each strip chunk's flags are and-ed with strip_and */
+    uint32_t strip_or;      /* and or-ed with strip_or before the mode is applied, so 0x08 in strip_or makes
+                               every strip one that uses alpha (a model being faded). 0xFF and 0 when off */
     uint32_t drawn;         /* 0: the drawer's clip test dropped it */
+    uint32_t strips;        /* how many strips it sent the GPU this frame: 0 for a model that was culled, had
+                               none of the mode's kind, or was recorded into a list the game never called */
+    uint32_t order;         /* its place among the frame's records in the order their strips reached the GPU,
+                               from 0: the order translucent ones were laid over each other.
+                               SOA_HOST_NOT_SENT when strips is 0 */
+    /* How GX was set to shade it, as its last strip left the registers.
+     * Set only when strips is not 0. */
     uint32_t channels;      /* GXSetNumChans: colour channels in use (0: no colour reaches the combiner) */
     uint32_t chan_colour;   /* GXSetChanCtrl for COLOR0 (XF 0x100E): bit 0 material from the vertex colour
                                (else the register), bit 1 lighting on, bits 2-5 and 11-14 the lights
@@ -130,6 +150,12 @@ typedef struct {
                                (GX_CC_*: 8 the texture, 10 the rasterised colour, 15 zero), bias 16-17,
                                subtract 18, clamp 19, scale 20-21 (x1, x2, x4, x1/2), destination 22-23 */
     uint32_t tev_alpha;     /* stage 0's alpha combiner (BP 0xC1) */
+    uint32_t fog[5];        /* GXSetFog, as BP 0xEE to 0xF2 hold it: A; B's mantissa; B's shift; C in the low
+                               20 bits, with bit 20 an orthographic projection and bits 21-23 the type (0
+                               off, 2 linear, 4 exponential, 5 its square, 6 and 7 those backwards); and the
+                               colour, RGB. A and C are 20-bit floats: sign, 8 bits of exponent, 11 of
+                               mantissa. Under a perspective projection a pixel's fog is the type's curve
+                               of A / (B - its screen depth) - C */
     uint32_t first_light;   /* the lights chan_colour names: [first_light, first_light + lights) of the */
     uint32_t lights;        /* frame's, in the order of their GX indices */
 } SoaHostModel;

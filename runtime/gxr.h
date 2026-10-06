@@ -28,6 +28,11 @@ const uint32_t* gx_cp_regs(void);
 const uint32_t* gx_xf_regs(void);
 const uint32_t* gx_bp_regs(void);
 int gx_draw_list(uint32_t* addr); /* the draw came through a display list, and which */
+unsigned long long gx_draw_count(void); /* draws parsed so far */
+int gx_list_recording(uint32_t* at);     /* a display list is being recorded, and where its next byte goes */
+/* follow the game's display lists: one being recorded, and one parsed in the pieces `called` asks for (gx.c) */
+void gx_set_list_hooks(void (*recording)(CpuState* s, uint32_t addr),
+                       uint32_t (*called)(CpuState* s, uint32_t addr, uint32_t size, uint32_t done));
 /* Frames presented so far, counted from 0: what SOA_FRAMES, SOA_SNAP and
  * SOA_PAD all count. SOA_FRAMES=N therefore runs the frames numbered 0..N-1
  * and stops before presenting frame N -- SOA_SNAP=N SOA_FRAMES=N writes
