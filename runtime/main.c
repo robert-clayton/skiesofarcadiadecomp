@@ -1082,15 +1082,25 @@ static void print_mode(int windowed, int rendering, int scripted, unsigned frame
         snprintf(snaps, sizeof snaps, ", a snapshot to %s every %u frames", fdir && *fdir ? fdir : "build/frames",
                  snap);
     if (frames) STOP_ADD(stop, n, "stopping after %u frames", frames);
+#ifdef SOA_HOST
+    if (windowed) STOP_ADD(stop, n, "%sthe host ends it", n ? ", " : "");
+#else
     if (windowed) STOP_ADD(stop, n, "%sEscape or closing the window quits", n ? ", " : "");
+#endif
     if (watchdog_secs)
         STOP_ADD(stop, n, "%swatchdog if no frame for %us (SOA_WATCHDOG=0 disables it)", n ? ", " : "",
                  watchdog_secs);
     if (!n) snprintf(stop, sizeof stop, "nothing will stop it -- Ctrl-C to quit");
+#ifdef SOA_HOST
+    if (windowed) /* host.c: the program that loaded the runtime shows the frames and gives the input */
+        fprintf(stderr, "[run] hosted%s%s; %s\n",
+                rendering ? "" : " (blank until SOA_RENDER=1: nothing is drawn without it)", snaps, stop);
+#else
     if (windowed)
         fprintf(stderr, "[run] window%s%s; %s; keys X=A Z=B C=X V=Y, Enter or Space=START, Q=L E=R R=Z, "
                         "T/F/G/H=D-pad up/left/down/right, arrows or WASD=stick, IJKL=C-stick\n",
                 rendering ? "" : " (blank until SOA_RENDER=1: nothing is drawn without it)", snaps, stop);
+#endif
     else if (snap && rendering)
         fprintf(stderr, "[run] headless%s; %s\n", snaps, stop);
     else if (snap)
@@ -1425,7 +1435,7 @@ int main(int argc, char** argv)
         int want = rendering && !snap && !scripted;
         unsigned secs;
         if (w) want = atoi(w) != 0;
-#if !defined(_WIN32) && !defined(SOA_SDL)
+#if !defined(_WIN32) && !defined(SOA_SDL) && !defined(SOA_HOST)
         want = 0; /* window.c is stubs off Windows without SDL; do not promise a window or a quit key */
 #endif
         gx_set_frame_limit(frames);

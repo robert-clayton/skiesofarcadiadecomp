@@ -4,7 +4,8 @@
  * kHz). The meter, the arrival rate, SOA_WAV's file, the mute and the report
  * are every platform's (portability L9: a headless Linux run writes its
  * WAV); the device is a backend, waveOut on Windows, SDL3's audio stream
- * where the build has SDL (L10's audio_sdl.c), and none otherwise.
+ * where the build has SDL (L10's audio_sdl.c), the host's queue in a host
+ * build (host.c), and none otherwise.
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include "plat.h"
@@ -133,6 +134,32 @@ static void audio_play(const uint8_t* be_rl, unsigned bytes)
     if (audio_sdl_queued() + n * 4 > BLOCKS * n * 4) { note_drop(1); return; } /* the device is behind; drop */
     to_device(be_rl, n, g_out);
     if (audio_sdl_put(g_out, n * 4)) {
+        g_pushed++;
+        note_drop(0);
+    } else {
+        note_drop(1);
+    }
+}
+#elif defined(SOA_HOST)
+/* A queue the host empties (host.c, soa_host_audio), as long as SDL's 24
+ * blocks: a block goes when it is full, as it does there. */
+int audio_host_open(unsigned rate);
+int audio_host_put(const int16_t* lr, unsigned bytes);
+
+static int16_t g_out[BLOCK_BYTES / 2];
+
+static int audio_open(unsigned rate)
+{
+    if (getenv("SOA_NOSOUND")) return 0;
+    return audio_host_open(rate);
+}
+
+/* One block to the queue, at most BLOCK_BYTES of it. */
+static void audio_play(const uint8_t* be_rl, unsigned bytes)
+{
+    unsigned n = bytes / 4;
+    to_device(be_rl, n, g_out);
+    if (audio_host_put(g_out, n * 4)) {
         g_pushed++;
         note_drop(0);
     } else {

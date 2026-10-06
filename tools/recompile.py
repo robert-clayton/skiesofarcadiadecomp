@@ -608,6 +608,13 @@ def main() -> int:
         help="gcc or clang: libsoa_runtime.so, libsoa_game.so and a launcher, as Android loads them "
         "(specs/android.md L12a), into <the profile's directory>-split; implies --no-decomp",
     )
+    ap.add_argument(
+        "--host",
+        action="store_true",
+        help="--split for a program that loads the runtime and is its window and sound "
+        "(runtime/soa_host.h): SOA_HOST in place of SDL, into <the profile's directory>-host; "
+        "implies --split",
+    )
     args = ap.parse_args()
     prof = toolchain.profile(args.cc)
     # An Android profile builds the game library alone, as the player's PC
@@ -616,6 +623,10 @@ def main() -> int:
     android = prof in toolchain.ANDROID
     if android:
         args.no_decomp = True
+    if args.host:
+        args.split = True
+        if args.out is None:
+            args.out = Path(prof.out + "-host")
     if args.split:
         if prof.name not in ("gcc", "clang"):
             ap.error("--split builds Android's arrangement on Linux: --cc gcc or --cc clang")
@@ -710,7 +721,9 @@ def main() -> int:
         (args.out / "runtime_seam.c").write_text(
             seam.runtime_seam_c(the_seam, hle, seam.record(True, baked)), encoding="utf-8"
         )
-        (args.out / "runtime.map").write_text(seam.version_script(the_seam, hle), encoding="utf-8")
+        (args.out / "runtime.map").write_text(
+            seam.version_script(the_seam, hle, host=args.host), encoding="utf-8"
+        )
         (args.out / "launcher.c").write_text(seam.LAUNCHER_C, encoding="utf-8")
     print(
         "system files: built in (disc_sys.c; never share this build)"
@@ -840,7 +853,11 @@ def main() -> int:
         # Without it the Linux build is as before: headless, the run's own
         # watchdog and SOA_WAV.
         sdl = None
-        if prof.name in ("gcc", "clang"):
+        if args.host:
+            # The program that loads the runtime is the window and the sound
+            # (runtime/host.c), and may well carry an SDL of its own.
+            print("window and sound: the host's (runtime/soa_host.h)")
+        elif prof.name in ("gcc", "clang"):
             if fetch_sdl.available(VENDOR):
                 bad = fetch_sdl.verify(VENDOR)
                 if bad:
@@ -857,6 +874,8 @@ def main() -> int:
                 )
         failed_mods = 0
         defines = ("/DSOA_NO_DECOMP=1",) if args.no_decomp else ()
+        if args.host:
+            defines += ("/DSOA_HOST=1",)
         if android:
             plan = android_link_plan(prof, args.out)
         elif args.split:
