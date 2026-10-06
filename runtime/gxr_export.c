@@ -189,6 +189,27 @@ static void export_draw(const DrawCmd* D, unsigned count)
             "\"const_alpha\":%d},\"z\":{\"en\":%d,\"upd\":%d,\"func\":%u,\"early\":%d},\"fog\":%u,",
             D->px.blend_en, D->px.logic_en, D->px.sfac, D->px.dfac, D->px.subtract, D->px.lop, D->px.col_upd,
             D->px.alpha_upd, D->px.const_alpha, D->px.z_en, D->px.z_upd, D->px.z_func, D->px.ztop, D->px.fog_type);
+    /* The lighting channels as the transform unit has them (GXSetChanCtrl,
+     * GXSetChanAmbColor, GXSetChanMatColor), and each light a channel names
+     * (GXInitLight*: colour, the two attenuation triples, position and
+     * direction, in view space). */
+    {
+        unsigned mask = 0, c;
+        fprintf(g_json, "\"chan\":{\"n\":%u,\"ctl\":[%u,%u,%u,%u],\"amb\":[%u,%u],\"mat\":[%u,%u],\"lights\":[", xf[0x1009] & 3,
+                xf[0x100E], xf[0x100F], xf[0x1010], xf[0x1011], xf[0x100A], xf[0x100B], xf[0x100C], xf[0x100D]);
+        for (c = 0; c < 4; c++) {
+            uint32_t ctl = xf[0x100E + c];
+            if ((c & 1) < (xf[0x1009] & 3) && ((ctl >> 1) & 1)) mask |= ((ctl >> 2) & 15) | (((ctl >> 11) & 15) << 4);
+        }
+        for (i = 0, k = 0; i < 8; i++) {
+            unsigned r, base = 0x600 + 16 * i;
+            if (!((mask >> i) & 1)) continue;
+            fprintf(g_json, "%s{\"i\":%u,\"col\":%u,\"v\":[", k++ ? "," : "", i, xf[base + 3]);
+            for (r = 4; r < 16; r++) fprintf(g_json, "%s%.9g", r > 4 ? "," : "", xff(xf, base + r));
+            fprintf(g_json, "]}");
+        }
+        fprintf(g_json, "]},");
+    }
     fprintf(g_json,
             "\"tev\":{\"stages\":%u,\"fast_c\":%u,\"fast_a\":%u,\"used_tex\":%u,\"used_chan\":%u,"
             "\"alpha\":[%d,%d,%u,%u,%u,%d],\"regs\":[",

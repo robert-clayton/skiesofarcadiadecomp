@@ -285,13 +285,17 @@ unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rate)
  * so what the host reads is always whole. */
 #define MAX_MODELS 8192
 #define MAX_TEXTURES 16384
+#define MAX_LIGHTS 1024
+#define MAX_OPEN 8 /* drawers inside drawers; none are seen, but a begin and its end must still pair */
 
 typedef struct {
     long frame;
-    unsigned n, nt;
+    unsigned n, nt, nl;
+    unsigned open[MAX_OPEN], n_open; /* the models whose drawers have not returned yet */
     float proj[7];
     SoaHostModel m[MAX_MODELS];
     SoaHostTexture t[MAX_TEXTURES];
+    SoaHostLight l[MAX_LIGHTS];
 } ModelFrame;
 
 static ModelFrame g_mf[2];
@@ -317,7 +321,7 @@ static ModelFrame* building(CpuState* s)
         memset(b->proj, 0, sizeof b->proj);
         b->proj[6] = 1.0f; /* none seen yet */
         b->frame = f;
-        b->n = b->nt = 0;
+        b->n = b->nt = b->nl = b->n_open = 0;
     }
     return b;
 }
@@ -336,8 +340,12 @@ static void feed_model(CpuState* s, unsigned drawer, uint32_t model, uint32_t vl
         for (i = 0; i < 6; i++) memcpy(&b->proj[i], &xf[0x1020 + i], 4);
         b->proj[6] = 0.0f;
     }
+    /* a model past the array still opens, so its end pairs with it */
+    if (b->n_open < MAX_OPEN) b->open[b->n_open] = b->n < MAX_MODELS ? b->n : ~0u;
+    b->n_open++;
     if (b->n >= MAX_MODELS) { g_mf_dropped++; return; }
     m = &b->m[b->n++];
+    memset(m, 0, sizeof *m);
     m->model = model;
     m->drawer = drawer;
     m->vlist = vlist;
@@ -366,7 +374,64 @@ static void feed_texture(CpuState* s, uint32_t id, uint32_t image, uint32_t form
     b->m[b->n - 1].textures++;
 }
 
-static const NinjaFeed g_ninja_feed = {feed_model, feed_texture};
+/* A light's sixteen XF words from its fourth on: the colour, then twelve
+ * floats. */
+static void read_light(const uint32_t* xf, unsigned index, SoaHostLight* out)
+{
+    const uint32_t* L = xf + 0x600 + 16 * index;
+    out->index = index;
+    out->colour = L[3];
+    memcpy(out->a, L + 4, sizeof out->a);
+    memcpy(out->k, L + 7, sizeof out->k);
+    memcpy(out->position, L + 10, sizeof out->position);
+    memcpy(out->direction, L + 13, sizeof out->direction);
+}
+
+/* The drawer returns: GX's registers are as the model's last strip set
+ * them, which is how the model was shaded. */
+static void feed_end(CpuState* s, int drawn)
+{
+    ModelFrame* b = &g_mf[g_build];
+    const uint32_t* xf = gx_xf_regs();
+    const uint32_t* bp = gx_bp_regs();
+    SoaHostModel* m;
+    SoaHostLight found[8];
+    unsigned index, mask, i, n = 0;
+    (void)s;
+    if (!b->n_open) return; /* watching began inside a drawer */
+    b->n_open--;
+    if (b->n_open >= MAX_OPEN || (index = b->open[b->n_open]) >= b->n) return;
+    m = &b->m[index];
+    m->drawn = drawn ? 1u : 0u;
+    if (!drawn) return;
+    m->channels = xf[0x1009] & 3;
+    m->chan_colour = xf[0x100E];
+    m->chan_alpha = xf[0x1010];
+    m->ambient = xf[0x100A];
+    m->material = xf[0x100C];
+    m->tev_stages = ((bp[0x00] >> 10) & 15) + 1;
+    m->tev_colour = bp[0xC0] & 0x00FFFFFFu;
+    m->tev_alpha = bp[0xC1] & 0x00FFFFFFu;
+    if (!m->channels || !(m->chan_colour & 2)) return;
+    mask = ((m->chan_colour >> 2) & 15) | (((m->chan_colour >> 11) & 15) << 4);
+    for (i = 0; i < 8; i++)
+        if ((mask >> i) & 1) read_light(xf, i, &found[n++]);
+    /* models drawn one after another mostly share their lights: the last
+     * run in the frame's table is reused when it is the same */
+    if (n && b->nl >= n && memcmp(&b->l[b->nl - n], found, n * sizeof *found) == 0) {
+        m->first_light = b->nl - n;
+        m->lights = n;
+    } else if (n && b->nl + n <= MAX_LIGHTS) {
+        memcpy(&b->l[b->nl], found, n * sizeof *found);
+        m->first_light = b->nl;
+        m->lights = n;
+        b->nl += n;
+    } else if (n) {
+        g_mf_dropped++;
+    }
+}
+
+static const NinjaFeed g_ninja_feed = {feed_model, feed_texture, feed_end};
 
 void soa_host_watch_models(int on)
 {
@@ -374,23 +439,27 @@ void soa_host_watch_models(int on)
 }
 
 long soa_host_models(SoaHostModel* models, unsigned max_models, unsigned* n_models, SoaHostTexture* textures,
-                     unsigned max_textures, unsigned* n_textures, float projection[7])
+                     unsigned max_textures, unsigned* n_textures, SoaHostLight* lights, unsigned max_lights,
+                     unsigned* n_lights, float projection[7])
 {
     long frame = -1;
-    unsigned n = 0, nt = 0;
+    unsigned n = 0, nt = 0, nl = 0;
     plat_lock(&g_mf_lock);
     if (g_ready >= 0) {
         const ModelFrame* r = &g_mf[g_ready];
         n = r->n < max_models ? r->n : max_models;
         nt = r->nt < max_textures ? r->nt : max_textures;
+        nl = r->nl < max_lights ? r->nl : max_lights;
         if (models) memcpy(models, r->m, n * sizeof *models);
         if (textures) memcpy(textures, r->t, nt * sizeof *textures);
+        if (lights) memcpy(lights, r->l, nl * sizeof *lights);
         if (projection) memcpy(projection, r->proj, sizeof r->proj);
         frame = r->frame;
     }
     plat_unlock(&g_mf_lock);
     if (n_models) *n_models = n;
     if (n_textures) *n_textures = nt;
+    if (n_lights) *n_lights = nl;
     return frame;
 }
 

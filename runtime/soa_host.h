@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 3u
+#define SOA_HOST_ABI 4u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -95,7 +95,7 @@ SOA_HOST_API unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rat
 /* The rumble the game asks of port 1 now: 0 off, up to 65535. */
 SOA_HOST_API unsigned soa_host_motor(void);
 
-/* ---- the game's models (ABI 2; the lists in each record since 3) --------------------------------------------
+/* ---- the game's models (ABI 2; the lists in each record since 3, GX's state and the lights since 4) ----------
  * The chunk models Sega's Ninja library draws (runtime/ninja.h), so a host
  * can rebuild the scene with its own renderer: per frame, each model the
  * game handed a drawer -- culled or not -- with its matrices and the
@@ -112,7 +112,39 @@ typedef struct {
     uint32_t textures;
     float modelview[12];    /* 3x4, rows: the model's space to the game's view space */
     float camera[12];       /* 3x4, rows: the view matrix, world to view space (Ninja's stack level 1) */
+    /* How GX was set to shade it, as its last strip left the registers when
+     * the drawer returned. Not set for a model the drawer culled (drawn 0):
+     * it sent nothing, so these are whatever the model before it left. */
+    uint32_t drawn;         /* 0: the drawer's clip test dropped it */
+    uint32_t channels;      /* GXSetNumChans: colour channels in use (0: no colour reaches the combiner) */
+    uint32_t chan_colour;   /* GXSetChanCtrl for COLOR0 (XF 0x100E): bit 0 material from the vertex colour
+                               (else the register), bit 1 lighting on, bits 2-5 and 11-14 the lights
+                               (0-3, 4-7), bit 6 ambient from the vertex colour, bits 7-8 the diffuse
+                               function (0 none, 1 signed, 2 clamped), bits 9-10 attenuation (1 specular,
+                               3 spot and distance, else none) */
+    uint32_t chan_alpha;    /* the same for ALPHA0 (XF 0x1010) */
+    uint32_t ambient;       /* GXSetChanAmbColor, RGBA */
+    uint32_t material;      /* GXSetChanMatColor, RGBA */
+    uint32_t tev_stages;    /* GXSetNumTevStages */
+    uint32_t tev_colour;    /* stage 0's colour combiner (BP 0xC0): d in bits 0-3, c 4-7, b 8-11, a 12-15
+                               (GX_CC_*: 8 the texture, 10 the rasterised colour, 15 zero), bias 16-17,
+                               subtract 18, clamp 19, scale 20-21 (x1, x2, x4, x1/2), destination 22-23 */
+    uint32_t tev_alpha;     /* stage 0's alpha combiner (BP 0xC1) */
+    uint32_t first_light;   /* the lights chan_colour names: [first_light, first_light + lights) of the */
+    uint32_t lights;        /* frame's, in the order of their GX indices */
 } SoaHostModel;
+
+/* One GX light as a model's draws had it (GXInitLight*), in the game's view
+ * space. A directional light is a position far away: the direction to it
+ * is `position`, normalised. */
+typedef struct {
+    uint32_t index;         /* which of GX's eight */
+    uint32_t colour;        /* RGBA */
+    float a[3];             /* angle attenuation (spot): a0 + a1 cos + a2 cos^2 */
+    float k[3];             /* distance attenuation: 1 / (k0 + k1 d + k2 d^2) */
+    float position[3];
+    float direction[3];
+} SoaHostLight;
 
 typedef struct {
     uint32_t id;            /* the texture id the model's chunks name */
@@ -126,14 +158,15 @@ typedef struct {
 
 SOA_HOST_API void soa_host_watch_models(int on);
 
-/* The newest whole frame's models: up to max_models of them and max_textures
- * of their textures into the arrays given, how many in *n_models and
- * *n_textures, and the GX projection they were drawn with in projection[7]
- * (GXSetProjection's six parameters, then 0; or 1 when the frame drew under
- * no perspective projection). Returns that frame's number, or -1 before the
- * first. */
+/* The newest whole frame's models: up to max_models of them, max_textures of
+ * their textures and max_lights of their lights into the arrays given, how
+ * many in *n_models, *n_textures and *n_lights, and the GX projection they
+ * were drawn with in projection[7] (GXSetProjection's six parameters, then
+ * 0; or 1 when the frame drew under no perspective projection). Returns that
+ * frame's number, or -1 before the first. */
 SOA_HOST_API long soa_host_models(SoaHostModel* models, unsigned max_models, unsigned* n_models, SoaHostTexture* textures,
-                                  unsigned max_textures, unsigned* n_textures, float projection[7]);
+                                  unsigned max_textures, unsigned* n_textures, SoaHostLight* lights, unsigned max_lights,
+                                  unsigned* n_lights, float projection[7]);
 
 /* bytes of the game's memory at a guest address (0x80000000 up), as the
  * game sees them -- big-endian -- into out; 0 for a range outside MEM1, or

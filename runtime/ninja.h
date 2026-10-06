@@ -22,6 +22,10 @@ typedef struct {
      * after them */
     void (*texture)(CpuState* s, uint32_t id, uint32_t image, uint32_t format, uint32_t palette, uint32_t width,
                     uint32_t height, const char* name);
+    /* the drawer the last `model` entered is returning: drawn says whether
+     * it drew (its return value is not -1, the clip test's "out of view").
+     * GX's state is now as the model's last strip left it. May be NULL. */
+    void (*end)(CpuState* s, int drawn);
 } NinjaFeed;
 
 void ninja_set_feed(const NinjaFeed* feed);

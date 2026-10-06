@@ -108,6 +108,7 @@ static void model_begin(CpuState* s, unsigned drawer)
 static void model_end(CpuState* s)
 {
     char line[64];
+    if (g_feed && g_feed->end) g_feed->end(s, (int32_t)s->gpr[3] != -1);
     if (!gxr_export_wants_notes()) return;
     snprintf(line, sizeof line, "{\"kind\":\"model_end\",\"ret\":%d,\"texlist\":%u}", (int)s->gpr[3], mem_r32(s, NJ_TEXLIST));
     gxr_export_note(line);
