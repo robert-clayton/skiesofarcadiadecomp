@@ -29,8 +29,10 @@
 #define NJ_CURRENT 0x80347EB4u /* r13-26732: the current 3x4 matrix, 48 bytes */
 /* Ninja's draw state (fn_8029D0F4 reads it for a texture chunk): +68 is the
  * current NJS_TEXLIST, whose entries are {name, attr, memlist}; a memlist's
- * +12 is the texture's info, with the GX format at +4, the size at +16 and
- * +20 and the image at +32. */
+ * +12 is the texture's info, with the GX format at +4, a palette's colour
+ * format at +12, the size at +16 and +20 and the image at +32. A palettized
+ * image (C4, C8) starts with its palette -- 16 or 256 two-byte entries --
+ * and its texels follow, which is where GX is pointed. */
 #define NJ_TEXLIST 0x803457ECu
 
 static const NinjaFeed* g_feed;
@@ -77,7 +79,7 @@ static void model_begin(CpuState* s, unsigned drawer)
         read_matrix(s, top, mv);
         if (depth >= 2) read_matrix(s, top - 48u * (depth - 1u), cam);
         else memcpy(cam, mv, sizeof cam);
-        g_feed->model(s, drawer, model, mv, cam);
+        g_feed->model(s, drawer, model, mem_r32(s, model), mem_r32(s, model + 4), mv, cam);
     }
     if (gxr_export_wants_notes()) {
         /* Every level of the stack under the top, so where the camera sits
@@ -146,13 +148,16 @@ void hook_8029D0F4(CpuState* s)
     }
     if (!in_ram(info)) info = 0;
     if (g_feed && info)
-        g_feed->texture(s, id, mem_r32(s, info + 32), mem_r32(s, info + 4), mem_r32(s, info + 16), mem_r32(s, info + 20), name);
+        g_feed->texture(s, id, mem_r32(s, info + 32), mem_r32(s, info + 4), mem_r32(s, info + 12), mem_r32(s, info + 16),
+                        mem_r32(s, info + 20), name);
     if (notes) {
         char line[256];
         if (info)
             snprintf(line, sizeof line,
-                     "{\"kind\":\"tex\",\"id\":%u,\"texlist\":%u,\"name\":\"%s\",\"fmt\":%u,\"w\":%u,\"h\":%u,\"img\":%u}", id,
-                     list, name, mem_r32(s, info + 4), mem_r32(s, info + 16), mem_r32(s, info + 20), mem_r32(s, info + 32));
+                     "{\"kind\":\"tex\",\"id\":%u,\"texlist\":%u,\"name\":\"%s\",\"fmt\":%u,\"tlut\":%u,\"w\":%u,\"h\":%u,"
+                     "\"img\":%u}",
+                     id, list, name, mem_r32(s, info + 4), mem_r32(s, info + 12), mem_r32(s, info + 16), mem_r32(s, info + 20),
+                     mem_r32(s, info + 32));
         else
             snprintf(line, sizeof line, "{\"kind\":\"tex\",\"id\":%u,\"texlist\":%u}", id, list);
         gxr_export_note(line);

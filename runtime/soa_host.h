@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 2u
+#define SOA_HOST_ABI 3u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -95,7 +95,7 @@ SOA_HOST_API unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rat
 /* The rumble the game asks of port 1 now: 0 off, up to 65535. */
 SOA_HOST_API unsigned soa_host_motor(void);
 
-/* ---- the game's models (ABI 2) --------------------------------------------
+/* ---- the game's models (ABI 2; the lists in each record since 3) --------------------------------------------
  * The chunk models Sega's Ninja library draws (runtime/ninja.h), so a host
  * can rebuild the scene with its own renderer: per frame, each model the
  * game handed a drawer -- culled or not -- with its matrices and the
@@ -106,6 +106,8 @@ SOA_HOST_API unsigned soa_host_motor(void);
 typedef struct {
     uint32_t model;         /* the NJS_CNK_MODEL's guest address: vlist, plist, centre, radius */
     uint32_t drawer;        /* which of Ninja's four drawers took it (0-3) */
+    uint32_t vlist, plist;  /* its vertex and polygon chunk lists when it was drawn: what identifies
+                               the model, since one struct can be refilled for piece after piece */
     uint32_t first_texture; /* its textures: [first_texture, first_texture + textures) of the frame's */
     uint32_t textures;
     float modelview[12];    /* 3x4, rows: the model's space to the game's view space */
@@ -114,8 +116,10 @@ typedef struct {
 
 typedef struct {
     uint32_t id;            /* the texture id the model's chunks name */
-    uint32_t image;         /* the GX image's guest address */
-    uint32_t format;        /* the GX format: 14 CMPR, 5 RGB5A3, 6 RGBA8, 4 RGB565, 8 C4 ... */
+    uint32_t image;         /* the image's guest address; a palettized one (C4, C8) starts with its
+                               palette, 16 or 256 two-byte entries, and its texels follow */
+    uint32_t format;        /* the GX format: 14 CMPR, 5 RGB5A3, 6 RGBA8, 4 RGB565, 8 C4, 9 C8 ... */
+    uint32_t palette;       /* a palette's colour format: 0 IA8, 1 RGB565, 2 RGB5A3 */
     uint16_t width, height;
     char name[24];          /* the texture list's name for it */
 } SoaHostTexture;

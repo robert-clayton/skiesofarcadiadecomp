@@ -322,7 +322,8 @@ static ModelFrame* building(CpuState* s)
     return b;
 }
 
-static void feed_model(CpuState* s, unsigned drawer, uint32_t model, const float modelview[12], const float camera[12])
+static void feed_model(CpuState* s, unsigned drawer, uint32_t model, uint32_t vlist, uint32_t plist, const float modelview[12],
+                       const float camera[12])
 {
     ModelFrame* b = building(s);
     SoaHostModel* m;
@@ -339,13 +340,16 @@ static void feed_model(CpuState* s, unsigned drawer, uint32_t model, const float
     m = &b->m[b->n++];
     m->model = model;
     m->drawer = drawer;
+    m->vlist = vlist;
+    m->plist = plist;
     m->first_texture = b->nt;
     m->textures = 0;
     memcpy(m->modelview, modelview, sizeof m->modelview);
     memcpy(m->camera, camera, sizeof m->camera);
 }
 
-static void feed_texture(CpuState* s, uint32_t id, uint32_t image, uint32_t format, uint32_t width, uint32_t height, const char* name)
+static void feed_texture(CpuState* s, uint32_t id, uint32_t image, uint32_t format, uint32_t palette, uint32_t width,
+                         uint32_t height, const char* name)
 {
     ModelFrame* b = building(s);
     SoaHostTexture* t;
@@ -355,6 +359,7 @@ static void feed_texture(CpuState* s, uint32_t id, uint32_t image, uint32_t form
     t->id = id;
     t->image = image;
     t->format = format;
+    t->palette = palette;
     t->width = (uint16_t)width;
     t->height = (uint16_t)height;
     snprintf(t->name, sizeof t->name, "%s", name);
