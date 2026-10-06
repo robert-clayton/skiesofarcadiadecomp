@@ -18,6 +18,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "soa_host.h"
 #include "gxr.h"
+#include "gxr_export.h"
 #include "ninja.h"
 #include "plat.h"
 #include <fenv.h>
@@ -281,18 +282,22 @@ unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rate)
 }
 /* ---- the game's models (ninja.h's feed) -------------------------------------
  * Two frames' worth of records: the guest fills one while the host may copy
- * the other. A frame is published when the guest starts drawing the next,
- * so what the host reads is always whole. */
+ * the other. A frame is published when the game ends it (main.c tells us),
+ * so what the host reads is always whole, and is the frame whose picture
+ * the renderer is presenting. */
 #define MAX_MODELS 8192
 #define MAX_TEXTURES 16384
 #define MAX_LIGHTS 1024
 #define MAX_OPEN 8 /* drawers inside drawers; none are seen, but a begin and its end must still pair */
+#define MAX_PASSES 16
 
 typedef struct {
     long frame;
     unsigned n, nt, nl;
     unsigned open[MAX_OPEN], n_open; /* the models whose drawers have not returned yet */
     unsigned sent;                   /* how many of them have reached the GPU: the next one's place in that order */
+    unsigned np, np_skipped;         /* the screen passes drawn after them, and the ones left out */
+    SoaHostScreenPass pass[MAX_PASSES];
     float proj[7];
     uint32_t visit[MAX_MODELS];      /* ninja.c's number for each, which climbs with them */
     SoaHostModel m[MAX_MODELS];
@@ -323,9 +328,21 @@ static ModelFrame* building(CpuState* s)
         memset(b->proj, 0, sizeof b->proj);
         b->proj[6] = 1.0f; /* none seen yet */
         b->frame = f;
-        b->n = b->nt = b->nl = b->n_open = b->sent = 0;
+        b->n = b->nt = b->nl = b->n_open = b->sent = b->np = b->np_skipped = 0;
     }
     return b;
+}
+
+void host_frame_end(unsigned frame)
+{
+    ModelFrame* b = &g_mf[g_build];
+    if (!b->n || b->frame != (long)frame) return; /* a frame without a model leaves the last one standing */
+    plat_lock(&g_mf_lock);
+    g_ready = g_build;
+    plat_unlock(&g_mf_lock);
+    g_build ^= 1;
+    g_mf[g_build].n = 0; /* building() starts it afresh at the next model */
+    g_mf[g_build].frame = -1;
 }
 
 static void feed_model(CpuState* s, const NinjaVisit* v)
@@ -470,9 +487,156 @@ static void feed_sent(CpuState* s, unsigned visit, unsigned strips)
 
 static const NinjaFeed g_ninja_feed = {feed_model, feed_texture, feed_end, feed_sent};
 
+/* ---- what the game draws over the whole screen ------------------------------------------------
+ * The renderer shows every draw to an exporter (gxr_export.h); this one
+ * keeps the quads that cover the screen, drawn after the frame's models. */
+
+/* One of a one-stage combiner's inputs, 0 to 1: GX_CC_* for colour (each of
+ * three channels), GX_CA_* for alpha. */
+static float tev_input(const TevSetup* T, const Stage* S, unsigned sel, int alpha, unsigned ch, const float ras[4],
+                       const float tex[4])
+{
+    static const uint8_t alpha_sel[8] = {1, 3, 5, 7, 9, 11, 14, 15}; /* GX_CA_* as the GX_CC_* that reads the same alpha */
+    if (alpha) sel = alpha_sel[sel & 7], ch = 3;
+    switch (sel) {
+    case 0: case 2: case 4: case 6: return (float)T->reg_init[sel / 2][ch] / 255.0f;
+    case 1: case 3: case 5: case 7: return (float)T->reg_init[sel / 2][3] / 255.0f;
+    case 8: return tex[S->tswap[ch] & 3];
+    case 9: return tex[S->tswap[3] & 3];
+    case 10: return ras[S->rswap[ch] & 3];
+    case 11: return ras[S->rswap[3] & 3];
+    case 12: return 1.0f;
+    case 13: return 0.5f;
+    case 14: return (float)S->konst[ch] / 255.0f;
+    default: return 0.0f;
+    }
+}
+
+/* What a one-stage combiner makes of a vertex colour and a texel, RGBA
+ * packed; *ok cleared for a shape not worked out here. A stage in compare
+ * mode (bias 3) gives d + c where a > b and d elsewhere; of those only the
+ * comparison of the red channels is done, and when what a is compared with
+ * is the texture, *step is a: the texel value the outcome turns at. */
+static uint32_t tev_one_stage(const TevSetup* T, const float ras[4], const float tex[4], int* ok, uint32_t* step)
+{
+    static const float bias[3] = {0.0f, 0.5f, -0.5f}, scale[4] = {1.0f, 2.0f, 4.0f, 0.5f};
+    const Stage* S = &T->st[0];
+    uint32_t out = 0;
+    unsigned ch;
+    int compare = S->cbias == 3;
+    if (S->abias > 2 || (compare && (S->cshift != 0 || S->cop != 0))) { *ok = 0; return 0; }
+    for (ch = 0; ch < 4; ch++) {
+        int al = ch == 3;
+        float a = tev_input(T, S, al ? S->aa : S->ca, al, ch, ras, tex), b = tev_input(T, S, al ? S->ab : S->cb, al, ch, ras, tex);
+        float c = tev_input(T, S, al ? S->ac : S->cc, al, ch, ras, tex), d = tev_input(T, S, al ? S->ad : S->cd, al, ch, ras, tex);
+        float v;
+        if (compare && !al) {
+            float ar = tev_input(T, S, S->ca, 0, 0, ras, tex), br = tev_input(T, S, S->cb, 0, 0, ras, tex);
+            v = d + (ar > br ? c : 0.0f);
+            if (step && S->cb == 8 && S->ca != 8) *step = (uint32_t)(ar * 255.0f + 0.5f);
+        } else {
+            float mix = a * (1.0f - c) + b * c;
+            v = (d + ((al ? S->aop : S->cop) ? -mix : mix) + bias[al ? S->abias : S->cbias]) * scale[(al ? S->ashift : S->cshift) & 3];
+        }
+        v = v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+        out |= (uint32_t)(v * 255.0f + 0.5f) << (24 - 8 * ch);
+    }
+    return out;
+}
+
+static void screen_vertex(unsigned i, const VertexIn* in, const Vertex* out)
+{
+    (void)i;
+    (void)in;
+    (void)out;
+}
+
+static void screen_draw(const DrawCmd* D, unsigned count)
+{
+    ModelFrame* b = &g_mf[g_build];
+    const uint32_t* bp = gx_bp_regs();
+    const Stage* S = &D->tev.st[0];
+    const Vertex* v = D->v;
+    SoaHostScreenPass pass;
+    float lo[4] = {0, 0, 0, 0}, hi[4] = {1, 1, 1, 1};
+    float x0 = 2, x1 = -2, y0 = 2, y1 = -2;
+    unsigned i, corners = 0, src = D->px.sfac, dst = D->px.dfac;
+    int ok = 1, flat = 1;
+    /* a quad, flat on the screen, over all of it, after the frame's first model */
+    if (count != 4 || D->efb || !(gx_xf_regs()[0x1026] & 1) || !b->n || b->frame != (long)gx_frame_count()) return;
+    for (i = 0; i < 4; i++) {
+        float w = v[i].w != 0.0f ? v[i].w : 1.0f, x = v[i].x / w, y = v[i].y / w;
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+        if (memcmp(&v[i].col[0], &v[0].col[0], sizeof v[0].col[0]) != 0) flat = 0;
+    }
+    if (x0 > -0.99f || x1 < 0.99f || y0 > -0.99f || y1 < 0.99f) return;
+    if (!D->px.col_upd) return; /* it writes no colour */
+    /* What is left out: a logic operation (the shadows' own bookkeeping in
+     * the red channel, which comes out even), a blend that reads the frame
+     * buffer, more than one combiner stage, a textured quad that is shaded. */
+    if (!D->px.blend_en && !D->px.logic_en) src = 1, dst = 0; /* drawn over what is there */
+    else if (D->px.logic_en || src == 2 || src == 3 || src > 5 || dst > 5) ok = 0;
+    if (D->tev.stages != 1 || (S->texen && !flat)) ok = 0;
+    memset(&pass, 0, sizeof pass);
+    pass.src_factor = src;
+    pass.dst_factor = dst;
+    pass.subtract = D->px.blend_en && D->px.subtract ? 1u : 0u;
+    for (i = 0; ok && i < 4; i++) {
+        /* which corner the vertex is: clip space's y runs up */
+        float w = v[i].w != 0.0f ? v[i].w : 1.0f, ras[4];
+        unsigned corner = (v[i].x / w > 0.0f ? 1u : 0u) | (v[i].y / w < 0.0f ? 2u : 0u);
+        ras[0] = v[i].col[0].r; ras[1] = v[i].col[0].g; ras[2] = v[i].col[0].b; ras[3] = v[i].col[0].a;
+        pass.colour[corner] = tev_one_stage(&D->tev, ras, lo, &ok, NULL);
+        corners |= 1u << corner;
+        if (S->texen && i == 0) pass.white = tev_one_stage(&D->tev, ras, hi, &ok, &pass.step);
+    }
+    if (corners != 15u) ok = 0;
+    if (ok && S->texen) {
+        unsigned m = S->texmap & 7;
+        uint32_t image0 = bp[(m < 4 ? 0x88u + m : 0xA8u + (m - 4)) & 0xFFu], image3 = bp[(m < 4 ? 0x94u + m : 0xB4u + (m - 4)) & 0xFFu];
+        pass.image = 0x80000000u | ((image3 & 0x00FFFFFFu) << 5);
+        pass.format = (image0 >> 20) & 15u;
+        pass.width = (uint16_t)((image0 & 0x3FFu) + 1u);
+        pass.height = (uint16_t)(((image0 >> 10) & 0x3FFu) + 1u);
+    }
+    if (ok && b->np < MAX_PASSES) b->pass[b->np++] = pass;
+    else b->np_skipped++;
+}
+
+static void screen_copy(uint32_t v, int x0, int y0, int w, int h, uint32_t dest, uint32_t bytes)
+{
+    (void)v; (void)x0; (void)y0; (void)w; (void)h; (void)dest; (void)bytes;
+}
+
+static const GxrDrawExport g_screen_export = {screen_vertex, screen_draw, screen_copy};
+
 void soa_host_watch_models(int on)
 {
+    const char* exporting = getenv("SOA_GXR_EXPORT");
     ninja_set_feed(on ? &g_ninja_feed : NULL);
+    /* the renderer has one exporter: a run that writes its draws out keeps it */
+    if (!exporting || !*exporting) gxr_set_draw_export(on ? &g_screen_export : NULL);
+}
+
+long soa_host_screen_passes(SoaHostScreenPass* passes, unsigned max, unsigned* n, unsigned* skipped)
+{
+    long frame = -1;
+    unsigned count = 0, left = 0;
+    plat_lock(&g_mf_lock);
+    if (g_ready >= 0) {
+        const ModelFrame* r = &g_mf[g_ready];
+        count = r->np < max ? r->np : max;
+        if (passes) memcpy(passes, r->pass, count * sizeof *passes);
+        left = r->np_skipped;
+        frame = r->frame;
+    }
+    plat_unlock(&g_mf_lock);
+    if (n) *n = count;
+    if (skipped) *skipped = left;
+    return frame;
 }
 
 long soa_host_models(SoaHostModel* models, unsigned max_models, unsigned* n_models, SoaHostTexture* textures,

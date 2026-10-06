@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 5u
+#define SOA_HOST_ABI 6u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -193,6 +193,45 @@ SOA_HOST_API void soa_host_watch_models(int on);
 SOA_HOST_API long soa_host_models(SoaHostModel* models, unsigned max_models, unsigned* n_models, SoaHostTexture* textures,
                                   unsigned max_textures, unsigned* n_textures, SoaHostLight* lights, unsigned max_lights,
                                   unsigned* n_lights, float projection[7]);
+
+/* ---- what the game draws over the whole screen (ABI 6) ----------------------------------------
+ * After the models the game draws on the frame itself, with quads that
+ * cover the screen: a glow added to every pixel, a fade, and the last step
+ * of its shadows, which multiplies the picture down where a mask says so. A
+ * host that draws the scene itself needs them to end with the game's
+ * picture. Each is one blend of a source colour over what is there:
+ *
+ *     new = source x src_factor + old x dst_factor     (old - source when subtract)
+ *
+ * with GX's factors: 0 zero, 1 one, 4 the source's alpha, 5 one less it, and
+ * for dst_factor also 2 the source's colour and 3 one less it. The source is
+ * the quad's own colour through its combiner, given at the screen's four
+ * corners and shaded evenly between them. A quad with a texture has one
+ * colour all over where the texture is black (the corners) and another where
+ * it is white. The shadow mask is such a texture: an 8-bit copy of the frame
+ * buffer, in guest memory at `image`, which the combiner compares with a
+ * number instead of mixing by it.
+ *
+ * Only quads drawn after the frame's first model are reported, in the order
+ * they were drawn, and only ones whose blend doesn't read the frame buffer
+ * and whose combiner is one stage: `skipped` counts the rest. */
+typedef struct {
+    uint32_t src_factor, dst_factor, subtract;
+    uint32_t colour[4];     /* the source at the top left, top right, bottom left and bottom right, RGBA: with
+                               the texture black, or with none */
+    uint32_t white;         /* with a texture: the source where it is white */
+    uint32_t step;          /* with a texture: 0 when the source runs evenly from black's to white's; else the
+                               texel value, 1 to 255, under which it is black's and from which it is white's */
+    uint32_t image;         /* the texture's guest address; 0 for a quad without one */
+    uint32_t format;        /* its GX format: 1 I8, ... */
+    uint16_t width, height;
+} SoaHostScreenPass;
+
+/* The screen passes of the newest whole frame: up to max of them into the
+ * array, how many in *n, and in *skipped how many screen-filling quads were
+ * left out. Returns that frame's number, the one soa_host_models gives for
+ * the same frame, or -1 before the first. Watched with the models. */
+SOA_HOST_API long soa_host_screen_passes(SoaHostScreenPass* passes, unsigned max, unsigned* n, unsigned* skipped);
 
 /* bytes of the game's memory at a guest address (0x80000000 up), as the
  * game sees them -- big-endian -- into out; 0 for a range outside MEM1, or

@@ -937,6 +937,9 @@ void hle_on_report(void (*fn)(void));
 void si_set_config_extra(const char* extra);
 
 void poke_at_frame(CpuState* s, unsigned frame);
+#ifdef SOA_HOST
+void host_frame_end(unsigned frame);
+#endif
 
 /* SOA_STALL=<frame>:<seconds> (M19's check): the guest thread sleeps once, at
  * that frame's end, the way a host that went to sleep would stop it. The
@@ -1012,6 +1015,9 @@ void poke_at_frame(CpuState* s, unsigned frame)
 {
     int i;
     hle_frame_mark();
+#ifdef SOA_HOST
+    host_frame_end(frame); /* host.c: the frame's models are whole, and its to publish */
+#endif
     skip_at_frame(frame);
     stall_at_frame(frame);
     peek_at_frame(s, frame);
