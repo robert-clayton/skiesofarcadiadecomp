@@ -4,7 +4,8 @@
  * in model space, the matrices, the TEV, blend and depth state and the
  * decoded textures -- so a frame can be rebuilt elsewhere as 3D geometry.
  * For replays of captured frames (soa --replay), with SOA_GXR_INLINE=1 so
- * every copy a draw samples has run before the draw is written.
+ * every copy a draw samples has run before the draw is written; or for a
+ * few frames of a live run, with SOA_GXR_EXPORT_FRAMES=first-last.
  *
  *   <dir>/draws.jsonl  one object per draw or copy, in order
  *   <dir>/verts.bin    float32 vertices, GXR_EXPORT_FLOATS each; a draw's
@@ -44,5 +45,11 @@ typedef struct {
 void gxr_set_draw_export(const GxrDrawExport* e); /* gxr.c; NULL: none */
 /* gxr_export.c: sets the exporter when SOA_GXR_EXPORT names a directory. */
 void gxr_export_install(void);
+/* Whether a line from elsewhere in the runtime would be written now, and
+ * the line itself: one JSON object, put in the stream between the draws
+ * (runtime/ninja.c's models). SOA_GXR_EXPORT_FRAMES=first-last[/step] limits
+ * the export to those frames, which is how it runs on a live game. */
+int gxr_export_wants_notes(void);
+void gxr_export_note(const char* json);
 
 #endif

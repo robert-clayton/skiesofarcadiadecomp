@@ -2,3 +2,15 @@
 # instruction there. See tools/soa/hle.py and runtime/irq.c.
 
 0x80237BA8  SelectThread.idle   # the scheduler's idle spin: deliver interrupts here
+
+# The Ninja model layer (runtime/ninja.c): each chunk model drawn, and its matrix.
+# Four drawers of one shape, each with its own polygon walker: entry (r3 is
+# the NJS_CNK_MODEL) and the one epilogue its returns pass through.
+0x802873BC  CnkDrawModel0         # njCnkDrawModel, by the look of it
+0x802875FC  CnkDrawModel0.ret
+0x80287C14  CnkDrawModel1
+0x80287D80  CnkDrawModel1.ret
+0x802890A4  CnkDrawModel2
+0x80289210  CnkDrawModel2.ret
+0x8028AB48  CnkDrawModel3
+0x8028AD88  CnkDrawModel3.ret

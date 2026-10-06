@@ -15,7 +15,8 @@ static FILE *g_json, *g_verts;
 static unsigned long long g_nverts;
 static float* g_buf;
 static unsigned g_cap;
-static unsigned long long g_draws, g_copies, g_textures;
+static unsigned long long g_draws, g_copies, g_textures, g_notes;
+static unsigned g_first, g_last = ~0u, g_step = 1; /* SOA_GXR_EXPORT_FRAMES */
 
 #define SEEN_CAP 8192
 static uint64_t g_seen[SEEN_CAP];
@@ -31,8 +32,8 @@ static void report(void)
 {
     if (g_json) fflush(g_json);
     if (g_verts) fflush(g_verts);
-    fprintf(stderr, "[export] %llu draws, %llu copies, %llu vertices and %llu textures into %s\n", g_draws, g_copies,
-            g_nverts, g_textures, g_dir);
+    fprintf(stderr, "[export] %llu draws, %llu copies, %llu notes, %llu vertices and %llu textures into %s\n", g_draws,
+            g_copies, g_notes, g_nverts, g_textures, g_dir);
 }
 
 static void export_vertex(unsigned i, const VertexIn* in, const Vertex* out);
@@ -48,6 +49,12 @@ void gxr_export_install(void)
         g_on = 0;
         if (!d || !*d) return;
         snprintf(g_dir, sizeof g_dir, "%s", d);
+        {
+            const char* fr = getenv("SOA_GXR_EXPORT_FRAMES");
+            if (fr && *fr && sscanf(fr, "%u-%u/%u", &g_first, &g_last, &g_step) < 1)
+                fprintf(stderr, "[export] SOA_GXR_EXPORT_FRAMES=%s is not first-last[/step]; every frame is exported\n", fr);
+            if (!g_step) g_step = 1;
+        }
         plat_mkdir(g_dir);
         snprintf(path, sizeof path, "%s/tex", g_dir);
         plat_mkdir(path);
@@ -125,12 +132,31 @@ static uint64_t texture_file(const TexCfg* T)
     return hash;
 }
 
+static int in_range(void)
+{
+    unsigned f = gx_frame_count();
+    return f >= g_first && f <= g_last && (f - g_first) % g_step == 0;
+}
+
+int gxr_export_wants_notes(void)
+{
+    return g_on > 0 && in_range();
+}
+
+void gxr_export_note(const char* json)
+{
+    if (!gxr_export_wants_notes()) return;
+    fprintf(g_json, "%s\n", json);
+    g_notes++;
+}
+
 static void export_draw(const DrawCmd* D, unsigned count)
 {
     const uint32_t* xf = gx_xf_regs();
     const TevSetup* T = &D->tev;
     unsigned i, k, maps = 0;
     uint64_t used_mtx = 0;
+    if (!in_range()) return;
     fwrite(g_buf, sizeof(float) * GXR_EXPORT_FLOATS, count, g_verts);
     for (i = 0; i < count; i++) used_mtx |= 1ull << (unsigned)g_buf[(size_t)i * GXR_EXPORT_FLOATS + 9];
     fprintf(g_json, "{\"kind\":\"draw\",\"n\":%llu,\"frame\":%u,\"prim\":%u,\"count\":%u,\"vofs\":%llu,\"efb\":%u,",
@@ -191,6 +217,7 @@ static void export_draw(const DrawCmd* D, unsigned count)
 
 static void export_copy(uint32_t v, int x0, int y0, int w, int h, uint32_t dest, uint32_t bytes)
 {
+    if (!in_range()) return;
     fprintf(g_json,
             "{\"kind\":\"copy\",\"n\":%llu,\"frame\":%u,\"after_draw\":%llu,\"to_screen\":%u,\"clear\":%u,\"rect\":[%d,%d,%d,%d],"
             "\"dest\":%u,\"bytes\":%u,\"cmd\":%u}\n",
