@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 1u
+#define SOA_HOST_ABI 2u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -94,6 +94,48 @@ SOA_HOST_API unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rat
 
 /* The rumble the game asks of port 1 now: 0 off, up to 65535. */
 SOA_HOST_API unsigned soa_host_motor(void);
+
+/* ---- the game's models (ABI 2) --------------------------------------------
+ * The chunk models Sega's Ninja library draws (runtime/ninja.h), so a host
+ * can rebuild the scene with its own renderer: per frame, each model the
+ * game handed a drawer -- culled or not -- with its matrices and the
+ * textures its chunks selected. The host reads the model data and the
+ * images themselves with soa_host_read: the layouts are Ninja's, described
+ * in soa-ue5's docs/ninja-models.md. Off until soa_host_watch_models(1); it
+ * costs a copy of two matrices per model drawn. */
+typedef struct {
+    uint32_t model;         /* the NJS_CNK_MODEL's guest address: vlist, plist, centre, radius */
+    uint32_t drawer;        /* which of Ninja's four drawers took it (0-3) */
+    uint32_t first_texture; /* its textures: [first_texture, first_texture + textures) of the frame's */
+    uint32_t textures;
+    float modelview[12];    /* 3x4, rows: the model's space to the game's view space */
+    float camera[12];       /* 3x4, rows: the view matrix, world to view space (Ninja's stack level 1) */
+} SoaHostModel;
+
+typedef struct {
+    uint32_t id;            /* the texture id the model's chunks name */
+    uint32_t image;         /* the GX image's guest address */
+    uint32_t format;        /* the GX format: 14 CMPR, 5 RGB5A3, 6 RGBA8, 4 RGB565, 8 C4 ... */
+    uint16_t width, height;
+    char name[24];          /* the texture list's name for it */
+} SoaHostTexture;
+
+SOA_HOST_API void soa_host_watch_models(int on);
+
+/* The newest whole frame's models: up to max_models of them and max_textures
+ * of their textures into the arrays given, how many in *n_models and
+ * *n_textures, and the GX projection they were drawn with in projection[7]
+ * (GXSetProjection's six parameters, then 0; or 1 when the frame drew under
+ * no perspective projection). Returns that frame's number, or -1 before the
+ * first. */
+SOA_HOST_API long soa_host_models(SoaHostModel* models, unsigned max_models, unsigned* n_models, SoaHostTexture* textures,
+                                  unsigned max_textures, unsigned* n_textures, float projection[7]);
+
+/* bytes of the game's memory at a guest address (0x80000000 up), as the
+ * game sees them -- big-endian -- into out; 0 for a range outside MEM1, or
+ * before the game has drawn a model. The game may be writing there as it
+ * is read: models and images stay put while they are in use. */
+SOA_HOST_API int soa_host_read(uint32_t address, void* out, unsigned bytes);
 
 /* Pause holds the guest at the end of a frame, and its clock with it (M19);
  * mute silences what soa_host_audio returns. */

@@ -18,6 +18,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "soa_host.h"
 #include "gxr.h"
+#include "ninja.h"
 #include "plat.h"
 #include <fenv.h>
 #include <stdio.h>
@@ -277,5 +278,123 @@ unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rate)
     g_used -= bytes;
     plat_unlock(&g_audio_lock);
     return bytes / 4u;
+}
+/* ---- the game's models (ninja.h's feed) -------------------------------------
+ * Two frames' worth of records: the guest fills one while the host may copy
+ * the other. A frame is published when the guest starts drawing the next,
+ * so what the host reads is always whole. */
+#define MAX_MODELS 8192
+#define MAX_TEXTURES 16384
+
+typedef struct {
+    long frame;
+    unsigned n, nt;
+    float proj[7];
+    SoaHostModel m[MAX_MODELS];
+    SoaHostTexture t[MAX_TEXTURES];
+} ModelFrame;
+
+static ModelFrame g_mf[2];
+static int g_build;                  /* the guest's; the other is the host's */
+static int g_ready = -1;             /* the published one, under g_mf_lock */
+static PlatLock g_mf_lock;
+static uint8_t* volatile g_mem;      /* MEM1, as the hooks see it */
+static unsigned long long g_mf_dropped;
+
+static ModelFrame* building(CpuState* s)
+{
+    long f = (long)gx_frame_count();
+    ModelFrame* b = &g_mf[g_build];
+    g_mem = s->mem;
+    if (b->frame != f) {
+        if (b->n) {
+            plat_lock(&g_mf_lock);
+            g_ready = g_build;
+            plat_unlock(&g_mf_lock);
+            g_build ^= 1;
+            b = &g_mf[g_build];
+        }
+        memset(b->proj, 0, sizeof b->proj);
+        b->proj[6] = 1.0f; /* none seen yet */
+        b->frame = f;
+        b->n = b->nt = 0;
+    }
+    return b;
+}
+
+static void feed_model(CpuState* s, unsigned drawer, uint32_t model, const float modelview[12], const float camera[12])
+{
+    ModelFrame* b = building(s);
+    SoaHostModel* m;
+    const uint32_t* xf = gx_xf_regs();
+    /* The 3D projection: GX's, whenever it is a perspective one. A frame's
+     * first model can arrive while the last frame's 2D one is still loaded,
+     * since Ninja sets its own as it draws. */
+    if (!(xf[0x1026] & 1)) {
+        int i;
+        for (i = 0; i < 6; i++) memcpy(&b->proj[i], &xf[0x1020 + i], 4);
+        b->proj[6] = 0.0f;
+    }
+    if (b->n >= MAX_MODELS) { g_mf_dropped++; return; }
+    m = &b->m[b->n++];
+    m->model = model;
+    m->drawer = drawer;
+    m->first_texture = b->nt;
+    m->textures = 0;
+    memcpy(m->modelview, modelview, sizeof m->modelview);
+    memcpy(m->camera, camera, sizeof m->camera);
+}
+
+static void feed_texture(CpuState* s, uint32_t id, uint32_t image, uint32_t format, uint32_t width, uint32_t height, const char* name)
+{
+    ModelFrame* b = building(s);
+    SoaHostTexture* t;
+    if (!b->n) return; /* outside any model */
+    if (b->nt >= MAX_TEXTURES) { g_mf_dropped++; return; }
+    t = &b->t[b->nt++];
+    t->id = id;
+    t->image = image;
+    t->format = format;
+    t->width = (uint16_t)width;
+    t->height = (uint16_t)height;
+    snprintf(t->name, sizeof t->name, "%s", name);
+    b->m[b->n - 1].textures++;
+}
+
+static const NinjaFeed g_ninja_feed = {feed_model, feed_texture};
+
+void soa_host_watch_models(int on)
+{
+    ninja_set_feed(on ? &g_ninja_feed : NULL);
+}
+
+long soa_host_models(SoaHostModel* models, unsigned max_models, unsigned* n_models, SoaHostTexture* textures,
+                     unsigned max_textures, unsigned* n_textures, float projection[7])
+{
+    long frame = -1;
+    unsigned n = 0, nt = 0;
+    plat_lock(&g_mf_lock);
+    if (g_ready >= 0) {
+        const ModelFrame* r = &g_mf[g_ready];
+        n = r->n < max_models ? r->n : max_models;
+        nt = r->nt < max_textures ? r->nt : max_textures;
+        if (models) memcpy(models, r->m, n * sizeof *models);
+        if (textures) memcpy(textures, r->t, nt * sizeof *textures);
+        if (projection) memcpy(projection, r->proj, sizeof r->proj);
+        frame = r->frame;
+    }
+    plat_unlock(&g_mf_lock);
+    if (n_models) *n_models = n;
+    if (n_textures) *n_textures = nt;
+    return frame;
+}
+
+int soa_host_read(uint32_t address, void* out, unsigned bytes)
+{
+    uint8_t* mem = g_mem;
+    uint32_t off = address & 0x01FFFFFFu;
+    if (!mem || !out || address < 0x80000000u || address >= 0x81800000u || off + (uint64_t)bytes > MEM1_SIZE) return 0;
+    memcpy(out, mem + off, bytes);
+    return 1;
 }
 #endif
