@@ -30,6 +30,9 @@ typedef struct {
     uint32_t model;        /* the NJS_CNK_MODEL */
     uint32_t vlist, plist; /* its lists as the struct names them right now: a drawer can be handed one
                               struct refilled for each piece */
+    uint32_t vlist_bytes;  /* not 0: the game refills this vertex list for one model after another (a
+                              shape it works out afresh each time), so only now is it this model's.
+                              Its length, end chunk included, for whoever wants to keep a copy */
     float modelview[12];   /* the matrix on top of Ninja's stack; 3x4, rows */
     float camera[12];      /* stack level 1, the view matrix; 3x4, rows */
 } NinjaVisit;

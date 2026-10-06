@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 6u
+#define SOA_HOST_ABI 7u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -158,6 +158,11 @@ typedef struct {
                                of A / (B - its screen depth) - C */
     uint32_t first_light;   /* the lights chan_colour names: [first_light, first_light + lights) of the */
     uint32_t lights;        /* frame's, in the order of their GX indices */
+    uint32_t vertices;      /* its vertex list as it was when the drawer took it, for a list the game refills */
+    uint32_t vertices_bytes; /* for one model after another (a shape it works out afresh): [vertices,
+                               vertices + vertices_bytes) of the frame's kept bytes (soa_host_model_bytes),
+                               the bytes guest memory held at vlist then. 0 for every other model, whose
+                               list stays as it is and is read at vlist */
 } SoaHostModel;
 
 /* One GX light as a model's draws had it (GXInitLight*), in the game's view
@@ -193,6 +198,12 @@ SOA_HOST_API void soa_host_watch_models(int on);
 SOA_HOST_API long soa_host_models(SoaHostModel* models, unsigned max_models, unsigned* n_models, SoaHostTexture* textures,
                                   unsigned max_textures, unsigned* n_textures, SoaHostLight* lights, unsigned max_lights,
                                   unsigned* n_lights, float projection[7]);
+
+/* The vertex lists the newest whole frame's models name in `vertices` (ABI
+ * 7): up to max bytes into out, how many in *n. Returns that frame's number
+ * as soa_host_models does, or -1; when the two differ a frame was published
+ * between the calls, and both want asking again. */
+SOA_HOST_API long soa_host_model_bytes(uint8_t* out, unsigned max, unsigned* n);
 
 /* ---- what the game draws over the whole screen (ABI 6) ----------------------------------------
  * After the models the game draws on the frame itself, with quads that

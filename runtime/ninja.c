@@ -121,6 +121,93 @@ static int in_ram(uint32_t a)
     return a >= 0x80000000u && a < 0x81800000u - 64u;
 }
 
+/* ---- vertex lists the game refills ------------------------------------------
+ * A model whose shape the game works out afresh -- a face between two
+ * expressions, anything it morphs -- has no vertex list of its own. The game
+ * fills a scratch one just before it hands the model over, and several
+ * models take turns at one address: three in a battle, each handed over
+ * twice a frame and the list refilled each time. Whoever reads that address
+ * afterwards finds the last one's vertices under every model's name. So the
+ * feed is told such a list's length while it is still this model's, to copy
+ * it there and then.
+ *
+ * Which lists those are is learned, since nothing marks them. A list handed
+ * over with two different polygon lists in one frame is watched; a watched
+ * one whose bytes differ between two visits of one frame is refilled, and
+ * stays so. That costs the first frame such a model is seen in. */
+typedef struct {
+    uint32_t vlist, plist, hash;
+    int hashed;
+} SeenList;
+#define SEEN_LISTS 4096u /* a power of two: a frame's vertex lists, hashed by address */
+#define KNOWN_LISTS 64u
+static SeenList g_seen[SEEN_LISTS];
+static unsigned g_nseen;
+static struct {
+    uint32_t vlist;
+    int refilled;
+} g_known[KNOWN_LISTS];
+static unsigned g_nknown, g_known_next;
+
+/* A vertex chunk list's length, its end chunk included; 0 for one that
+ * doesn't end where a list could. */
+static uint32_t list_bytes(CpuState* s, uint32_t vlist)
+{
+    uint32_t a = vlist;
+    unsigned k;
+    for (k = 0; k < 64 && in_ram(a) && a - vlist < 0x40000u; k++) {
+        uint32_t head = mem_r32(s, a);
+        if ((head & 0xFFu) == 0xFFu) return a + 4u - vlist;
+        a += 4u + 4u * (head >> 16); /* type, flags, and the words that follow */
+    }
+    return 0;
+}
+
+/* Not 0: the list is one the game refills, and this is its length now. */
+static uint32_t refilled_list(CpuState* s, uint32_t vlist, uint32_t plist)
+{
+    unsigned i, k = KNOWN_LISTS;
+    uint32_t bytes, h = 2166136261u, a;
+    SeenList* e;
+    if (!in_ram(vlist)) return 0;
+    for (i = 0; i < g_nknown; i++)
+        if (g_known[i].vlist == vlist) k = i;
+    if (k < KNOWN_LISTS && g_known[k].refilled) return list_bytes(s, vlist);
+    i = (vlist * 2654435761u) >> 20;
+    while (g_seen[i].vlist && g_seen[i].vlist != vlist) i = (i + 1u) & (SEEN_LISTS - 1u);
+    e = &g_seen[i];
+    if (!e->vlist) {
+        if (g_nseen >= SEEN_LISTS / 2u) return 0;
+        g_nseen++;
+        e->vlist = vlist;
+        e->plist = plist;
+        e->hashed = 0;
+    }
+    if (k == KNOWN_LISTS) {
+        if (e->plist == plist) return 0;
+        /* two models' at one address: watched from now on. When the table
+         * is full the oldest that never proved refilled makes room. */
+        if (g_nknown < KNOWN_LISTS) k = g_nknown++;
+        else {
+            for (i = 0; i < KNOWN_LISTS && g_known[g_known_next % KNOWN_LISTS].refilled; i++) g_known_next++;
+            k = g_known_next++ % KNOWN_LISTS;
+        }
+        g_known[k].vlist = vlist;
+        g_known[k].refilled = 0;
+    }
+    if (!(bytes = list_bytes(s, vlist))) return 0;
+    for (a = 0; a < bytes; a += 4u) h = (h ^ mem_r32(s, vlist + a)) * 16777619u;
+    if (e->hashed && e->hash != h) {
+        g_known[k].refilled = 1;
+        fprintf(stderr, "[ninja] the vertex list at %08X is refilled for one model after another; the feed gets it per visit\n",
+                vlist);
+        return bytes;
+    }
+    e->hash = h;
+    e->hashed = 1;
+    return 0;
+}
+
 /* GXBeginDisplayList: whatever the buffer at addr held is gone, the visits
  * recorded into it and never called among it. */
 static void list_recording(CpuState* s, uint32_t addr)
@@ -195,6 +282,8 @@ static void model_begin(CpuState* s, unsigned drawer)
     if (gx_frame_count() != g_frame) {
         g_frame = gx_frame_count();
         g_visit = g_nrec = 0;
+        if (g_nseen) memset(g_seen, 0, sizeof g_seen);
+        g_nseen = 0;
     }
     o.visit = g_visit++;
     o.recording = gx_list_recording(&o.at);
@@ -213,6 +302,7 @@ static void model_begin(CpuState* s, unsigned drawer)
     v.model = model;
     v.vlist = mem_r32(s, model);
     v.plist = mem_r32(s, model + 4);
+    v.vlist_bytes = refilled_list(s, v.vlist, v.plist);
     if (g_feed && in_ram(top) && in_ram(top - 48u * (depth ? depth - 1u : 0u))) {
         read_matrix(s, top, v.modelview);
         if (depth >= 2) read_matrix(s, top - 48u * (depth - 1u), v.camera);
@@ -241,6 +331,15 @@ static void model_begin(CpuState* s, unsigned drawer)
         }
         if (n > 0 && (size_t)n < sizeof line - 4) snprintf(line + n, sizeof line - (size_t)n, "]}");
         gxr_export_note(line);
+        /* a refilled list as it is now, since the frame's memory dump will
+         * hold another model's */
+        if (v.vlist_bytes && v.vlist_bytes * 2u + 64u < sizeof line) {
+            uint32_t a;
+            n = snprintf(line, sizeof line, "{\"kind\":\"vlist\",\"visit\":%u,\"vlist\":%u,\"hex\":\"", v.visit, v.vlist);
+            for (a = 0; a < v.vlist_bytes; a++) n += snprintf(line + n, sizeof line - (size_t)n, "%02x", mem_r8(s, v.vlist + a));
+            snprintf(line + n, sizeof line - (size_t)n, "\"}");
+            gxr_export_note(line);
+        }
     }
 }
 

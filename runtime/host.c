@@ -290,6 +290,7 @@ unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rate)
 #define MAX_LIGHTS 1024
 #define MAX_OPEN 8 /* drawers inside drawers; none are seen, but a begin and its end must still pair */
 #define MAX_PASSES 16
+#define MAX_KEPT (512u * 1024u) /* vertex lists copied as their models are drawn: a few, of a few KB each */
 
 typedef struct {
     long frame;
@@ -303,6 +304,8 @@ typedef struct {
     SoaHostModel m[MAX_MODELS];
     SoaHostTexture t[MAX_TEXTURES];
     SoaHostLight l[MAX_LIGHTS];
+    unsigned nb;
+    uint8_t bytes[MAX_KEPT];
 } ModelFrame;
 
 static ModelFrame g_mf[2];
@@ -328,7 +331,7 @@ static ModelFrame* building(CpuState* s)
         memset(b->proj, 0, sizeof b->proj);
         b->proj[6] = 1.0f; /* none seen yet */
         b->frame = f;
-        b->n = b->nt = b->nl = b->n_open = b->sent = b->np = b->np_skipped = 0;
+        b->n = b->nt = b->nl = b->n_open = b->sent = b->np = b->np_skipped = b->nb = 0;
     }
     return b;
 }
@@ -377,6 +380,18 @@ static void feed_model(CpuState* s, const NinjaVisit* v)
     m->textures = 0;
     memcpy(m->modelview, v->modelview, sizeof m->modelview);
     memcpy(m->camera, v->camera, sizeof m->camera);
+    /* a vertex list the game is about to refill for the next model */
+    if (v->vlist_bytes) {
+        uint32_t off = v->vlist & 0x01FFFFFFu;
+        if (b->nb + v->vlist_bytes <= MAX_KEPT && off + (uint64_t)v->vlist_bytes <= MEM1_SIZE) {
+            memcpy(b->bytes + b->nb, s->mem + off, v->vlist_bytes);
+            m->vertices = b->nb;
+            m->vertices_bytes = v->vlist_bytes;
+            b->nb += v->vlist_bytes;
+        } else {
+            g_mf_dropped++;
+        }
+    }
 }
 
 static void feed_texture(CpuState* s, uint32_t id, uint32_t image, uint32_t format, uint32_t palette, uint32_t width,
@@ -636,6 +651,22 @@ long soa_host_screen_passes(SoaHostScreenPass* passes, unsigned max, unsigned* n
     plat_unlock(&g_mf_lock);
     if (n) *n = count;
     if (skipped) *skipped = left;
+    return frame;
+}
+
+long soa_host_model_bytes(uint8_t* out, unsigned max, unsigned* n)
+{
+    long frame = -1;
+    unsigned count = 0;
+    plat_lock(&g_mf_lock);
+    if (g_ready >= 0) {
+        const ModelFrame* r = &g_mf[g_ready];
+        count = r->nb < max ? r->nb : max;
+        if (out) memcpy(out, r->bytes, count);
+        frame = r->frame;
+    }
+    plat_unlock(&g_mf_lock);
+    if (n) *n = count;
     return frame;
 }
 
