@@ -333,13 +333,15 @@ static PlatLock g_mf_lock;
 static uint8_t* volatile g_mem;      /* MEM1, as the hooks see it */
 static unsigned long long g_mf_dropped;
 
-static ModelFrame* building(CpuState* s)
+/* The frame being built, begun afresh when the game has moved on to another.
+ * A frame is worth publishing when it has a model, or -- a menu, the title
+ * -- only draws on the screen. */
+static ModelFrame* building_frame(void)
 {
     long f = (long)gx_frame_count();
     ModelFrame* b = &g_mf[g_build];
-    g_mem = s->mem;
     if (b->frame != f) {
-        if (b->n) {
+        if (b->n || b->nf || b->na) {
             plat_lock(&g_mf_lock);
             g_ready = g_build;
             plat_unlock(&g_mf_lock);
@@ -356,10 +358,16 @@ static ModelFrame* building(CpuState* s)
     return b;
 }
 
+static ModelFrame* building(CpuState* s)
+{
+    g_mem = s->mem;
+    return building_frame();
+}
+
 void host_frame_end(unsigned frame)
 {
     ModelFrame* b = &g_mf[g_build];
-    if (!b->n || b->frame != (long)frame) return; /* a frame without a model leaves the last one standing */
+    if ((!b->n && !b->nf && !b->na) || b->frame != (long)frame) return; /* a frame with nothing in it leaves the last one standing */
     plat_lock(&g_mf_lock);
     g_ready = g_build;
     plat_unlock(&g_mf_lock);
@@ -381,6 +389,10 @@ static void feed_model(CpuState* s, const NinjaVisit* v)
         for (i = 0; i < 6; i++) memcpy(&b->proj[i], &xf[0x1020 + i], 4);
         b->proj[6] = 0.0f;
     }
+    /* What was drawn on the screen before the frame's first model lies
+     * under the scene, which a host's 2D layer can't: it is let go. (A
+     * frame with no model at all keeps it: there it is the picture.) */
+    if (!b->n) b->nf = b->nfv = b->nf_skipped = 0;
     /* a model past the array still opens, so its end pairs with it */
     if (b->n_open < MAX_OPEN) b->open[b->n_open] = b->n < MAX_MODELS ? b->n : ~0u;
     b->n_open++;
@@ -781,6 +793,11 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     for (i = 0; i < D->tev.stages; i++)
         if (D->tev.st[i].texen && D->tev.st[i].texmap == 0) { C = &D->tev.tex[0]; coord = D->tev.st[i].texcoord & 7; break; }
     if (!m && !C) return; /* no model's and no texture: a shadow volume, which the screen passes account for */
+    /* a frame with no model yet has had no projection noted: the first of its own */
+    if (b->proj[6] != 0.0f) {
+        for (i = 0; i < 6; i++) memcpy(&b->proj[i], &gx_xf_regs()[0x1020 + i], 4);
+        b->proj[6] = 0.0f;
+    }
     if (!D->px.blend_en) src = 1, dst = 0;
     plain = (src == 4 && dst == 5) || (src == 1 && dst == 0);
     /* the usual solid strip, told without working its combiner out */
@@ -991,7 +1008,7 @@ static void flat_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
 
 static void screen_draw(const DrawCmd* D, unsigned count)
 {
-    ModelFrame* b = &g_mf[g_build];
+    ModelFrame* b = building_frame();
     const uint32_t* bp = gx_bp_regs();
     const Stage* S = &D->tev.st[0];
     const Vertex* v = D->v;
@@ -1000,10 +1017,13 @@ static void screen_draw(const DrawCmd* D, unsigned count)
     float x0 = 2, x1 = -2, y0 = 2, y1 = -2;
     unsigned i, corners = 0, src = D->px.sfac, dst = D->px.dfac;
     int ok = 1, flat = 1;
-    if (!b->n || b->frame != (long)gx_frame_count()) return;
     if (!(gx_xf_regs()[0x1026] & 1)) { model_draw(b, D, count); return; }
-    /* flat on the screen, after the frame's first model */
+    /* flat on the screen */
     if (D->efb) return;
+    /* Before the frame has a model there is no scene for a quad to be a
+     * pass over: all of it is 2D layer, kept if the frame turns out to have
+     * no model and let go at its first. */
+    if (!b->n) { flat_draw(b, D, count); return; }
     /* a quad over all of the screen is a screen pass, until the 2D layer
      * has begun: then whatever covers the screen covers that too */
     if (count != 4 || b->nf) { flat_draw(b, D, count); return; }

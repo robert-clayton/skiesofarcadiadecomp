@@ -361,7 +361,9 @@ SOA_HOST_API long soa_host_alpha_stages(SoaHostAlphaStage* stages, unsigned max,
  *
  * Reported from a frame's first such draw after its first model, until the
  * frame ends; a screen-filling quad among them (a fade over everything) is
- * one of them and not a screen pass. Left out and counted in `skipped`:
+ * one of them and not a screen pass. A frame with no model at all (a menu,
+ * the title) is published too, with zero models, and then every draw on
+ * the screen is one of these, from the frame's first. Left out and counted in `skipped`:
  * more than one combiner stage, a blend that reads the frame buffer's
  * alpha, a logic operation, and a textured draw whose colour0 differs from
  * vertex to vertex. The alpha test and the depth test are not applied: the
