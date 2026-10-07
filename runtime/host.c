@@ -692,10 +692,15 @@ static int keepable(const TexCfg* C)
  * of its own each time. Here an image decoded again is known by its texels
  * and keeps its number. */
 /* The levels of detail a draw samples: the image alone unless its filter
- * for a texture seen small is a mipmapped one. */
+ * for a texture seen small is a mipmapped one, and then no more than its
+ * own limit lets it reach. The renderer's cache may hold more levels than
+ * that, decoded for another draw of the same image or from whatever lies
+ * after an image that has none: a plant's leaves drawn from those were a
+ * burst of yellow. */
 static int sampled_levels(const TexCfg* C)
 {
-    int l, n = C->mip && C->nlevels > 1 ? C->nlevels : 1;
+    int l, n = C->mip && C->nlevels > 1 ? C->nlevels : 1, most = C->max_lod > 0.0f ? (int)(C->max_lod + 0.999f) + 1 : 1;
+    if (n > most) n = most;
     for (l = 1; l < n; l++)
         if (!C->level[l] || C->lw[l] <= 0 || C->lh[l] <= 0) return l;
     return n;
