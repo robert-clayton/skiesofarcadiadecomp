@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 10u
+#define SOA_HOST_ABI 11u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -171,6 +171,9 @@ typedef struct {
                                doubling. 0 for a model drawn with one stage */
     uint32_t tint_offsets;  /* how many of those vertices have a colour with the model's texture black too:
                                there the texture is more than a multiplier and the tint alone is short */
+    uint32_t solid_strips;  /* how many of its strips were solid, and how many belonged to the see-through */
+    uint32_t alpha_strips;  /* phase and were handed over there (soa_host_alpha_draws, ABI 11). A strip's flag
+                               says which it should be; GX's state when it is drawn says which it is */
     uint32_t vertices;      /* its vertex list as it was when the drawer took it, for a list the game refills */
     uint32_t vertices_bytes; /* for one model after another (a shape it works out afresh): [vertices,
                                vertices + vertices_bytes) of the frame's kept bytes (soa_host_model_bytes),
@@ -261,6 +264,89 @@ typedef struct {
  * the same frame, or -1 before the first. Watched with the models. */
 SOA_HOST_API long soa_host_screen_passes(SoaHostScreenPass* passes, unsigned max, unsigned* n, unsigned* skipped);
 
+/* ---- the see-through phase (ABI 11) -----------------------------------------------------------
+ * The draws that aren't solid, in the order they reached the GPU: strips
+ * that use alpha, glows, a sky that fades at its rim, and the few 3D draws
+ * no model makes (a sea of cloud). The game blends them in that order and
+ * they test and write depth as they go, so one drawn early hides what is
+ * drawn later behind it, and what was drawn before it shows through. A
+ * host that draws them some other way gets a different picture, so they
+ * are handed over ready to draw: triangles, the ones the game's culling
+ * left, in the game's view space (x right, y up, looking down -z), each
+ * vertex with its lit colour. A pixel is what the draw's combiner makes of
+ * that colour, shaded across the triangle, and the draw's texture:
+ * `stages` of them from first_stage on, each GX's
+ *
+ *     result = (d + ((1 - c) x a + c x b, taken away when `subtract`) + bias) x scale
+ *
+ * for the colour and again for the alpha, into one of four registers
+ * (0 the result so far, which the last stage leaves the pixel in). It is
+ * dropped unless it passes the alpha test, fogged as `fog` says, blended
+ * as a screen pass is (src_factor, dst_factor, subtract), and tested
+ * against and written to the depth buffer as `depth` says.
+ *
+ * A combiner that reads more than the draw's own texture and one vertex
+ * colour (a second texture looked up somewhere of its own, GX's second
+ * colour, a stage that compares) can't be handed over that way. Then
+ * `stages` is 0 and each vertex has what the whole combiner made of it with
+ * the texture white instead:
+ *
+ *     colour = texel x vertex colour        alpha = texel's alpha x vertex alpha
+ *                                           (the vertex alpha alone when texture_alpha is 0) */
+typedef struct {
+    uint32_t colour;        /* the colour's sum: d in bits 0-3, c 4-7, b 8-11, a 12-15 (GX_CC_*: 0 the result so
+                               far, 2 4 6 registers 1 to 3, and 1 3 5 7 their alphas; 8 the texel, 9 its alpha;
+                               10 the vertex colour, 11 its alpha; 12 one, 13 a half, 14 the stage's constant,
+                               15 zero); bias 16-17 (1 add a half, 2 take it away), subtract 18, clamp to 0..1
+                               19 (else to -4..4), scale 20-21 (x1, x2, x4, x1/2), the register written 22-23 */
+    uint32_t alpha;         /* the alpha's, laid out the same (GX_CA_*: 0 the result so far, 1 2 3 the
+                               registers, 4 the texel's alpha, 5 the vertex's, 6 the constant's, 7 zero) */
+    uint32_t konst;         /* the stage's constant, RGBA */
+    uint32_t flags;         /* bit 0 the stage samples the texture, bit 1 it takes the vertex colour: a stage
+                               that doesn't sees what the last one that did saw */
+} SoaHostAlphaStage;
+
+typedef struct {
+    float x, y, z;          /* in the game's view space */
+    float u, v;             /* over the texture: 0 to 1 */
+    uint32_t colour;        /* RGBA */
+} SoaHostAlphaVertex;
+
+typedef struct {
+    uint32_t first_vertex;  /* its triangles: [first_vertex, first_vertex + vertices) of the frame's, three each */
+    uint32_t vertices;
+    uint32_t model;         /* which of the frame's models it is a strip of, or 0xFFFFFFFF for none */
+    uint32_t src_factor, dst_factor, subtract;
+    uint32_t texture;       /* 0 for none; else as a 2D draw's, for soa_host_flat_texture */
+    uint32_t texture_gen;
+    uint16_t width, height;
+    uint8_t wrap_s, wrap_t; /* past its edge: 0 clamp, 1 repeat, 2 mirror */
+    uint8_t linear;
+    uint8_t texture_alpha;  /* 1: the texture's alpha multiplies the vertex's */
+    uint8_t depth;          /* bit 0 the depth test is on, bits 1-3 its function (GX_COMPARE: 3 less or equal),
+                               bit 4 a pixel that is drawn writes its depth */
+    uint8_t alpha_comp0, alpha_comp1; /* the alpha test: alpha comp0 ref0, joined by alpha_logic (0 and, 1 or, */
+    uint8_t alpha_logic;              /* 2 xor, 3 xnor) to alpha comp1 ref1; GX_COMPARE: 0 never, 1 less, 2 equal, */
+    uint8_t alpha_ref0, alpha_ref1;   /* 3 less or equal, 4 greater, 5 not equal, 6 greater or equal, 7 always */
+    uint8_t pad[2];
+    uint32_t fog[5];        /* as SoaHostModel's */
+    uint32_t offsets;       /* stages 0: how many of its vertices have a colour with the texture black too */
+    uint32_t first_stage;   /* its combiner: [first_stage, first_stage + stages) of the frame's stages */
+    uint32_t stages;        /* (soa_host_alpha_stages); 0 when it can't be given, see above */
+    int16_t registers[4][4]; /* what the four registers hold going in, RGBA, 255 to one */
+    float near_clip, far_clip; /* how far along the view its projection's near and far planes are: GX draws
+                               nothing of it nearer or farther. A frame's draws don't all share a projection
+                               (0 for a plane that can't be worked out) */
+} SoaHostAlphaDraw;
+
+/* The see-through draws of the newest whole frame and their vertices, as
+ * soa_host_flat_draws gives the 2D layer's; `skipped` counts the draws left
+ * out (a blend that reads the frame buffer's alpha, a logic operation, a
+ * texture too large to hand over). */
+SOA_HOST_API long soa_host_alpha_draws(SoaHostAlphaDraw* draws, unsigned max_draws, unsigned* n_draws, SoaHostAlphaVertex* vertices,
+                                       unsigned max_vertices, unsigned* n_vertices, unsigned* skipped);
+SOA_HOST_API long soa_host_alpha_stages(SoaHostAlphaStage* stages, unsigned max, unsigned* n);
+
 /* ---- the game's 2D layer (ABI 8) -----------------------------------------------------------------
  * Text, the HUD, a minimap, a dialogue box: flat draws on the screen, made
  * after the scene. A host that draws the scene itself lays them over its
@@ -310,11 +396,12 @@ typedef struct {
 SOA_HOST_API long soa_host_flat_draws(SoaHostFlatDraw* draws, unsigned max_draws, unsigned* n_draws, SoaHostFlatVertex* vertices,
                                       unsigned max_vertices, unsigned* n_vertices, unsigned* skipped);
 
-/* A 2D draw's texture, decoded: width x height RGBA bytes, rows from the
- * top, into out. Returns its generation now (compare with texture_gen: a
- * draw of an earlier frame may name an image since replaced), or 0 when
- * there is no such texture or max_bytes is too few. */
-SOA_HOST_API uint32_t soa_host_flat_texture(uint32_t texture, uint8_t* out, unsigned max_bytes, unsigned* width, unsigned* height);
+/* A draw's texture, decoded: width x height RGBA bytes, rows from the top,
+ * into out. `texture` and `gen` are the draw's: the runtime keeps the last
+ * few images each texture has held, since the game may have put another
+ * there by the time a published frame's draws are looked at. Returns 0 when
+ * that image is no longer kept, or max_bytes is too few. */
+SOA_HOST_API int soa_host_flat_texture(uint32_t texture, uint32_t gen, uint8_t* out, unsigned max_bytes, unsigned* width, unsigned* height);
 
 /* bytes of the game's memory at a guest address (0x80000000 up), as the
  * game sees them -- big-endian -- into out; 0 for a range outside MEM1, or
