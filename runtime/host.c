@@ -452,6 +452,7 @@ static void feed_strips(ModelFrame* b, SoaHostModel* m, unsigned strips)
     m->tev_colour = bp[0xC0] & 0x00FFFFFFu;
     m->tev_alpha = bp[0xC1] & 0x00FFFFFFu;
     for (i = 0; i < 5; i++) m->fog[i] = bp[0xEE + i] & 0x00FFFFFFu;
+    m->depth = bp[0x40] & 0x1Fu;
     if (!m->channels || !(m->chan_colour & 2)) return;
     mask = ((m->chan_colour >> 2) & 15) | (((m->chan_colour >> 11) & 15) << 4);
     for (i = 0; i < 8; i++)

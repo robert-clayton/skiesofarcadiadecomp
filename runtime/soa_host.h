@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 8u
+#define SOA_HOST_ABI 9u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -158,6 +158,10 @@ typedef struct {
                                of A / (B - its screen depth) - C */
     uint32_t first_light;   /* the lights chan_colour names: [first_light, first_light + lights) of the */
     uint32_t lights;        /* frame's, in the order of their GX indices */
+    uint32_t depth;         /* GX's depth mode as its last strip left it (BP 0x40): bit 0 the test is on, bits
+                               1-3 its function (3 less or equal), bit 4 the strip writes its depth. A
+                               see-through strip that does hides what is drawn later behind it. Set only
+                               when strips is not 0 (ABI 9) */
     uint32_t vertices;      /* its vertex list as it was when the drawer took it, for a list the game refills */
     uint32_t vertices_bytes; /* for one model after another (a shape it works out afresh): [vertices,
                                vertices + vertices_bytes) of the frame's kept bytes (soa_host_model_bytes),
