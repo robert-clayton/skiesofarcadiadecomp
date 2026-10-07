@@ -1195,6 +1195,11 @@ static void screen_draw(const DrawCmd* D, unsigned count)
     }
     if (x0 > -0.99f || x1 < 0.99f || y0 > -0.99f || y1 < 0.99f) { flat_draw(b, D, count); return; }
     if (!D->px.col_upd) return; /* it writes no colour */
+    /* A picture drawn over the whole screen (the opening's page of words) is
+     * a 2D draw like any other. The one textured quad that is a pass is the
+     * shadows': it multiplies what is there by one less a colour its mask
+     * picks. */
+    if (S->texen && !(D->px.blend_en && !D->px.logic_en && src == 0 && dst == 3)) { flat_draw(b, D, count); return; }
     /* What is left out: a logic operation (the shadows' own bookkeeping in
      * the red channel, which comes out even), a blend that reads the frame
      * buffer, more than one combiner stage, a textured quad that is shaded. */
