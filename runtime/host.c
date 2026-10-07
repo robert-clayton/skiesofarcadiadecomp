@@ -1199,7 +1199,7 @@ static void screen_draw(const DrawCmd* D, unsigned count)
      * a 2D draw like any other. The one textured quad that is a pass is the
      * shadows': it multiplies what is there by one less a colour its mask
      * picks. */
-    if (S->texen && !(D->px.blend_en && !D->px.logic_en && src == 0 && dst == 3)) { flat_draw(b, D, count); return; }
+    if (S->texen && !D->px.logic_en && !(D->px.blend_en && src == 0 && dst == 3)) { flat_draw(b, D, count); return; }
     /* What is left out: a logic operation (the shadows' own bookkeeping in
      * the red channel, which comes out even), a blend that reads the frame
      * buffer, more than one combiner stage, a textured quad that is shaded. */
