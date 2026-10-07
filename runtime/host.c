@@ -856,6 +856,7 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     const TexCfg* C1 = NULL;
     int plain, constant, tex_alpha = 0, program, late = 0, solid = 0, soft = 0;
     uint32_t proj[2];
+    unsigned strip = m ? m->solid_strips + m->alpha_strips : 0u; /* which of the visit's strips this is */
     if (D->efb || !D->px.col_upd) return;
     /* A see-through layer that is part clear and writes depth hides what is
      * drawn later behind it, solid or not, and is blended with what was
@@ -1043,6 +1044,45 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     for (i = 0; i < count && !soft; i++) soft = (g_white[i] & 255u) > 8u && (g_white[i] & 255u) < 247u;
     if (dst == 1) soft = 1; /* (added on: what is behind shows through all of it) */
     a->passes_before = (uint8_t)(b->np < 255 ? b->np : 255);
+    a->strip = (uint16_t)(strip < 65535u ? strip : 65535u);
+    a->strip_vertices = (uint16_t)count;
+    a->cull = (uint8_t)D->rc.cull;
+    a->chan_colour = gx_xf_regs()[0x100E];
+    a->chan_alpha = gx_xf_regs()[0x1010];
+    a->ambient = gx_xf_regs()[0x100A];
+    a->material = gx_xf_regs()[0x100C];
+    {
+        /* The strip's own coordinates and nothing else: the one place its
+         * stages sample at is GX's regular generation from the first
+         * texture coordinate, through a matrix that changes nothing, with no
+         * second one either (the game leaves GX's second transform on, with
+         * a matrix of the same kind). And its stages read the first lit
+         * colour only. (A table of colours looked up by the light is
+         * generated; a scrolled texture is not: the game rewrites the
+         * strip's coordinates for that.) */
+        const uint32_t* xf = gx_xf_regs();
+        int own = m != NULL && D->prim == 0x98 && program && places <= 1 && strip < 65535u;
+        for (i = 0; own && i < D->tev.stages; i++) own = D->tev.st[i].chan != 1;
+        if (own && places == 1) {
+            uint32_t info = xf[0x1040 + place[0]], post = xf[0x1050 + place[0]];
+            unsigned row[2], n = 1, q, r, c;
+            static const float same[2][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}};
+            row[0] = 4u * ((place[0] < 4 ? xf[0x1018] >> (6 + 6 * place[0]) : xf[0x1019] >> (6 * (place[0] - 4))) & 0x3Fu);
+            own = place_map[0] == 0 && ((info >> 4) & 7u) == 0 && ((info >> 7) & 31u) == 5u;
+            if (xf[0x1012] & 1u) {
+                row[n++] = 0x500u + 4u * (post & 0x3Fu);
+                own = own && !((post >> 8) & 1u);
+            }
+            for (q = 0; own && q < n; q++)
+                for (r = 0; own && r < 2; r++)
+                    for (c = 0; own && c < 4; c++) {
+                        float f;
+                        memcpy(&f, &xf[row[q] + 4 * r + c], 4);
+                        own = f == same[r][c];
+                    }
+        }
+        a->plain = (uint8_t)own;
+    }
     if (C) {
         if (keep_texture(C, &a->texture, &a->texture_gen) && tex_alpha) soft = 1;
         a->width = (uint16_t)C->lw[0];

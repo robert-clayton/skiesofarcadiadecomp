@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 13u
+#define SOA_HOST_ABI 14u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -371,6 +371,21 @@ typedef struct {
     float near_clip, far_clip; /* how far along the view its projection's near and far planes are: GX draws
                                nothing of it nearer or farther. A frame's draws don't all share a projection
                                (0 for a plane that can't be worked out) */
+    uint16_t strip;         /* ABI 14. Which of its model's strips it is: the nth strip of the visit to reach
+                               the GPU, from 0, solid ones counted too. With the visit's draw mode that
+                               names a strip of the model's polygon list, so a host that has the model
+                               can draw the strip from it */
+    uint16_t strip_vertices; /* how many vertices that strip has */
+    uint8_t cull;           /* GX's cull mode for it: 0 none, 1 front faces, 2 back faces, 3 all */
+    uint8_t plain;          /* 1: its vertices are the model's own and nothing else: a strip, its one place
+                               on a texture the strip's own coordinates (no matrix that changes them, no
+                               generated ones), its stages reading the first lit colour only */
+    uint8_t pad2[2];
+    uint32_t chan_colour;   /* GX's lighting when it was drawn, as SoaHostModel's four (which are as the
+                               model's last strip left them): the lights are the model's */
+    uint32_t chan_alpha;
+    uint32_t ambient;
+    uint32_t material;
     uint32_t texture1;      /* ABI 12. A second texture its stages sample (a table of colours looked up by
                                the light, say), as `texture` and the fields after it; 0 for none */
     uint32_t texture1_gen;
