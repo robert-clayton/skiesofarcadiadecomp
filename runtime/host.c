@@ -291,6 +291,7 @@ unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rate)
 #define MAX_OPEN 8 /* drawers inside drawers; none are seen, but a begin and its end must still pair */
 #define MAX_PASSES 16
 #define MAX_KEPT (512u * 1024u) /* vertex lists copied as their models are drawn: a few, of a few KB each */
+#define MAX_TINTS 65536u
 #define MAX_FLAT 2048u
 #define MAX_FLAT_VERTS 16384u
 #define FLAT_TEXTURES 1024u     /* the renderer's texture cache has this many slots (TexCfg.tex_id) */
@@ -309,6 +310,9 @@ typedef struct {
     SoaHostLight l[MAX_LIGHTS];
     unsigned nb;
     uint8_t bytes[MAX_KEPT];
+    unsigned ntint;
+    uint32_t tint[MAX_TINTS];
+    unsigned drawing;                /* the model whose strips are reaching the GPU now, or ~0u */
     unsigned nf, nfv, nf_skipped;    /* the 2D layer: draws, their vertices, and the draws left out */
     SoaHostFlatDraw flat[MAX_FLAT];
     SoaHostFlatVertex fv[MAX_FLAT_VERTS];
@@ -338,7 +342,8 @@ static ModelFrame* building(CpuState* s)
         b->proj[6] = 1.0f; /* none seen yet */
         b->frame = f;
         b->n = b->nt = b->nl = b->n_open = b->sent = b->np = b->np_skipped = b->nb = 0;
-        b->nf = b->nfv = b->nf_skipped = 0;
+        b->nf = b->nfv = b->nf_skipped = b->ntint = 0;
+        b->drawing = ~0u;
     }
     return b;
 }
@@ -373,6 +378,7 @@ static void feed_model(CpuState* s, const NinjaVisit* v)
     b->n_open++;
     if (b->n >= MAX_MODELS) { g_mf_dropped++; return; }
     b->visit[b->n] = v->visit;
+    b->drawing = b->n; /* until its drawer returns; what it records into a list is drawn later (feed_sending) */
     m = &b->m[b->n++];
     memset(m, 0, sizeof *m);
     m->model = v->model;
@@ -484,12 +490,33 @@ static void feed_end(CpuState* s, unsigned visit, int drawn, int recorded, unsig
     unsigned index;
     (void)s;
     (void)visit;
+    b->drawing = ~0u;
     if (!b->n_open) return; /* watching began inside a drawer */
     b->n_open--;
     if (b->n_open >= MAX_OPEN || (index = b->open[b->n_open]) >= b->n) return;
     m = &b->m[index];
     m->drawn = drawn ? 1u : 0u;
     if (!recorded && strips) feed_strips(b, m, strips);
+}
+
+/* Where a visit is among the frame's records, or ~0u. */
+static unsigned visit_index(const ModelFrame* b, unsigned visit)
+{
+    unsigned lo = 0, hi = b->n;
+    while (lo < hi) { /* the visits' numbers climb */
+        unsigned mid = (lo + hi) / 2;
+        if (b->visit[mid] < visit) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < b->n && b->visit[lo] == visit ? lo : ~0u;
+}
+
+/* The parser is about to run the strips a visit recorded. */
+static void feed_sending(CpuState* s, unsigned visit)
+{
+    ModelFrame* b = &g_mf[g_build];
+    (void)s;
+    b->drawing = b->frame == (long)gx_frame_count() ? visit_index(b, visit) : ~0u;
 }
 
 /* The display list a visit's strips were recorded into is called, and the
@@ -499,6 +526,7 @@ static void feed_sent(CpuState* s, unsigned visit, unsigned strips)
     ModelFrame* b = &g_mf[g_build];
     unsigned lo = 0, hi = b->n;
     (void)s;
+    b->drawing = ~0u;
     if (b->frame != (long)gx_frame_count() || !strips) return;
     while (lo < hi) { /* the visits' numbers climb */
         unsigned mid = (lo + hi) / 2;
@@ -508,7 +536,7 @@ static void feed_sent(CpuState* s, unsigned visit, unsigned strips)
     if (lo < b->n && b->visit[lo] == visit) feed_strips(b, &b->m[lo], strips);
 }
 
-static const NinjaFeed g_ninja_feed = {feed_model, feed_texture, feed_end, feed_sent};
+static const NinjaFeed g_ninja_feed = {feed_model, feed_texture, feed_end, feed_sending, feed_sent};
 
 /* ---- what the game draws over the whole screen ------------------------------------------------
  * The renderer shows every draw to an exporter (gxr_export.h); this one
@@ -572,6 +600,59 @@ static void screen_vertex(unsigned i, const VertexIn* in, const Vertex* out)
     (void)i;
     (void)in;
     (void)out;
+}
+
+/* A strip of a model drawn with more than one combiner stage: what the
+ * whole combiner makes of each vertex with the model's own texture (GX's
+ * map 0, where Ninja puts it) white, and whether it makes anything with it
+ * black. The renderer's own combiner works it out, other textures looked
+ * up at the vertex and all. */
+static void tint_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
+{
+    static const uint8_t white[4] = {255, 255, 255, 255}, black[4] = {0, 0, 0, 0};
+    static TevSetup T; /* the guest's thread only; too big for its stack */
+    SoaHostModel* m;
+    TexCfg* own;
+    unsigned i, k;
+    if (b->drawing >= b->n || D->efb || D->tev.stages < 2 || !D->px.col_upd) return;
+    /* the strip of eight zeroes the game sends between real ones */
+    for (i = 0; count == 8 && i < 8 && D->v[i].x == 0.0f && D->v[i].y == 0.0f && D->v[i].w == 0.0f; i++) {}
+    if (count == 8 && i == 8) return;
+    m = &b->m[b->drawing];
+    if (!m->tint_vertices) m->tints = b->ntint;
+    if (m->tints + m->tint_vertices != b->ntint || b->ntint + count > MAX_TINTS) { g_mf_dropped++; return; }
+    T = D->tev;
+    own = &T.tex[0];
+    memset(own, 0, sizeof *own);
+    own->lw[0] = own->lh[0] = own->w = own->h = own->nlevels = 1;
+    own->scale_s = own->scale_t = own->su0 = own->sv0 = 1.0f;
+    for (i = 0; i < count; i++) {
+        const Vertex* p = &D->v[i];
+        int ras[2][4];
+        float tex[8][4];
+        uint8_t out[4];
+        int pass = 1;
+        for (k = 0; k < 2; k++) {
+            ras[k][0] = (int)(p->col[k].r * 255.0f + 0.5f);
+            ras[k][1] = (int)(p->col[k].g * 255.0f + 0.5f);
+            ras[k][2] = (int)(p->col[k].b * 255.0f + 0.5f);
+            ras[k][3] = (int)(p->col[k].a * 255.0f + 0.5f);
+        }
+        for (k = 0; k < 8; k++) {
+            tex[k][0] = p->tex[k][0];
+            tex[k][1] = p->tex[k][1];
+            tex[k][2] = p->tex[k][2];
+            tex[k][3] = 0.0f;
+        }
+        own->level[0] = white;
+        tev_pixel(&T, ras, tex, out, &pass);
+        b->tint[b->ntint + i] = (uint32_t)out[0] << 24 | (uint32_t)out[1] << 16 | (uint32_t)out[2] << 8 | out[3];
+        own->level[0] = black;
+        tev_pixel(&T, ras, tex, out, &pass);
+        if (out[0] | out[1] | out[2]) m->tint_offsets++;
+    }
+    b->ntint += count;
+    m->tint_vertices += count;
 }
 
 /* The 2D layer's textures as the renderer decoded them, kept here so the
@@ -693,8 +774,10 @@ static void screen_draw(const DrawCmd* D, unsigned count)
     float x0 = 2, x1 = -2, y0 = 2, y1 = -2;
     unsigned i, corners = 0, src = D->px.sfac, dst = D->px.dfac;
     int ok = 1, flat = 1;
+    if (!b->n || b->frame != (long)gx_frame_count()) return;
+    if (!(gx_xf_regs()[0x1026] & 1)) { tint_draw(b, D, count); return; }
     /* flat on the screen, after the frame's first model */
-    if (D->efb || !(gx_xf_regs()[0x1026] & 1) || !b->n || b->frame != (long)gx_frame_count()) return;
+    if (D->efb) return;
     /* a quad over all of the screen is a screen pass, until the 2D layer
      * has begun: then whatever covers the screen covers that too */
     if (count != 4 || b->nf) { flat_draw(b, D, count); return; }
@@ -812,6 +895,22 @@ uint32_t soa_host_flat_texture(uint32_t texture, uint8_t* out, unsigned max_byte
     }
     plat_unlock(&g_mf_lock);
     return gen;
+}
+
+long soa_host_model_tints(uint32_t* out, unsigned max, unsigned* n)
+{
+    long frame = -1;
+    unsigned count = 0;
+    plat_lock(&g_mf_lock);
+    if (g_ready >= 0) {
+        const ModelFrame* r = &g_mf[g_ready];
+        count = r->ntint < max ? r->ntint : max;
+        if (out) memcpy(out, r->tint, count * sizeof *out);
+        frame = r->frame;
+    }
+    plat_unlock(&g_mf_lock);
+    if (n) *n = count;
+    return frame;
 }
 
 long soa_host_model_bytes(uint8_t* out, unsigned max, unsigned* n)

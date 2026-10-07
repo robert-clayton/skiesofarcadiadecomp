@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 9u
+#define SOA_HOST_ABI 10u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -162,6 +162,15 @@ typedef struct {
                                1-3 its function (3 less or equal), bit 4 the strip writes its depth. A
                                see-through strip that does hides what is drawn later behind it. Set only
                                when strips is not 0 (ABI 9) */
+    uint32_t tints;         /* for a model drawn with more than one combiner stage (ABI 10): what the whole */
+    uint32_t tint_vertices; /* combiner makes of each vertex with the model's own texture white, RGBA:
+                               [tints, tints + tint_vertices) of the frame's (soa_host_model_tints), a vertex
+                               for a vertex in the order its strips reached the GPU, both passes of a mode
+                               that has two. The model's texture times that is the strip's colour, whatever
+                               the stages were: other textures looked up at the vertex, a second light, a
+                               doubling. 0 for a model drawn with one stage */
+    uint32_t tint_offsets;  /* how many of those vertices have a colour with the model's texture black too:
+                               there the texture is more than a multiplier and the tint alone is short */
     uint32_t vertices;      /* its vertex list as it was when the drawer took it, for a list the game refills */
     uint32_t vertices_bytes; /* for one model after another (a shape it works out afresh): [vertices,
                                vertices + vertices_bytes) of the frame's kept bytes (soa_host_model_bytes),
@@ -208,6 +217,10 @@ SOA_HOST_API long soa_host_models(SoaHostModel* models, unsigned max_models, uns
  * as soa_host_models does, or -1; when the two differ a frame was published
  * between the calls, and both want asking again. */
 SOA_HOST_API long soa_host_model_bytes(uint8_t* out, unsigned max, unsigned* n);
+
+/* The tints the newest whole frame's models name: up to max of them into
+ * out, how many in *n; the frame's number as soa_host_models gives it. */
+SOA_HOST_API long soa_host_model_tints(uint32_t* out, unsigned max, unsigned* n);
 
 /* ---- what the game draws over the whole screen (ABI 6) ----------------------------------------
  * After the models the game draws on the frame itself, with quads that

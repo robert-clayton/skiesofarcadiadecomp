@@ -253,6 +253,7 @@ static uint32_t list_called(CpuState* s, uint32_t addr, uint32_t size, uint32_t 
             if (at < r->begin) return r->begin - at;
             inside = 1;
             draws = gx_draw_count();
+            if (g_feed && g_feed->sending) g_feed->sending(s, r->visit);
             if (notes) {
                 snprintf(line, sizeof line, "{\"kind\":\"model_sent\",\"visit\":%u}", r->visit);
                 gxr_export_note(line);

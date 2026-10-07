@@ -52,6 +52,10 @@ typedef struct {
      * is called. Else to the GPU, `strips` of them, and when that is not 0
      * GX's state is now as the last of them left it. May be NULL. */
     void (*end)(CpuState* s, unsigned visit, int drawn, int recorded, unsigned strips);
+    /* a recorded visit's strips are about to reach the GPU, inside the list
+     * the game is calling: the draws from here to its `sent` are its own.
+     * May be NULL. */
+    void (*sending)(CpuState* s, unsigned visit);
     /* a recorded visit's strips have just reached the GPU, `strips` of them,
      * inside the list the game is calling; GX's state is as the last of
      * them left it. May be NULL. */
