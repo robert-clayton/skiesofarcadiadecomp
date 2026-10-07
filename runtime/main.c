@@ -1002,8 +1002,36 @@ static void skip_parse(void)
     fprintf(stderr, "[skip] to frame %u at %lu times real speed, drawing nothing on the way\n", g_skip_to, fast);
 }
 
+/* A host asks for the same while the run is under way (soa_host_skip_to):
+ * the request waits here for the guest's thread, which owns the clock, and
+ * is taken at the end of the frame it is in. */
+static volatile unsigned g_skip_ask_frame, g_skip_ask_speed;
+void skip_request(unsigned frame, unsigned speed)
+{
+    g_skip_ask_speed = speed ? speed : 10u;
+    g_skip_ask_frame = frame;
+}
+
 static void skip_at_frame(unsigned frame)
 {
+    unsigned ask = g_skip_ask_frame;
+    if (ask) {
+        g_skip_ask_frame = 0;
+        if (ask > frame) {
+            char speed[16];
+            if (!g_skip_to) { /* not already skipping: this is the speed to come back to */
+                const char* was = getenv("SOA_SPEED");
+                g_skip_back = hle_speed();
+                snprintf(g_skip_speed_was, sizeof g_skip_speed_was, "%s", was ? was : "");
+            }
+            g_skip_to = ask;
+            snprintf(speed, sizeof speed, "%u", g_skip_ask_speed);
+            plat_setenv("SOA_SPEED", speed);
+            clock_set_speed_at(g_skip_ask_speed, clock_host_ns());
+            gxr_skip_until(g_skip_to);
+            fprintf(stderr, "[skip] frame %u: to frame %u at %u times real speed, drawing nothing on the way\n", frame, g_skip_to, g_skip_ask_speed);
+        }
+    }
     if (!g_skip_to || frame < g_skip_to) return;
     plat_setenv("SOA_SPEED", g_skip_speed_was);
     clock_set_speed_at(g_skip_back, clock_host_ns());

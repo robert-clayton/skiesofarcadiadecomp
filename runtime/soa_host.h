@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 11u
+#define SOA_HOST_ABI 12u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -179,6 +179,10 @@ typedef struct {
                                vertices + vertices_bytes) of the frame's kept bytes (soa_host_model_bytes),
                                the bytes guest memory held at vlist then. 0 for every other model, whose
                                list stays as it is and is read at vlist */
+    float near_clip, far_clip; /* ABI 12. How far along the view the near and far planes of the projection
+                               its strips were drawn under are; 0 for one that can't be worked out. A frame
+                               has several projections (a sky's reaches far past the scene's), and GX's fog
+                               goes by the depth the strip's own gives */
 } SoaHostModel;
 
 /* One GX light as a model's draws had it (GXInitLight*), in the game's view
@@ -201,6 +205,12 @@ typedef struct {
     uint32_t palette;       /* a palette's colour format: 0 IA8, 1 RGB565, 2 RGB5A3 */
     uint16_t width, height;
     char name[24];          /* the texture list's name for it */
+    uint8_t levels;         /* ABI 12. How many levels of detail the model's draws sample: 1 for the image
+                               alone; more when GX's filter for a texture seen small is a mipmapped one.
+                               The smaller levels follow the image in memory, each half the last a side
+                               (never under one texel) and laid out as an image of its own size is */
+    int8_t lod_bias;        /* added to the level GX works out, in 32nds of a level */
+    uint8_t min_lod, max_lod; /* the levels it keeps between, in 16ths */
 } SoaHostTexture;
 
 SOA_HOST_API void soa_host_watch_models(int on);
@@ -256,6 +266,12 @@ typedef struct {
     uint32_t image;         /* the texture's guest address; 0 for a quad without one */
     uint32_t format;        /* its GX format: 1 I8, ... */
     uint16_t width, height;
+    float rect[4];          /* ABI 12. Where the quad's corners are: left, top, right, bottom, 0 to 1 across
+                               and down the screen. It covers the screen and may reach past it, and its
+                               corners' colours are out where they are */
+    uint32_t split;         /* ABI 12. How GX cut it into two triangles, each shaded between its own three
+                               corners: 1 from the bottom left to the top right, 2 from the top left to the
+                               bottom right; 0 when it can't be told (shade it evenly between the four) */
 } SoaHostScreenPass;
 
 /* The screen passes of the newest whole frame: up to max of them into the
@@ -302,14 +318,23 @@ typedef struct {
     uint32_t alpha;         /* the alpha's, laid out the same (GX_CA_*: 0 the result so far, 1 2 3 the
                                registers, 4 the texel's alpha, 5 the vertex's, 6 the constant's, 7 zero) */
     uint32_t konst;         /* the stage's constant, RGBA */
-    uint32_t flags;         /* bit 0 the stage samples the texture, bit 1 it takes the vertex colour: a stage
-                               that doesn't sees what the last one that did saw */
+    uint32_t flags;         /* bit 0 the stage samples a texture, bit 1 it takes the vertex colour, bit 2
+                               (ABI 12) the vertex's second colour: a stage that does none sees what the
+                               last one that did saw. ABI 12: bit 3 the texture is the draw's second
+                               (texture1), bits 4-5 which of the vertex's places it samples at (0 u v,
+                               1 u1 v1, 2 u2 v2); bits 8-15 which of the texel's channels the stage sees
+                               as its red, green, blue and alpha, two bits each (0 red ... 3 alpha: GX's
+                               swap table; 0 1 2 3 is the texel as it is), bits 16-23 the same for the
+                               vertex colour it takes */
 } SoaHostAlphaStage;
 
 typedef struct {
     float x, y, z;          /* in the game's view space */
     float u, v;             /* over the texture: 0 to 1 */
     uint32_t colour;        /* RGBA */
+    uint32_t colour1;       /* ABI 12. GX's second lit colour of the vertex, for a stage that takes it */
+    float u1, v1, u2, v2;   /* ABI 12. Two more places on a texture, for a combiner whose stages sample at
+                               more than one: a stage says which of the three it reads */
 } SoaHostAlphaVertex;
 
 typedef struct {
@@ -328,6 +353,9 @@ typedef struct {
     uint8_t alpha_comp0, alpha_comp1; /* the alpha test: alpha comp0 ref0, joined by alpha_logic (0 and, 1 or, */
     uint8_t alpha_logic;              /* 2 xor, 3 xnor) to alpha comp1 ref1; GX_COMPARE: 0 never, 1 less, 2 equal, */
     uint8_t alpha_ref0, alpha_ref1;   /* 3 less or equal, 4 greater, 5 not equal, 6 greater or equal, 7 always */
+    uint8_t levels;         /* as SoaHostTexture's four (ABI 12): the texture's levels of detail this draw */
+    int8_t lod_bias;        /* samples, which soa_host_flat_texture hands over together */
+    uint8_t min_lod, max_lod;
     uint8_t pad[2];
     uint32_t fog[5];        /* as SoaHostModel's */
     uint32_t offsets;       /* stages 0: how many of its vertices have a colour with the texture black too */
@@ -337,6 +365,13 @@ typedef struct {
     float near_clip, far_clip; /* how far along the view its projection's near and far planes are: GX draws
                                nothing of it nearer or farther. A frame's draws don't all share a projection
                                (0 for a plane that can't be worked out) */
+    uint32_t texture1;      /* ABI 12. A second texture its stages sample (a table of colours looked up by
+                               the light, say), as `texture` and the fields after it; 0 for none */
+    uint32_t texture1_gen;
+    uint16_t width1, height1;
+    uint8_t wrap1_s, wrap1_t, linear1, levels1;
+    int8_t lod_bias1;
+    uint8_t pad1[3];
 } SoaHostAlphaDraw;
 
 /* The see-through draws of the newest whole frame and their vertices, as
@@ -389,6 +424,9 @@ typedef struct {
                                or equal): the 2D layer is laid out in depth, and a piece drawn early can
                                stay on top of one drawn later */
     uint8_t depth_write;    /* 1: it writes its depth, where its alpha is over 0 */
+    uint8_t under;          /* ABI 12. 1: drawn before the frame's first model, so it lies under the scene
+                               and shows only where the scene leaves the screen bare: a backdrop */
+    uint8_t pad;
     float depth;            /* GX's screen depth of its first vertex, 0 (near) to 1 */
     float scissor[4];       /* left, top, right, bottom, as x and y above: nothing is drawn outside */
 } SoaHostFlatDraw;
@@ -402,8 +440,12 @@ SOA_HOST_API long soa_host_flat_draws(SoaHostFlatDraw* draws, unsigned max_draws
  * into out. `texture` and `gen` are the draw's: the runtime keeps the last
  * few images each texture has held, since the game may have put another
  * there by the time a published frame's draws are looked at. Returns 0 when
- * that image is no longer kept, or max_bytes is too few. */
-SOA_HOST_API int soa_host_flat_texture(uint32_t texture, uint32_t gen, uint8_t* out, unsigned max_bytes, unsigned* width, unsigned* height);
+ * that image is no longer kept, or max_bytes is too few. After the image
+ * come its smaller levels of detail (ABI 12), when the draw that named it
+ * samples them: *levels in all, each half the last a side and never under
+ * one texel, so a third as many bytes again at most. */
+SOA_HOST_API int soa_host_flat_texture(uint32_t texture, uint32_t gen, uint8_t* out, unsigned max_bytes, unsigned* width, unsigned* height,
+                                       unsigned* levels);
 
 /* bytes of the game's memory at a guest address (0x80000000 up), as the
  * game sees them -- big-endian -- into out; 0 for a range outside MEM1, or
@@ -415,6 +457,14 @@ SOA_HOST_API int soa_host_read(uint32_t address, void* out, unsigned bytes);
  * mute silences what soa_host_audio returns. */
 SOA_HOST_API void soa_host_pause(int on);
 SOA_HOST_API void soa_host_mute(int on);
+
+/* Get to a frame fast (ABI 12): from the end of the frame the game is in
+ * until it presents `frame`, its clock runs `speed` times the wall clock's
+ * (0 for ten) and nothing is drawn, as SOA_SKIP_TO does from the start of a
+ * run; then it is as it was. For a host that looks at one moment after
+ * another of one run: the frames between, and what a pad script presses at
+ * each, are the same ones. A frame already past is not a request. */
+SOA_HOST_API void soa_host_skip_to(unsigned frame, unsigned speed);
 
 #ifdef __cplusplus
 }

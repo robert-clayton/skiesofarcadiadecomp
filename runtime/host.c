@@ -22,6 +22,7 @@
 #include "ninja.h"
 #include "plat.h"
 #include <fenv.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -178,6 +179,12 @@ void soa_host_pause(int on)
     clock_pause(on);
 }
 
+void skip_request(unsigned frame, unsigned speed); /* main.c */
+void soa_host_skip_to(unsigned frame, unsigned speed)
+{
+    skip_request(frame, speed);
+}
+
 void soa_host_mute(int on)
 {
     audio_set_muted(on);
@@ -322,6 +329,7 @@ typedef struct {
     unsigned nas;
     SoaHostAlphaStage as[MAX_ALPHA_STAGES];
     unsigned nf, nfv, nf_skipped;    /* the 2D layer: draws, their vertices, and the draws left out */
+    unsigned nf_under;               /* how many of the draws came before the first model: the backdrop */
     SoaHostFlatDraw flat[MAX_FLAT];
     SoaHostFlatVertex fv[MAX_FLAT_VERTS];
 } ModelFrame;
@@ -352,7 +360,7 @@ static ModelFrame* building_frame(void)
         b->proj[6] = 1.0f; /* none seen yet */
         b->frame = f;
         b->n = b->nt = b->nl = b->n_open = b->sent = b->np = b->np_skipped = b->nb = 0;
-        b->nf = b->nfv = b->nf_skipped = b->ntint = b->na = b->nav = b->na_skipped = b->nas = 0;
+        b->nf = b->nfv = b->nf_skipped = b->ntint = b->na = b->nav = b->na_skipped = b->nas = b->nf_under = 0;
         b->drawing = ~0u;
     }
     return b;
@@ -390,9 +398,13 @@ static void feed_model(CpuState* s, const NinjaVisit* v)
         b->proj[6] = 0.0f;
     }
     /* What was drawn on the screen before the frame's first model lies
-     * under the scene, which a host's 2D layer can't: it is let go. (A
-     * frame with no model at all keeps it: there it is the picture.) */
-    if (!b->n) b->nf = b->nfv = b->nf_skipped = 0;
+     * under the scene, and is marked so: a host's 2D layer goes over. (A
+     * frame with no model at all has no under: there it is the picture.) */
+    if (!b->n) {
+        unsigned k;
+        for (k = 0; k < b->nf; k++) b->flat[k].under = 1;
+        b->nf_under = b->nf;
+    }
     /* a model past the array still opens, so its end pairs with it */
     if (b->n_open < MAX_OPEN) b->open[b->n_open] = b->n < MAX_MODELS ? b->n : ~0u;
     b->n_open++;
@@ -441,6 +453,9 @@ static void feed_texture(CpuState* s, uint32_t id, uint32_t image, uint32_t form
     t->palette = palette;
     t->width = (uint16_t)width;
     t->height = (uint16_t)height;
+    t->levels = 1;
+    t->lod_bias = 0;
+    t->min_lod = t->max_lod = 0;
     snprintf(t->name, sizeof t->name, "%s", name);
     b->m[b->n - 1].textures++;
 }
@@ -478,6 +493,13 @@ static void feed_strips(ModelFrame* b, SoaHostModel* m, unsigned strips)
     m->tev_colour = bp[0xC0] & 0x00FFFFFFu;
     m->tev_alpha = bp[0xC1] & 0x00FFFFFFu;
     for (i = 0; i < 5; i++) m->fog[i] = bp[0xEE + i] & 0x00FFFFFFu;
+    {
+        float p4, p5;
+        memcpy(&p4, &xf[0x1024], 4);
+        memcpy(&p5, &xf[0x1025], 4);
+        m->near_clip = (xf[0x1026] & 1) || p4 == 1.0f ? 0.0f : p5 / (p4 - 1.0f);
+        m->far_clip = (xf[0x1026] & 1) || p4 == 0.0f ? 0.0f : p5 / p4;
+    }
     m->depth = bp[0x40] & 0x1Fu;
     if (!m->channels || !(m->chan_colour & 2)) return;
     mask = ((m->chan_colour >> 2) & 15) | (((m->chan_colour >> 11) & 15) << 4);
@@ -649,6 +671,8 @@ typedef struct {
     uint32_t hash;
     unsigned frame;  /* the last frame a draw used it in */
     int w, h;
+    int levels;      /* how many levels of detail rgba holds, the image first */
+    size_t bytes;
     uint8_t* rgba;
 } FlatTexture;
 static FlatTexture g_flat_tex[FLAT_TEXTURES][KEPT_IMAGES];
@@ -667,16 +691,28 @@ static int keepable(const TexCfg* C)
  * some textures whose texels never change: a host would make a new texture
  * of its own each time. Here an image decoded again is known by its texels
  * and keeps its number. */
+/* The levels of detail a draw samples: the image alone unless its filter
+ * for a texture seen small is a mipmapped one. */
+static int sampled_levels(const TexCfg* C)
+{
+    int l, n = C->mip && C->nlevels > 1 ? C->nlevels : 1;
+    for (l = 1; l < n; l++)
+        if (!C->level[l] || C->lw[l] <= 0 || C->lh[l] <= 0) return l;
+    return n;
+}
+
 static void keep_texture(const TexCfg* C, uint32_t* texture, uint32_t* gen)
 {
     FlatTexture* slot = g_flat_tex[C->tex_id];
     FlatTexture* ft = &slot[0];
     unsigned k, now = gx_frame_count();
-    size_t bytes = (size_t)C->lw[0] * (size_t)C->lh[0] * 4u, at;
+    int l, levels = sampled_levels(C);
+    size_t bytes = (size_t)C->lw[0] * (size_t)C->lh[0] * 4u, at, all = 0;
     uint32_t hash = 2166136261u, word;
     *texture = (uint32_t)C->tex_id + 1u;
+    for (l = 0; l < levels; l++) all += (size_t)C->lw[l] * (size_t)C->lh[l] * 4u;
     for (k = 0; k < KEPT_IMAGES; k++)
-        if (slot[k].rgba && slot[k].seen == C->tex_gen && slot[k].w == C->lw[0] && slot[k].h == C->lh[0]) {
+        if (slot[k].rgba && slot[k].seen == C->tex_gen && slot[k].w == C->lw[0] && slot[k].h == C->lh[0] && slot[k].levels == levels) {
             slot[k].frame = now; /* only this thread writes these; the host's reads the texels, under the lock */
             *gen = slot[k].gen;
             return;
@@ -686,7 +722,8 @@ static void keep_texture(const TexCfg* C, uint32_t* texture, uint32_t* gen)
         hash = (hash ^ word) * 16777619u;
     }
     for (k = 0; k < KEPT_IMAGES; k++) {
-        if (slot[k].rgba && slot[k].hash == hash && slot[k].w == C->lw[0] && slot[k].h == C->lh[0] && memcmp(slot[k].rgba, C->level[0], bytes) == 0) {
+        if (slot[k].rgba && slot[k].hash == hash && slot[k].w == C->lw[0] && slot[k].h == C->lh[0] && slot[k].levels == levels &&
+            memcmp(slot[k].rgba, C->level[0], bytes) == 0) {
             slot[k].seen = C->tex_gen;
             slot[k].frame = now;
             *gen = slot[k].gen;
@@ -695,12 +732,17 @@ static void keep_texture(const TexCfg* C, uint32_t* texture, uint32_t* gen)
         if (!slot[k].rgba || (ft->rgba && (int)(slot[k].frame - ft->frame) < 0)) ft = &slot[k];
     }
     plat_lock(&g_mf_lock);
-    if (!ft->rgba || (size_t)ft->w * (size_t)ft->h * 4u != bytes) {
+    if (!ft->rgba || ft->bytes != all) {
         free(ft->rgba);
-        ft->rgba = (uint8_t*)malloc(bytes);
+        ft->rgba = (uint8_t*)malloc(all);
     }
     if (ft->rgba) {
-        memcpy(ft->rgba, C->level[0], bytes);
+        for (l = 0, at = 0; l < levels; l++) {
+            memcpy(ft->rgba + at, C->level[l], (size_t)C->lw[l] * (size_t)C->lh[l] * 4u);
+            at += (size_t)C->lw[l] * (size_t)C->lh[l] * 4u;
+        }
+        ft->levels = levels;
+        ft->bytes = all;
         ft->gen = ++g_flat_count[C->tex_id];
         ft->seen = C->tex_gen;
         ft->hash = hash;
@@ -771,6 +813,26 @@ static void combine_vertices(const DrawCmd* D, unsigned count)
  * vertex, with the blend, the alpha test, the depth mode and the fog. Solid
  * is a constant alpha of one, no alpha test, and a blend that then replaces
  * what is there. */
+/* How a model's draw samples its texture when it is seen small goes on
+ * the model's record of that texture, found by the image GX was given: a
+ * palettized one's record starts at its palette. Of two strips that
+ * differ, the one that reads more levels is kept. */
+static void texture_lod(ModelFrame* b, const SoaHostModel* m, const TexCfg* C)
+{
+    uint32_t image = 0x80000000u | ((gx_bp_regs()[0x94] & 0x001FFFFFu) << 5);
+    int levels = sampled_levels(C);
+    unsigned k;
+    for (k = 0; k < m->textures && m->first_texture + k < b->nt; k++) {
+        SoaHostTexture* t = &b->t[m->first_texture + k];
+        uint32_t palette = t->format == 8 ? 32u : t->format == 9 ? 512u : 0u;
+        if ((t->image | 0x80000000u) + palette != image || levels <= t->levels) continue;
+        t->levels = (uint8_t)levels;
+        t->lod_bias = (int8_t)(C->lod_bias * 32.0f);
+        t->min_lod = (uint8_t)(C->min_lod * 16.0f);
+        t->max_lod = (uint8_t)(C->max_lod * 16.0f);
+    }
+}
+
 static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
 {
     const Stage* S = &D->tev.st[0];
@@ -779,6 +841,8 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     SoaHostModel* m = b->drawing < b->n ? &b->m[b->drawing] : NULL;
     SoaHostAlphaDraw* a;
     unsigned i, t, tris, coord = 0, src = D->px.sfac, dst = D->px.dfac, order[3], kept = 0, offsets = 0;
+    unsigned place[3] = {0, 0, 0}, place_map[3] = {0, 0, 0}, places = 0;
+    const TexCfg* C1 = NULL;
     int plain, constant, tex_alpha = 0, program;
     if (D->efb || !D->px.col_upd) return;
     /* the strip of eight zeroes the game sends between real ones */
@@ -793,6 +857,7 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     for (i = 0; i < D->tev.stages; i++)
         if (D->tev.st[i].texen && D->tev.st[i].texmap == 0) { C = &D->tev.tex[0]; coord = D->tev.st[i].texcoord & 7; break; }
     if (!m && !C) return; /* no model's and no texture: a shadow volume, which the screen passes account for */
+    if (m && C) texture_lod(b, m, C);
     /* a frame with no model yet has had no projection noted: the first of its own */
     if (b->proj[6] != 0.0f) {
         for (i = 0; i < 6; i++) memcpy(&b->proj[i], &gx_xf_regs()[0x1020 + i], 4);
@@ -830,17 +895,29 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     a = &b->alpha[b->na];
     memset(a, 0, sizeof *a);
     a->first_vertex = b->nav;
-    /* Whether the combiner can be handed over whole: every stage reads no
-     * texture but the draw's own, at one place, and no vertex colour but
-     * the first, each as GX orders its channels, and none compares. */
+    /* Whether the combiner can be handed over whole: its stages read at
+     * most GX's first two textures, at three places a vertex between them,
+     * and none compares. (A sky is one texture times a table of colours looked up at
+     * two places: worked out a vertex and spread across the triangle, as
+     * what can't be handed over is, its clouds came out blue.) */
     program = D->tev.stages <= 8 && b->nas + D->tev.stages <= MAX_ALPHA_STAGES;
     for (i = 0; program && i < D->tev.stages; i++) {
         const Stage* T = &D->tev.st[i];
-        static const uint8_t straight[4] = {0, 1, 2, 3};
-        if (T->texen && (!C || T->texmap != 0 || (T->texcoord & 7) != coord || memcmp(T->tswap, straight, 4) != 0)) program = 0;
-        if (T->chan == 1 || (T->chan == 0 && memcmp(T->rswap, straight, 4) != 0)) program = 0;
+        if (T->texen) {
+            /* one of two textures (GX's maps 0 and 1), at one of three places a vertex */
+            unsigned map = T->texmap & 7, k = T->texcoord & 7, p;
+            if (map > 1 || !keepable(&D->tev.tex[map])) { program = 0; break; }
+            for (p = 0; p < places && !(place[p] == k && place_map[p] == map); p++) {}
+            if (p == places) {
+                if (places == 3) { program = 0; break; }
+                place[places] = k;
+                place_map[places++] = map;
+            }
+            if (map == 1) C1 = &D->tev.tex[1];
+        }
         if (T->cbias == 3 || T->abias == 3) program = 0;
     }
+    if (!program) C1 = NULL;
     if (program) {
         a->first_stage = b->nas;
         a->stages = D->tev.stages;
@@ -852,7 +929,15 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
             o->alpha = (uint32_t)T->ad | (uint32_t)T->ac << 4 | (uint32_t)T->ab << 8 | (uint32_t)T->aa << 12 | (uint32_t)T->abias << 16 |
                        (uint32_t)(T->aop & 1) << 18 | (uint32_t)(T->aclamp & 1) << 19 | (uint32_t)(T->ashift & 3) << 20 | (uint32_t)(T->adest & 3) << 22;
             o->konst = (uint32_t)(T->konst[0] & 255) << 24 | (uint32_t)(T->konst[1] & 255) << 16 | (uint32_t)(T->konst[2] & 255) << 8 | (uint32_t)(T->konst[3] & 255);
-            o->flags = (T->texen ? 1u : 0u) | (T->chan == 0 ? 2u : 0u);
+            o->flags = (T->texen ? 1u : 0u) | (T->chan == 0 ? 2u : 0u) | (T->chan == 1 ? 4u : 0u);
+            if (T->texen) {
+                unsigned p;
+                for (p = 0; p + 1 < places && !(place[p] == (unsigned)(T->texcoord & 7) && place_map[p] == (unsigned)(T->texmap & 7)); p++) {}
+                o->flags |= ((T->texmap & 7) == 1 ? 8u : 0u) | p << 4;
+                o->flags |= (uint32_t)(T->tswap[0] & 3) << 8 | (uint32_t)(T->tswap[1] & 3) << 10 | (uint32_t)(T->tswap[2] & 3) << 12 | (uint32_t)(T->tswap[3] & 3) << 14;
+            }
+            if (T->chan < 2)
+                o->flags |= (uint32_t)(T->rswap[0] & 3) << 16 | (uint32_t)(T->rswap[1] & 3) << 18 | (uint32_t)(T->rswap[2] & 3) << 20 | (uint32_t)(T->rswap[3] & 3) << 22;
         }
         for (i = 0; i < 4; i++)
             for (t = 0; t < 4; t++) a->registers[i][t] = (int16_t)D->tev.reg_init[i][t];
@@ -874,15 +959,28 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
             const Vertex* p = &v[order[i]];
             SoaHostAlphaVertex* o = &b->av[b->nav + 3 * kept + i];
             memcpy(&o->x, g_view[order[i]], sizeof g_view[0]);
-            o->u = o->v = 0.0f;
-            if (C) {
+            o->u = o->v = o->u1 = o->v1 = o->u2 = o->v2 = 0.0f;
+            if (program) {
+                /* each place over the texture a stage samples there */
+                float* uv[3] = {&o->u, &o->u1, &o->u2};
+                unsigned q;
+                for (q = 0; q < places; q++) {
+                    const TexCfg* M = &D->tev.tex[place_map[q]];
+                    uv[q][0] = p->tex[place[q]][0] * M->scale_s / (float)(M->w > 0 ? M->w : 1);
+                    uv[q][1] = p->tex[place[q]][1] * M->scale_t / (float)(M->h > 0 ? M->h : 1);
+                }
+            } else if (C) {
                 o->u = p->tex[coord][0] * C->scale_s / (float)(C->w > 0 ? C->w : 1);
                 o->v = p->tex[coord][1] * C->scale_t / (float)(C->h > 0 ? C->h : 1);
             }
             o->colour = g_white[order[i]];
-            if (program) /* the vertex's lit colour, for the stages to work on */
+            o->colour1 = 0;
+            if (program) { /* the vertex's two lit colours, for the stages to work on */
                 o->colour = (uint32_t)(p->col[0].r * 255.0f + 0.5f) << 24 | (uint32_t)(p->col[0].g * 255.0f + 0.5f) << 16 |
                             (uint32_t)(p->col[0].b * 255.0f + 0.5f) << 8 | (uint32_t)(p->col[0].a * 255.0f + 0.5f);
+                o->colour1 = (uint32_t)(p->col[1].r * 255.0f + 0.5f) << 24 | (uint32_t)(p->col[1].g * 255.0f + 0.5f) << 16 |
+                             (uint32_t)(p->col[1].b * 255.0f + 0.5f) << 8 | (uint32_t)(p->col[1].a * 255.0f + 0.5f);
+            }
             if (g_black[order[i]] >> 8) offsets++;
             if ((g_black[order[i]] & 255u) != (g_white[order[i]] & 255u)) tex_alpha = 1;
         }
@@ -922,6 +1020,20 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
         a->wrap_s = (uint8_t)C->wrap_s;
         a->wrap_t = (uint8_t)C->wrap_t;
         a->linear = (uint8_t)(C->linear != 0);
+        a->levels = (uint8_t)sampled_levels(C);
+        a->lod_bias = (int8_t)(C->lod_bias * 32.0f);
+        a->min_lod = (uint8_t)(C->min_lod * 16.0f);
+        a->max_lod = (uint8_t)(C->max_lod * 16.0f);
+    }
+    if (C1) {
+        keep_texture(C1, &a->texture1, &a->texture1_gen);
+        a->width1 = (uint16_t)C1->lw[0];
+        a->height1 = (uint16_t)C1->lh[0];
+        a->wrap1_s = (uint8_t)C1->wrap_s;
+        a->wrap1_t = (uint8_t)C1->wrap_t;
+        a->linear1 = (uint8_t)(C1->linear != 0);
+        a->levels1 = (uint8_t)sampled_levels(C1);
+        a->lod_bias1 = (int8_t)(C1->lod_bias * 32.0f);
     }
     b->nav += kept * 3;
     b->na++;
@@ -1006,6 +1118,44 @@ static void flat_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     b->nf++;
 }
 
+/* GX's fog on a colour at a depth of the screen, as the rasteriser's
+ * fog_apply has it: a quad drawn flat on the screen is fogged like anything
+ * else, by the one depth it lies at. (At night the game adds a glow to the
+ * whole picture with a quad at the near plane, where that scene's fog has
+ * already taken a quarter of it.) */
+static uint32_t fogged(const PixelCfg* px, uint32_t rgba, float depth)
+{
+    uint32_t zs = (uint32_t)(depth < 0.0f ? 0.0f : (depth > 1.0f ? 16777215.0f : depth * 16777215.0f)), out = rgba & 255u;
+    float ze, f;
+    int fi, i;
+    if (px->fog_type == 0) return rgba;
+    if (!px->fog_proj) {
+        int32_t denom = (int32_t)px->fog_b_mag - (int32_t)(zs >> px->fog_b_shift);
+        if (denom == 0) return rgba;
+        ze = (px->fog_a * 16777215.0f) / (float)denom;
+    } else {
+        ze = px->fog_a * ((float)zs / 16777215.0f);
+    }
+    f = ze - px->fog_c;
+    if (!(f > 0.0f)) f = 0.0f;
+    if (f > 1.0f) f = 1.0f;
+    switch (px->fog_type) {
+    case 2: break;
+    case 4: f = 1.0f - powf(2.0f, -8.0f * f); break;
+    case 5: f = 1.0f - powf(2.0f, -8.0f * f * f); break;
+    case 6: f = powf(2.0f, -8.0f * (1.0f - f)); break;
+    case 7: f = powf(2.0f, -8.0f * (1.0f - f) * (1.0f - f)); break;
+    default: return rgba;
+    }
+    fi = (int)(f * 256.0f);
+    if (fi > 256) fi = 256;
+    for (i = 0; i < 3; i++) {
+        uint32_t c = (rgba >> (24 - 8 * i)) & 255u;
+        out |= ((c * (uint32_t)(256 - fi) + px->fog_color[i] * (uint32_t)fi) >> 8) << (24 - 8 * i);
+    }
+    return out;
+}
+
 static void screen_draw(const DrawCmd* D, unsigned count)
 {
     ModelFrame* b = building_frame();
@@ -1015,18 +1165,21 @@ static void screen_draw(const DrawCmd* D, unsigned count)
     SoaHostScreenPass pass;
     float lo[4] = {0, 0, 0, 0}, hi[4] = {1, 1, 1, 1};
     float x0 = 2, x1 = -2, y0 = 2, y1 = -2;
-    unsigned i, corners = 0, src = D->px.sfac, dst = D->px.dfac;
+    unsigned i, corners = 0, src = D->px.sfac, dst = D->px.dfac, cut[4] = {0, 0, 0, 0};
     int ok = 1, flat = 1;
     if (!(gx_xf_regs()[0x1026] & 1)) { model_draw(b, D, count); return; }
     /* flat on the screen */
     if (D->efb) return;
+    /* the strip the game sends between real ones, every vertex at one place: nothing */
+    for (i = 1; i < count && v[i].x == v[0].x && v[i].y == v[0].y && v[i].w == v[0].w; i++) {}
+    if (i >= count) return;
     /* Before the frame has a model there is no scene for a quad to be a
      * pass over: all of it is 2D layer, kept if the frame turns out to have
      * no model and let go at its first. */
     if (!b->n) { flat_draw(b, D, count); return; }
     /* a quad over all of the screen is a screen pass, until the 2D layer
      * has begun: then whatever covers the screen covers that too */
-    if (count != 4 || b->nf) { flat_draw(b, D, count); return; }
+    if (count != 4 || b->nf > b->nf_under) { flat_draw(b, D, count); return; }
     for (i = 0; i < 4; i++) {
         float w = v[i].w != 0.0f ? v[i].w : 1.0f, x = v[i].x / w, y = v[i].y / w;
         if (x < x0) x0 = x;
@@ -1052,11 +1205,25 @@ static void screen_draw(const DrawCmd* D, unsigned count)
         float w = v[i].w != 0.0f ? v[i].w : 1.0f, ras[4];
         unsigned corner = (v[i].x / w > 0.0f ? 1u : 0u) | (v[i].y / w < 0.0f ? 2u : 0u);
         ras[0] = v[i].col[0].r; ras[1] = v[i].col[0].g; ras[2] = v[i].col[0].b; ras[3] = v[i].col[0].a;
-        pass.colour[corner] = tev_one_stage(&D->tev, ras, lo, &ok, NULL);
+        float depth = (D->rc.farz + v[i].z / w * D->rc.zrange) / 16777216.0f;
+        pass.colour[corner] = fogged(&D->px, tev_one_stage(&D->tev, ras, lo, &ok, NULL), depth);
         corners |= 1u << corner;
-        if (S->texen && i == 0) pass.white = tev_one_stage(&D->tev, ras, hi, &ok, &pass.step);
+        cut[i] = corner;
+        if (S->texen && i == 0) pass.white = fogged(&D->px, tev_one_stage(&D->tev, ras, hi, &ok, &pass.step), depth);
     }
     if (corners != 15u) ok = 0;
+    /* Where the quad is, which may be past the screen's edges (the night's
+     * glow is a tenth wider), and which way it is cut in two: GX shades
+     * each triangle between its own three corners, so a quad bright at one
+     * corner is brighter along the cut than a blend of all four. A quad or
+     * a fan is cut from its first vertex to its third, a strip from its
+     * second to its third. */
+    pass.rect[0] = (x0 + 1.0f) * 0.5f; pass.rect[1] = (1.0f - y1) * 0.5f;
+    pass.rect[2] = (x1 + 1.0f) * 0.5f; pass.rect[3] = (1.0f - y0) * 0.5f;
+    {
+        unsigned ends = (1u << cut[D->prim == 0x98 ? 1 : 0]) | (1u << cut[2]);
+        pass.split = ends == 6u ? 1u : ends == 9u ? 2u : 0u; /* bottom left to top right; top left to bottom right */
+    }
     if (ok && S->texen) {
         unsigned m = S->texmap & 7;
         uint32_t image0 = bp[(m < 4 ? 0x88u + m : 0xA8u + (m - 4)) & 0xFFu], image3 = bp[(m < 4 ? 0x94u + m : 0xB4u + (m - 4)) & 0xFFu];
@@ -1066,7 +1233,7 @@ static void screen_draw(const DrawCmd* D, unsigned count)
         pass.height = (uint16_t)(((image0 >> 10) & 0x3FFu) + 1u);
     }
     if (ok && b->np < MAX_PASSES) b->pass[b->np++] = pass;
-    else b->np_skipped++;
+    else if (!D->px.logic_en) b->np_skipped++; /* (a logic operation is the shadows' bookkeeping, which comes out even) */
 }
 
 static void screen_copy(uint32_t v, int x0, int y0, int w, int h, uint32_t dest, uint32_t bytes)
@@ -1124,7 +1291,8 @@ long soa_host_flat_draws(SoaHostFlatDraw* draws, unsigned max_draws, unsigned* n
     return frame;
 }
 
-int soa_host_flat_texture(uint32_t texture, uint32_t gen, uint8_t* out, unsigned max_bytes, unsigned* width, unsigned* height)
+int soa_host_flat_texture(uint32_t texture, uint32_t gen, uint8_t* out, unsigned max_bytes, unsigned* width, unsigned* height,
+                          unsigned* levels)
 {
     int found = 0;
     unsigned k;
@@ -1132,11 +1300,11 @@ int soa_host_flat_texture(uint32_t texture, uint32_t gen, uint8_t* out, unsigned
     plat_lock(&g_mf_lock);
     for (k = 0; k < KEPT_IMAGES && !found; k++) {
         const FlatTexture* ft = &g_flat_tex[texture - 1u][k];
-        size_t bytes = (size_t)ft->w * (size_t)ft->h * 4u;
-        if (ft->rgba && ft->gen == gen && out && bytes <= max_bytes) {
-            memcpy(out, ft->rgba, bytes);
+        if (ft->rgba && ft->gen == gen && out && ft->bytes <= max_bytes) {
+            memcpy(out, ft->rgba, ft->bytes);
             if (width) *width = (unsigned)ft->w;
             if (height) *height = (unsigned)ft->h;
+            if (levels) *levels = (unsigned)ft->levels;
             found = 1;
         }
     }
