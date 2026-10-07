@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 12u
+#define SOA_HOST_ABI 13u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -173,7 +173,10 @@ typedef struct {
                                there the texture is more than a multiplier and the tint alone is short */
     uint32_t solid_strips;  /* how many of its strips were solid, and how many belonged to the see-through */
     uint32_t alpha_strips;  /* phase and were handed over there (soa_host_alpha_draws, ABI 11). A strip's flag
-                               says which it should be; GX's state when it is drawn says which it is */
+                               says which it should be; GX's state when it is drawn says which it is. ABI 13:
+                               a solid strip drawn after a see-through layer that is part clear and wrote
+                               depth, under the same projection, counts with the second kind and is handed
+                               over in order: it may lie behind that layer, which then hides it */
     uint32_t vertices;      /* its vertex list as it was when the drawer took it, for a list the game refills */
     uint32_t vertices_bytes; /* for one model after another (a shape it works out afresh): [vertices,
                                vertices + vertices_bytes) of the frame's kept bytes (soa_host_model_bytes),
@@ -356,7 +359,10 @@ typedef struct {
     uint8_t levels;         /* as SoaHostTexture's four (ABI 12): the texture's levels of detail this draw */
     int8_t lod_bias;        /* samples, which soa_host_flat_texture hands over together */
     uint8_t min_lod, max_lod;
-    uint8_t pad[2];
+    uint8_t passes_before;  /* ABI 13. How many of the frame's screen passes were drawn before it: the shadows'
+                               darkening comes after the solid scene and before the see-through phase, and a
+                               host that draws these in order darkens between the same two draws */
+    uint8_t pad;
     uint32_t fog[5];        /* as SoaHostModel's */
     uint32_t offsets;       /* stages 0: how many of its vertices have a colour with the texture black too */
     uint32_t first_stage;   /* its combiner: [first_stage, first_stage + stages) of the frame's stages */

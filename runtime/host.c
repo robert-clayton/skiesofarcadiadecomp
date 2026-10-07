@@ -299,9 +299,9 @@ unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rate)
 #define MAX_PASSES 16
 #define MAX_KEPT (512u * 1024u) /* vertex lists copied as their models are drawn: a few, of a few KB each */
 #define MAX_TINTS 65536u
-#define MAX_ALPHA 8192u
-#define MAX_ALPHA_VERTS 131072u
-#define MAX_ALPHA_STAGES 16384u
+#define MAX_ALPHA 16384u
+#define MAX_ALPHA_VERTS 393216u
+#define MAX_ALPHA_STAGES 32768u
 #define MAX_FLAT 2048u
 #define MAX_FLAT_VERTS 16384u
 #define FLAT_TEXTURES 1024u     /* the renderer's texture cache has this many slots (TexCfg.tex_id) */
@@ -330,6 +330,8 @@ typedef struct {
     SoaHostAlphaStage as[MAX_ALPHA_STAGES];
     unsigned nf, nfv, nf_skipped;    /* the 2D layer: draws, their vertices, and the draws left out */
     unsigned nf_under;               /* how many of the draws came before the first model: the backdrop */
+    uint32_t soft_proj[8][2];        /* the projections (XF 0x1024, 0x1025) a soft see-through draw has written */
+    unsigned n_soft;                 /* depth under this frame: solid strips after it there are drawn in order */
     SoaHostFlatDraw flat[MAX_FLAT];
     SoaHostFlatVertex fv[MAX_FLAT_VERTS];
 } ModelFrame;
@@ -360,7 +362,7 @@ static ModelFrame* building_frame(void)
         b->proj[6] = 1.0f; /* none seen yet */
         b->frame = f;
         b->n = b->nt = b->nl = b->n_open = b->sent = b->np = b->np_skipped = b->nb = 0;
-        b->nf = b->nfv = b->nf_skipped = b->ntint = b->na = b->nav = b->na_skipped = b->nas = b->nf_under = 0;
+        b->nf = b->nfv = b->nf_skipped = b->ntint = b->na = b->nav = b->na_skipped = b->nas = b->nf_under = b->n_soft = 0;
         b->drawing = ~0u;
     }
     return b;
@@ -672,6 +674,7 @@ typedef struct {
     unsigned frame;  /* the last frame a draw used it in */
     int w, h;
     int levels;      /* how many levels of detail rgba holds, the image first */
+    int soft;        /* some texel is neither clear nor solid: a layer drawn with it is part see-through */
     size_t bytes;
     uint8_t* rgba;
 } FlatTexture;
@@ -706,7 +709,7 @@ static int sampled_levels(const TexCfg* C)
     return n;
 }
 
-static void keep_texture(const TexCfg* C, uint32_t* texture, uint32_t* gen)
+static int keep_texture(const TexCfg* C, uint32_t* texture, uint32_t* gen)
 {
     FlatTexture* slot = g_flat_tex[C->tex_id];
     FlatTexture* ft = &slot[0];
@@ -720,7 +723,7 @@ static void keep_texture(const TexCfg* C, uint32_t* texture, uint32_t* gen)
         if (slot[k].rgba && slot[k].seen == C->tex_gen && slot[k].w == C->lw[0] && slot[k].h == C->lh[0] && slot[k].levels == levels) {
             slot[k].frame = now; /* only this thread writes these; the host's reads the texels, under the lock */
             *gen = slot[k].gen;
-            return;
+            return slot[k].soft;
         }
     for (at = 0; at < bytes; at += 4) {
         memcpy(&word, C->level[0] + at, 4);
@@ -732,7 +735,7 @@ static void keep_texture(const TexCfg* C, uint32_t* texture, uint32_t* gen)
             slot[k].seen = C->tex_gen;
             slot[k].frame = now;
             *gen = slot[k].gen;
-            return;
+            return slot[k].soft;
         }
         if (!slot[k].rgba || (ft->rgba && (int)(slot[k].frame - ft->frame) < 0)) ft = &slot[k];
     }
@@ -754,9 +757,12 @@ static void keep_texture(const TexCfg* C, uint32_t* texture, uint32_t* gen)
         ft->frame = now;
         ft->w = C->lw[0];
         ft->h = C->lh[0];
+        ft->soft = 0;
+        for (at = 3; at < bytes && !ft->soft; at += 4) ft->soft = C->level[0][at] > 8 && C->level[0][at] < 247;
     }
     plat_unlock(&g_mf_lock);
     *gen = ft->gen;
+    return ft->soft;
 }
 
 /* ---- a model's draws: tints, and the see-through phase ------------------------------------------
@@ -848,8 +854,18 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     unsigned i, t, tris, coord = 0, src = D->px.sfac, dst = D->px.dfac, order[3], kept = 0, offsets = 0;
     unsigned place[3] = {0, 0, 0}, place_map[3] = {0, 0, 0}, places = 0;
     const TexCfg* C1 = NULL;
-    int plain, constant, tex_alpha = 0, program;
+    int plain, constant, tex_alpha = 0, program, late = 0, solid = 0, soft = 0;
+    uint32_t proj[2];
     if (D->efb || !D->px.col_upd) return;
+    /* A see-through layer that is part clear and writes depth hides what is
+     * drawn later behind it, solid or not, and is blended with what was
+     * there before: a night's black smoke is drawn before the sky behind
+     * it, and the sky never shows through. A host that draws solid things
+     * first has that the wrong way round, so the solid strips drawn after
+     * such a layer, under the projection it wrote depth under, are handed
+     * over with the see-through draws, in order. */
+    proj[0] = gx_xf_regs()[0x1024]; proj[1] = gx_xf_regs()[0x1025];
+    for (i = 0; i < b->n_soft && !late; i++) late = b->soft_proj[i][0] == proj[0] && b->soft_proj[i][1] == proj[1];
     /* the strip of eight zeroes the game sends between real ones */
     for (i = 0; count == 8 && i < 8 && v[i].x == 0.0f && v[i].y == 0.0f && v[i].w == 0.0f; i++) {}
     if (count == 8 && i == 8) return;
@@ -872,7 +888,10 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     plain = (src == 4 && dst == 5) || (src == 1 && dst == 0);
     /* the usual solid strip, told without working its combiner out */
     constant = D->tev.alpha_always && D->tev.stages == 1 && S->aa == 6 && S->ab == 7 && S->ac == 7 && S->ad == 7 && S->konst[3] == 255;
-    if (m && constant && plain && !D->px.logic_en) { m->solid_strips++; return; }
+    if (m && constant && plain && !D->px.logic_en) {
+        if (!late) { m->solid_strips++; return; }
+        solid = 1; /* solid, and drawn after something it may lie behind: in order, with the see-through draws */
+    }
     if (!tris || count > DRAW_VERTS) { g_mf_dropped++; return; }
     combine_vertices(D, count);
     if (m && D->tev.stages > 1) {
@@ -889,7 +908,10 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
         }
     }
     for (i = 0, constant = D->tev.alpha_always; constant && i < count; i++) constant = (g_black[i] & 255u) == 255u;
-    if (m && constant && plain && !D->px.logic_en) { m->solid_strips++; return; }
+    if (m && constant && plain && !D->px.logic_en) {
+        if (!late) { m->solid_strips++; return; }
+        solid = 1; /* solid, and drawn after something it may lie behind: in order, with the see-through draws */
+    }
     if (m) m->alpha_strips++;
     /* what a host's one blend can't do, and a texture it can't be handed */
     if (D->px.logic_en || src == 2 || src == 3 || src > 5 || dst > 5 || (C && !keepable(C)) || b->na >= MAX_ALPHA ||
@@ -1018,8 +1040,11 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
         a->near_clip = p4 != 1.0f ? p5 / (p4 - 1.0f) : 0.0f;
         a->far_clip = p4 != 0.0f ? p5 / p4 : 0.0f;
     }
+    for (i = 0; i < count && !soft; i++) soft = (g_white[i] & 255u) > 8u && (g_white[i] & 255u) < 247u;
+    if (dst == 1) soft = 1; /* (added on: what is behind shows through all of it) */
+    a->passes_before = (uint8_t)(b->np < 255 ? b->np : 255);
     if (C) {
-        keep_texture(C, &a->texture, &a->texture_gen);
+        if (keep_texture(C, &a->texture, &a->texture_gen) && tex_alpha) soft = 1;
         a->width = (uint16_t)C->lw[0];
         a->height = (uint16_t)C->lh[0];
         a->wrap_s = (uint8_t)C->wrap_s;
@@ -1039,6 +1064,10 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
         a->linear1 = (uint8_t)(C1->linear != 0);
         a->levels1 = (uint8_t)sampled_levels(C1);
         a->lod_bias1 = (int8_t)(C1->lod_bias * 32.0f);
+    }
+    if (!solid && !late && soft && (a->depth & 16u) && b->n_soft < 8) {
+        b->soft_proj[b->n_soft][0] = proj[0];
+        b->soft_proj[b->n_soft++][1] = proj[1];
     }
     b->nav += kept * 3;
     b->na++;
