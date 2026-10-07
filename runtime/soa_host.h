@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 7u
+#define SOA_HOST_ABI 8u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -243,6 +243,61 @@ typedef struct {
  * left out. Returns that frame's number, the one soa_host_models gives for
  * the same frame, or -1 before the first. Watched with the models. */
 SOA_HOST_API long soa_host_screen_passes(SoaHostScreenPass* passes, unsigned max, unsigned* n, unsigned* skipped);
+
+/* ---- the game's 2D layer (ABI 8) -----------------------------------------------------------------
+ * Text, the HUD, a minimap, a dialogue box: flat draws on the screen, made
+ * after the scene. A host that draws the scene itself lays them over its
+ * picture in the order given. Each is triangles with one texture or none,
+ * blended like a screen pass (above) with the source
+ *
+ *     colour0 x (1 - texel) + the vertex's colour x texel      per channel
+ *
+ * which is what the game's one-stage combiners come to: a texture times the
+ * vertex colour (colour0 zero), or text, a register times the glyph plus
+ * another. Without a texture the source is the vertex's colour.
+ *
+ * Reported from a frame's first such draw after its first model, until the
+ * frame ends; a screen-filling quad among them (a fade over everything) is
+ * one of them and not a screen pass. Left out and counted in `skipped`:
+ * more than one combiner stage, a blend that reads the frame buffer's
+ * alpha, a logic operation, and a textured draw whose colour0 differs from
+ * vertex to vertex. The alpha test and the depth test are not applied: the
+ * depth test is the host's to honour (depth_test, depth_write, depth). */
+typedef struct {
+    float x, y;             /* on the game's screen: 0 to 1 across and down its 640 by 480 */
+    float u, v;             /* over the texture: 0 to 1 */
+    uint32_t colour;        /* RGBA */
+} SoaHostFlatVertex;
+
+typedef struct {
+    uint32_t first_vertex;  /* its triangles: [first_vertex, first_vertex + vertices) of the frame's, three each */
+    uint32_t vertices;
+    uint32_t src_factor, dst_factor, subtract;
+    uint32_t colour0;       /* RGBA */
+    uint32_t texture;       /* 0 for none; else which of the game's textures, for soa_host_flat_texture */
+    uint32_t texture_gen;   /* moves whenever that texture's image changes */
+    uint16_t width, height; /* the image's */
+    uint8_t wrap_s, wrap_t; /* past its edge: 0 clamp, 1 repeat, 2 mirror */
+    uint8_t linear;         /* filtered between texels */
+    uint8_t passes_before;  /* how many of the frame's screen passes were drawn before it */
+    uint8_t depth_test;     /* 1: drawn only where nothing nearer has written its depth (GX's less, or less
+                               or equal): the 2D layer is laid out in depth, and a piece drawn early can
+                               stay on top of one drawn later */
+    uint8_t depth_write;    /* 1: it writes its depth, where its alpha is over 0 */
+    float depth;            /* GX's screen depth of its first vertex, 0 (near) to 1 */
+    float scissor[4];       /* left, top, right, bottom, as x and y above: nothing is drawn outside */
+} SoaHostFlatDraw;
+
+/* The 2D draws of the newest whole frame and their vertices, as
+ * soa_host_models gives its arrays; the frame's number, or -1. */
+SOA_HOST_API long soa_host_flat_draws(SoaHostFlatDraw* draws, unsigned max_draws, unsigned* n_draws, SoaHostFlatVertex* vertices,
+                                      unsigned max_vertices, unsigned* n_vertices, unsigned* skipped);
+
+/* A 2D draw's texture, decoded: width x height RGBA bytes, rows from the
+ * top, into out. Returns its generation now (compare with texture_gen: a
+ * draw of an earlier frame may name an image since replaced), or 0 when
+ * there is no such texture or max_bytes is too few. */
+SOA_HOST_API uint32_t soa_host_flat_texture(uint32_t texture, uint8_t* out, unsigned max_bytes, unsigned* width, unsigned* height);
 
 /* bytes of the game's memory at a guest address (0x80000000 up), as the
  * game sees them -- big-endian -- into out; 0 for a range outside MEM1, or

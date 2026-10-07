@@ -291,6 +291,9 @@ unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rate)
 #define MAX_OPEN 8 /* drawers inside drawers; none are seen, but a begin and its end must still pair */
 #define MAX_PASSES 16
 #define MAX_KEPT (512u * 1024u) /* vertex lists copied as their models are drawn: a few, of a few KB each */
+#define MAX_FLAT 2048u
+#define MAX_FLAT_VERTS 16384u
+#define FLAT_TEXTURES 1024u     /* the renderer's texture cache has this many slots (TexCfg.tex_id) */
 
 typedef struct {
     long frame;
@@ -306,6 +309,9 @@ typedef struct {
     SoaHostLight l[MAX_LIGHTS];
     unsigned nb;
     uint8_t bytes[MAX_KEPT];
+    unsigned nf, nfv, nf_skipped;    /* the 2D layer: draws, their vertices, and the draws left out */
+    SoaHostFlatDraw flat[MAX_FLAT];
+    SoaHostFlatVertex fv[MAX_FLAT_VERTS];
 } ModelFrame;
 
 static ModelFrame g_mf[2];
@@ -332,6 +338,7 @@ static ModelFrame* building(CpuState* s)
         b->proj[6] = 1.0f; /* none seen yet */
         b->frame = f;
         b->n = b->nt = b->nl = b->n_open = b->sent = b->np = b->np_skipped = b->nb = 0;
+        b->nf = b->nfv = b->nf_skipped = 0;
     }
     return b;
 }
@@ -566,6 +573,114 @@ static void screen_vertex(unsigned i, const VertexIn* in, const Vertex* out)
     (void)out;
 }
 
+/* The 2D layer's textures as the renderer decoded them, kept here so the
+ * host's thread never reads the renderer's cache: copied when a draw uses
+ * one whose image has changed, under the frames' lock. */
+typedef struct {
+    uint32_t gen;
+    int w, h;
+    uint8_t* rgba;
+} FlatTexture;
+static FlatTexture g_flat_tex[FLAT_TEXTURES];
+
+/* A flat draw that isn't a screen pass: one of the 2D layer's. */
+static void flat_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
+{
+    const Stage* S = &D->tev.st[0];
+    const Vertex* v = D->v;
+    const TexCfg* C = S->texen ? &D->tev.tex[S->texmap & 7] : NULL;
+    SoaHostFlatDraw* f;
+    float lo[4] = {0, 0, 0, 0}, hi[4] = {1, 1, 1, 1};
+    unsigned i, tris, src = D->px.sfac, dst = D->px.dfac, order[3], t;
+    uint32_t colour0 = 0;
+    int ok = 1;
+    if (!D->px.col_upd) return; /* it writes no colour */
+    switch (D->prim) {
+    case 0x80: tris = (count / 4) * 2; break;
+    case 0x90: tris = count / 3; break;
+    case 0x98: case 0xA0: tris = count >= 3 ? count - 2 : 0; break;
+    default: return; /* lines and points */
+    }
+    if (!tris) return;
+    if (!D->px.blend_en && !D->px.logic_en) src = 1, dst = 0; /* drawn over what is there */
+    else if (D->px.logic_en || src == 2 || src == 3 || src > 5 || dst > 5) ok = 0;
+    if (D->tev.stages != 1 || S->cbias == 3) ok = 0;
+    if (C && (!C->level[0] || C->tex_id < 0 || (unsigned)C->tex_id >= FLAT_TEXTURES || C->lw[0] <= 0 || C->lh[0] <= 0 ||
+              C->lw[0] > 1024 || C->lh[0] > 1024))
+        ok = 0;
+    if (!ok || b->nf >= MAX_FLAT || b->nfv + tris * 3 > MAX_FLAT_VERTS) { b->nf_skipped++; return; }
+    f = &b->flat[b->nf];
+    memset(f, 0, sizeof *f);
+    f->first_vertex = b->nfv;
+    for (t = 0; t < tris; t++) {
+        if (D->prim == 0x80) order[0] = 4 * (t / 2), order[1] = order[0] + 1 + (t & 1), order[2] = order[0] + 2 + (t & 1);
+        else if (D->prim == 0x90) order[0] = 3 * t, order[1] = order[0] + 1, order[2] = order[0] + 2;
+        else if (D->prim == 0x98) order[0] = t, order[1] = t + 1, order[2] = t + 2;
+        else order[0] = 0, order[1] = t + 1, order[2] = t + 2;
+        for (i = 0; i < 3; i++) {
+            const Vertex* p = &v[order[i]];
+            SoaHostFlatVertex* o = &b->fv[b->nfv + 3 * t + i];
+            float w = p->w != 0.0f ? p->w : 1.0f, ras[4] = {0, 0, 0, 0};
+            uint32_t black;
+            if (S->chan < 2) ras[0] = p->col[S->chan].r, ras[1] = p->col[S->chan].g, ras[2] = p->col[S->chan].b, ras[3] = p->col[S->chan].a;
+            o->x = (D->rc.xorig + p->x / w * D->rc.wd) / 640.0f;
+            o->y = (D->rc.yorig + p->y / w * D->rc.ht) / 480.0f;
+            o->u = o->v = 0.0f;
+            black = tev_one_stage(&D->tev, ras, lo, &ok, NULL);
+            o->colour = black;
+            if (C) {
+                o->u = p->tex[S->texcoord & 7][0] * C->scale_s / (float)(C->w > 0 ? C->w : 1);
+                o->v = p->tex[S->texcoord & 7][1] * C->scale_t / (float)(C->h > 0 ? C->h : 1);
+                o->colour = tev_one_stage(&D->tev, ras, hi, &ok, NULL);
+                if (t == 0 && i == 0) colour0 = black;
+                else if (black != colour0) ok = 0; /* shaded where the texture is black too */
+            }
+        }
+    }
+    if (!ok) { b->nf_skipped++; return; }
+    f->vertices = tris * 3;
+    f->src_factor = src;
+    f->dst_factor = dst;
+    f->subtract = D->px.blend_en && D->px.subtract ? 1u : 0u;
+    f->colour0 = colour0;
+    f->passes_before = (uint8_t)(b->np < 255 ? b->np : 255);
+    /* as the rasteriser will work it out (to_screen), which it hasn't yet */
+    f->depth = (D->rc.farz + v[0].z / (v[0].w != 0.0f ? v[0].w : 1.0f) * D->rc.zrange) / 16777216.0f;
+    f->depth_test = (uint8_t)(D->px.z_en && (D->px.z_func == 1 || D->px.z_func == 3));
+    f->depth_write = (uint8_t)(D->px.z_en && D->px.z_upd);
+    f->scissor[0] = (float)D->rc.scissor.x0 / 640.0f;
+    f->scissor[1] = (float)D->rc.scissor.y0 / 480.0f;
+    f->scissor[2] = (float)(D->rc.scissor.x1 + 1) / 640.0f;
+    f->scissor[3] = (float)(D->rc.scissor.y1 + 1) / 480.0f;
+    if (C) {
+        FlatTexture* ft = &g_flat_tex[C->tex_id];
+        f->texture = (uint32_t)C->tex_id + 1u;
+        f->texture_gen = C->tex_gen ? C->tex_gen : 1u;
+        f->width = (uint16_t)C->lw[0];
+        f->height = (uint16_t)C->lh[0];
+        f->wrap_s = (uint8_t)C->wrap_s;
+        f->wrap_t = (uint8_t)C->wrap_t;
+        f->linear = (uint8_t)(C->linear != 0);
+        if (!ft->rgba || ft->gen != f->texture_gen || ft->w != C->lw[0] || ft->h != C->lh[0]) {
+            size_t bytes = (size_t)C->lw[0] * (size_t)C->lh[0] * 4u;
+            plat_lock(&g_mf_lock);
+            if (!ft->rgba || ft->w * ft->h != C->lw[0] * C->lh[0]) {
+                free(ft->rgba);
+                ft->rgba = (uint8_t*)malloc(bytes);
+            }
+            if (ft->rgba) {
+                memcpy(ft->rgba, C->level[0], bytes);
+                ft->gen = f->texture_gen;
+                ft->w = C->lw[0];
+                ft->h = C->lh[0];
+            }
+            plat_unlock(&g_mf_lock);
+        }
+    }
+    b->nfv += tris * 3;
+    b->nf++;
+}
+
 static void screen_draw(const DrawCmd* D, unsigned count)
 {
     ModelFrame* b = &g_mf[g_build];
@@ -577,8 +692,11 @@ static void screen_draw(const DrawCmd* D, unsigned count)
     float x0 = 2, x1 = -2, y0 = 2, y1 = -2;
     unsigned i, corners = 0, src = D->px.sfac, dst = D->px.dfac;
     int ok = 1, flat = 1;
-    /* a quad, flat on the screen, over all of it, after the frame's first model */
-    if (count != 4 || D->efb || !(gx_xf_regs()[0x1026] & 1) || !b->n || b->frame != (long)gx_frame_count()) return;
+    /* flat on the screen, after the frame's first model */
+    if (D->efb || !(gx_xf_regs()[0x1026] & 1) || !b->n || b->frame != (long)gx_frame_count()) return;
+    /* a quad over all of the screen is a screen pass, until the 2D layer
+     * has begun: then whatever covers the screen covers that too */
+    if (count != 4 || b->nf) { flat_draw(b, D, count); return; }
     for (i = 0; i < 4; i++) {
         float w = v[i].w != 0.0f ? v[i].w : 1.0f, x = v[i].x / w, y = v[i].y / w;
         if (x < x0) x0 = x;
@@ -587,7 +705,7 @@ static void screen_draw(const DrawCmd* D, unsigned count)
         if (y > y1) y1 = y;
         if (memcmp(&v[i].col[0], &v[0].col[0], sizeof v[0].col[0]) != 0) flat = 0;
     }
-    if (x0 > -0.99f || x1 < 0.99f || y0 > -0.99f || y1 < 0.99f) return;
+    if (x0 > -0.99f || x1 < 0.99f || y0 > -0.99f || y1 < 0.99f) { flat_draw(b, D, count); return; }
     if (!D->px.col_upd) return; /* it writes no colour */
     /* What is left out: a logic operation (the shadows' own bookkeeping in
      * the red channel, which comes out even), a blend that reads the frame
@@ -652,6 +770,47 @@ long soa_host_screen_passes(SoaHostScreenPass* passes, unsigned max, unsigned* n
     if (n) *n = count;
     if (skipped) *skipped = left;
     return frame;
+}
+
+long soa_host_flat_draws(SoaHostFlatDraw* draws, unsigned max_draws, unsigned* n_draws, SoaHostFlatVertex* vertices,
+                         unsigned max_vertices, unsigned* n_vertices, unsigned* skipped)
+{
+    long frame = -1;
+    unsigned n = 0, nv = 0, left = 0;
+    plat_lock(&g_mf_lock);
+    if (g_ready >= 0) {
+        const ModelFrame* r = &g_mf[g_ready];
+        n = r->nf < max_draws ? r->nf : max_draws;
+        nv = r->nfv < max_vertices ? r->nfv : max_vertices;
+        if (draws) memcpy(draws, r->flat, n * sizeof *draws);
+        if (vertices) memcpy(vertices, r->fv, nv * sizeof *vertices);
+        left = r->nf_skipped;
+        frame = r->frame;
+    }
+    plat_unlock(&g_mf_lock);
+    if (n_draws) *n_draws = n;
+    if (n_vertices) *n_vertices = nv;
+    if (skipped) *skipped = left;
+    return frame;
+}
+
+uint32_t soa_host_flat_texture(uint32_t texture, uint8_t* out, unsigned max_bytes, unsigned* width, unsigned* height)
+{
+    uint32_t gen = 0;
+    if (!texture || texture > FLAT_TEXTURES) return 0;
+    plat_lock(&g_mf_lock);
+    {
+        const FlatTexture* ft = &g_flat_tex[texture - 1u];
+        size_t bytes = (size_t)ft->w * (size_t)ft->h * 4u;
+        if (ft->rgba && out && bytes <= max_bytes) {
+            memcpy(out, ft->rgba, bytes);
+            if (width) *width = (unsigned)ft->w;
+            if (height) *height = (unsigned)ft->h;
+            gen = ft->gen;
+        }
+    }
+    plat_unlock(&g_mf_lock);
+    return gen;
 }
 
 long soa_host_model_bytes(uint8_t* out, unsigned max, unsigned* n)
