@@ -1139,6 +1139,36 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     b->na++;
 }
 
+/* How far GX's fog takes a colour at a depth of the screen towards its own,
+ * in 256ths, as the rasteriser's fog_apply has it. 0 with no fog. */
+static int fog_256ths(const PixelCfg* px, float depth)
+{
+    uint32_t zs = (uint32_t)(depth < 0.0f ? 0.0f : (depth > 1.0f ? 16777215.0f : depth * 16777215.0f));
+    float ze, f;
+    int fi;
+    if (px->fog_type == 0) return 0;
+    if (!px->fog_proj) {
+        int32_t denom = (int32_t)px->fog_b_mag - (int32_t)(zs >> px->fog_b_shift);
+        if (denom == 0) return 0;
+        ze = (px->fog_a * 16777215.0f) / (float)denom;
+    } else {
+        ze = px->fog_a * ((float)zs / 16777215.0f);
+    }
+    f = ze - px->fog_c;
+    if (!(f > 0.0f)) f = 0.0f;
+    if (f > 1.0f) f = 1.0f;
+    switch (px->fog_type) {
+    case 2: break;
+    case 4: f = 1.0f - powf(2.0f, -8.0f * f); break;
+    case 5: f = 1.0f - powf(2.0f, -8.0f * f * f); break;
+    case 6: f = powf(2.0f, -8.0f * (1.0f - f)); break;
+    case 7: f = powf(2.0f, -8.0f * (1.0f - f) * (1.0f - f)); break;
+    default: return 0;
+    }
+    fi = (int)(f * 256.0f);
+    return fi > 256 ? 256 : fi;
+}
+
 /* A flat draw that isn't a screen pass: one of the 2D layer's. */
 static void flat_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
 {
@@ -1202,6 +1232,8 @@ static void flat_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     f->depth = (D->rc.farz + v[0].z / (v[0].w != 0.0f ? v[0].w : 1.0f) * D->rc.zrange) / 16777216.0f;
     f->depth_test = (uint8_t)(D->px.z_en && (D->px.z_func == 1 || D->px.z_func == 3));
     f->depth_write = (uint8_t)(D->px.z_en && D->px.z_upd);
+    f->fog_amount = (float)fog_256ths(&D->px, f->depth) / 256.0f;
+    f->fog_colour = (uint32_t)D->px.fog_color[0] << 24 | (uint32_t)D->px.fog_color[1] << 16 | (uint32_t)D->px.fog_color[2] << 8;
     f->scissor[0] = (float)D->rc.scissor.x0 / 640.0f;
     f->scissor[1] = (float)D->rc.scissor.y0 / 480.0f;
     f->scissor[2] = (float)(D->rc.scissor.x1 + 1) / 640.0f;
@@ -1225,30 +1257,9 @@ static void flat_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
  * already taken a quarter of it.) */
 static uint32_t fogged(const PixelCfg* px, uint32_t rgba, float depth)
 {
-    uint32_t zs = (uint32_t)(depth < 0.0f ? 0.0f : (depth > 1.0f ? 16777215.0f : depth * 16777215.0f)), out = rgba & 255u;
-    float ze, f;
-    int fi, i;
-    if (px->fog_type == 0) return rgba;
-    if (!px->fog_proj) {
-        int32_t denom = (int32_t)px->fog_b_mag - (int32_t)(zs >> px->fog_b_shift);
-        if (denom == 0) return rgba;
-        ze = (px->fog_a * 16777215.0f) / (float)denom;
-    } else {
-        ze = px->fog_a * ((float)zs / 16777215.0f);
-    }
-    f = ze - px->fog_c;
-    if (!(f > 0.0f)) f = 0.0f;
-    if (f > 1.0f) f = 1.0f;
-    switch (px->fog_type) {
-    case 2: break;
-    case 4: f = 1.0f - powf(2.0f, -8.0f * f); break;
-    case 5: f = 1.0f - powf(2.0f, -8.0f * f * f); break;
-    case 6: f = powf(2.0f, -8.0f * (1.0f - f)); break;
-    case 7: f = powf(2.0f, -8.0f * (1.0f - f) * (1.0f - f)); break;
-    default: return rgba;
-    }
-    fi = (int)(f * 256.0f);
-    if (fi > 256) fi = 256;
+    uint32_t out = rgba & 255u;
+    int fi = fog_256ths(px, depth), i;
+    if (!fi) return rgba;
     for (i = 0; i < 3; i++) {
         uint32_t c = (rgba >> (24 - 8 * i)) & 255u;
         out |= ((c * (uint32_t)(256 - fi) + px->fog_color[i] * (uint32_t)fi) >> 8) << (24 - 8 * i);

@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 16u
+#define SOA_HOST_ABI 17u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -483,6 +483,10 @@ typedef struct {
     uint8_t pad;
     float depth;            /* GX's screen depth of its first vertex, 0 (near) to 1 */
     float scissor[4];       /* left, top, right, bottom, as x and y above: nothing is drawn outside */
+    uint32_t fog_colour;    /* ABI 17. GX's fog on it, as it is on anything drawn: after its texture, each
+                               pixel's colour goes fog_amount of the way to this one (RGB; its alpha stays).
+                               A minimap in a foggy place is hazed by it */
+    float fog_amount;       /* 0 (none) to 1, at the depth of its first vertex */
 } SoaHostFlatDraw;
 
 /* The 2D draws of the newest whole frame and their vertices, as
