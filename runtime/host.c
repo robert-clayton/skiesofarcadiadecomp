@@ -1052,36 +1052,56 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
     a->ambient = gx_xf_regs()[0x100A];
     a->material = gx_xf_regs()[0x100C];
     {
-        /* The strip's own coordinates and nothing else: the one place its
-         * stages sample at is GX's regular generation from the first
-         * texture coordinate, through a matrix that changes nothing, with no
-         * second one either (the game leaves GX's second transform on, with
-         * a matrix of the same kind). And its stages read the first lit
-         * colour only. (A table of colours looked up by the light is
-         * generated; a scrolled texture is not: the game rewrites the
-         * strip's coordinates for that.) */
+        /* What a host with the model can make for itself: a strip whose
+         * stages read the first lit colour only, each place they sample at
+         * GX's regular generation from one of the first three coordinates
+         * sent, the vertex's place or its normal, by the matrices handed over
+         * here. (The game leaves GX's second transform on with a matrix that
+         * changes nothing. A scrolled texture is not a matrix's doing: the
+         * game rewrites the strip's coordinates for that. A table of colours
+         * is looked up at the second and third coordinates, which the game
+         * fills from the vertex's colour.) */
         const uint32_t* xf = gx_xf_regs();
-        int own = m != NULL && D->prim == 0x98 && program && places <= 1 && strip < 65535u;
-        for (i = 0; own && i < D->tev.stages; i++) own = D->tev.st[i].chan != 1;
-        if (own && places == 1) {
-            uint32_t info = xf[0x1040 + place[0]], post = xf[0x1050 + place[0]];
-            unsigned row[2], n = 1, q, r, c;
+        unsigned why = 0, q; /* what else goes into a vertex, a bit each (soa_host.h) */
+        if (!m || strip >= 65535u) why |= 1u;
+        if (D->prim != 0x98) why |= 2u;
+        if (!program) why |= 4u;
+        if (places > 1) why |= 8u;
+        for (i = 0; i < D->tev.stages; i++)
+            if (D->tev.st[i].chan == 1) why |= 16u;
+        a->places = (uint8_t)(program ? places : 0);
+        for (q = 0; program && q < places; q++) {
+            /* how GX makes the coordinate this place is sampled at (XF 0x1040+: what it starts from; a
+             * matrix of XF's own memory; and, switched on, a second transform) */
+            const TexCfg* M = &D->tev.tex[place_map[q]];
+            uint32_t info = xf[0x1040 + place[q]], post = xf[0x1050 + place[q]];
+            unsigned row = 4u * ((place[q] < 4 ? xf[0x1018] >> (6 + 6 * place[q]) : xf[0x1019] >> (6 * (place[q] - 4))) & 0x3Fu), r, c;
+            unsigned from = (info >> 7) & 31u;
             static const float same[2][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}};
-            row[0] = 4u * ((place[0] < 4 ? xf[0x1018] >> (6 + 6 * place[0]) : xf[0x1019] >> (6 * (place[0] - 4))) & 0x3Fu);
-            own = place_map[0] == 0 && ((info >> 4) & 7u) == 0 && ((info >> 7) & 31u) == 5u;
+            SoaHostTexGen* g = &a->gen[q];
+            g->info = info;
+            memcpy(g->rows, &xf[row], sizeof g->rows);
+            g->scale[0] = M->scale_s / (float)(M->w > 0 ? M->w : 1);
+            g->scale[1] = M->scale_t / (float)(M->h > 0 ? M->h : 1);
+            if (((info >> 4) & 7u) != 0) why |= 32u;               /* from a lit colour, or embossed */
+            if (((info >> 1) & 1u) || (from != 0 && from != 1 && (from < 5 || from > 7))) why |= 64u; /* projected, or from a coordinate past the third */
+            if (from != 5) why |= 128u;
+            for (r = 0; r < 2; r++)
+                for (c = 0; c < 4; c++)
+                    if (g->rows[r][c] != same[r][c]) why |= 128u;
+            g->second = 0;
+            memcpy(g->second_rows, same, sizeof g->second_rows);
             if (xf[0x1012] & 1u) {
-                row[n++] = 0x500u + 4u * (post & 0x3Fu);
-                own = own && !((post >> 8) & 1u);
+                g->second = 1u | (post & 0x100u);
+                memcpy(g->second_rows, &xf[0x500u + 4u * (post & 0x3Fu)], sizeof g->second_rows);
+                if ((post >> 8) & 1u) why |= 128u;
+                for (r = 0; r < 2; r++)
+                    for (c = 0; c < 4; c++)
+                        if (g->second_rows[r][c] != same[r][c]) why |= 128u;
             }
-            for (q = 0; own && q < n; q++)
-                for (r = 0; own && r < 2; r++)
-                    for (c = 0; own && c < 4; c++) {
-                        float f;
-                        memcpy(&f, &xf[row[q] + 4 * r + c], 4);
-                        own = f == same[r][c];
-                    }
         }
-        a->plain = (uint8_t)own;
+        a->not_plain = (uint8_t)why;
+        a->plain = (uint8_t)((why & (1u | 2u | 4u | 16u | 32u | 64u)) == 0);
     }
     if (C) {
         if (keep_texture(C, &a->texture, &a->texture_gen) && tex_alpha) soft = 1;

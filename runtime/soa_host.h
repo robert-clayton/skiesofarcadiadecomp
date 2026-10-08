@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 15u
+#define SOA_HOST_ABI 16u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -340,6 +340,18 @@ typedef struct {
                                more than one: a stage says which of the three it reads */
 } SoaHostAlphaVertex;
 
+/* How GX makes a coordinate a texture is sampled at (GXSetTexCoordGen). */
+typedef struct {
+    uint32_t info;          /* XF's word for it: bit 2, three numbers go in (else two and a one); bits 4-6 the
+                               kind (0 a matrix's); bits 7-11 what it starts from: 0 the vertex's place, 1 its
+                               normal, 5 the first coordinate the game sent for it, 6 the second, 7 the third */
+    float rows[2][4];       /* the matrix: each coordinate is a row times (x, y, z or 1, 1) */
+    uint32_t second;        /* bit 0: GX's second transform follows; bit 8: with what the first made, and a 1
+                               after it, brought to length one before it */
+    float second_rows[2][4]; /* the second's matrix: a row times (what the first made, 1, 1) */
+    float scale[2];         /* and then times this, which puts it in the texture's own 0 to 1 */
+} SoaHostTexGen;
+
 typedef struct {
     uint32_t first_vertex;  /* its triangles: [first_vertex, first_vertex + vertices) of the frame's, three each */
     uint32_t vertices;
@@ -377,10 +389,21 @@ typedef struct {
                                can draw the strip from it */
     uint16_t strip_vertices; /* how many vertices that strip has */
     uint8_t cull;           /* GX's cull mode for it: 0 none, 1 front faces, 2 back faces, 3 all */
-    uint8_t plain;          /* 1: its vertices are the model's own and nothing else: a strip, its one place
-                               on a texture the strip's own coordinates (no matrix that changes them, no
-                               generated ones), its stages reading the first lit colour only */
-    uint8_t pad2[2];
+    uint8_t plain;          /* 1: a host that has the model can make its vertices: a strip, each place on a
+                               texture made as `gen` says from one of the first three coordinates the game
+                               sent for the vertex, its place or its normal, its stages reading the first
+                               lit colour only. (The game's second and third coordinates are the bytes of
+                               the vertex's colour in its file: blue and green, red and alpha, as 256ths.
+                               A table of colours is looked up with them.) */
+    uint8_t not_plain;      /* ABI 16. What goes into a vertex beyond the strip's own, a bit each. These make
+                               it not plain: 1 not a model's, 2 not a strip, 4 a combiner that can't be handed
+                               over, 16 its stages read the second lit colour, 32 a place generated from a lit
+                               colour, 64 a place projected, or from a coordinate past the third. These
+                               don't: 8 more than one place, 128 a place not the strip's own coordinate as
+                               it is (from another, the vertex's place or normal, or through a matrix or a
+                               second transform that changes it) */
+    uint8_t places;         /* ABI 16. How many places its stages sample at (u v, u1 v1, u2 v2 of a vertex, in
+                               that order), each made as gen[] says */
     uint32_t chan_colour;   /* GX's lighting when it was drawn, as SoaHostModel's four (which are as the
                                model's last strip left them): the lights are the model's */
     uint32_t chan_alpha;
@@ -402,6 +425,7 @@ typedef struct {
     uint8_t format;         /* GX's format for them: 14 CMPR, 8 C4, 5 RGB5A3 ... */
     uint8_t palette;        /* a palette's colour format: 0 IA8, 1 RGB565, 2 RGB5A3 */
     uint8_t format1, palette1;
+    SoaHostTexGen gen[3];   /* ABI 16 */
 } SoaHostAlphaDraw;
 
 /* The see-through draws of the newest whole frame and their vertices, as
