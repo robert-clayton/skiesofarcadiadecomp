@@ -1127,6 +1127,10 @@ void tev_prepare(const uint32_t* bp, TevSetup* T)
         C->tex_id = (int)(te - g_cache);
         C->tex_gen = te->gen;
         C->copy_image = (uint8_t)(te->from_copy != 0);
+        C->addr = addr;
+        C->fmt = (uint8_t)fmt;
+        C->tlut_fmt = (uint8_t)tlut_fmt;
+        C->replaced = (uint8_t)(te->replaced != 0);
         for (l = 0; l < MAX_MIPS; l++) { C->level[l] = te->level[l]; C->lw[l] = te->lw[l]; C->lh[l] = te->lh[l]; }
         C->w = (int)w; C->h = (int)h;
         C->wrap_s = mode0 & 3; C->wrap_t = (mode0 >> 2) & 3;

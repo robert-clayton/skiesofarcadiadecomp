@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 14u
+#define SOA_HOST_ABI 15u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -393,6 +393,15 @@ typedef struct {
     uint8_t wrap1_s, wrap1_t, linear1, levels1;
     int8_t lod_bias1;
     uint8_t pad1[3];
+    uint32_t texels;        /* ABI 15. Where the texels `texture` was decoded from are in guest memory (the
+                               first level's; a palettized image's palette is the bytes just before, as
+                               the game keeps them), so a host that has the image from elsewhere, the
+                               disc say, can know it. 0 when the image is not memory's: a copy of the
+                               frame buffer, or one a mod put in its place */
+    uint32_t texels1;       /* the same for `texture1` */
+    uint8_t format;         /* GX's format for them: 14 CMPR, 8 C4, 5 RGB5A3 ... */
+    uint8_t palette;        /* a palette's colour format: 0 IA8, 1 RGB565, 2 RGB5A3 */
+    uint8_t format1, palette1;
 } SoaHostAlphaDraw;
 
 /* The see-through draws of the newest whole frame and their vertices, as

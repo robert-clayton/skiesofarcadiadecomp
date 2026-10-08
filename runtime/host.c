@@ -1094,6 +1094,9 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
         a->lod_bias = (int8_t)(C->lod_bias * 32.0f);
         a->min_lod = (uint8_t)(C->min_lod * 16.0f);
         a->max_lod = (uint8_t)(C->max_lod * 16.0f);
+        a->texels = C->copy_image || C->replaced ? 0u : 0x80000000u | C->addr;
+        a->format = C->fmt;
+        a->palette = C->tlut_fmt;
     }
     if (C1) {
         keep_texture(C1, &a->texture1, &a->texture1_gen);
@@ -1104,6 +1107,9 @@ static void model_draw(ModelFrame* b, const DrawCmd* D, unsigned count)
         a->linear1 = (uint8_t)(C1->linear != 0);
         a->levels1 = (uint8_t)sampled_levels(C1);
         a->lod_bias1 = (int8_t)(C1->lod_bias * 32.0f);
+        a->texels1 = C1->copy_image || C1->replaced ? 0u : 0x80000000u | C1->addr;
+        a->format1 = C1->fmt;
+        a->palette1 = C1->tlut_fmt;
     }
     if (!solid && !late && soft && (a->depth & 16u) && b->n_soft < 8) {
         b->soft_proj[b->n_soft][0] = proj[0];

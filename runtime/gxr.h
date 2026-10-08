@@ -125,6 +125,12 @@ typedef struct {
     int tex_id;
     uint32_t tex_gen;
     uint8_t copy_image;
+    /* For a host (soa_host.h, ABI 15): where the texels the decode was made
+     * of are in memory, GX's format for them and a palette's, so the image
+     * can be known by what it is and not only by what it decodes to. */
+    uint32_t addr;
+    uint8_t fmt, tlut_fmt;
+    uint8_t replaced; /* a mod's image stands in for the decode */
 } TexCfg;
 
 typedef struct {
