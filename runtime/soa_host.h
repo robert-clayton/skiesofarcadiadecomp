@@ -533,7 +533,9 @@ SOA_HOST_API int soa_host_read(uint32_t address, void* out, unsigned bytes);
  * to show, after it is published and before the queued writes are written,
  * until soa_host_go names that frame or a later one, or half a second has
  * passed: a host that works something out from one frame's memory and writes
- * it back before the next frame begins. soa_host_hold(0) lets it run on. */
+ * it back before the next frame begins. The wait is no time of the game's:
+ * its clock leaves the span out, at whatever speed the run is. soa_host_hold(0)
+ * lets it run on. */
 typedef struct SoaHostRange {
     uint32_t address; /* guest, 0x80000000 up */
     uint32_t bytes;

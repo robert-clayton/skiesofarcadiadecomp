@@ -108,6 +108,18 @@ uint64_t clock_peek_at(uint64_t host_ns)
     return g_gap_ns && d > g_gap_ns ? g_guest_ns : g_guest_ns + d * g_speed;
 }
 
+/* A span the guest thread itself waited out (a host holding the frame's
+ * end, host.c): none of it is guest time. Up to the wait counts as ever. */
+void clock_exclude_at(uint64_t from_host_ns, uint64_t to_host_ns)
+{
+    if (!g_started || to_host_ns <= from_host_ns) return;
+    clock_advance_at(from_host_ns);
+    if (g_paused || to_host_ns <= g_last_host_ns) return;
+    g_excluded_ns += to_host_ns - g_last_host_ns;
+    g_last_host_ns = to_host_ns;
+    g_epoch++;
+}
+
 void clock_set_speed_at(unsigned speed, uint64_t host_ns)
 {
     clock_advance_at(host_ns); /* everything so far at the old speed */

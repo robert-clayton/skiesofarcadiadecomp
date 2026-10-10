@@ -46,6 +46,8 @@ int main(void)
             clock_set_speed_at((unsigned)a, b);
         } else if (!strcmp(cmd, "pause") && scanf("%llu", &a) == 1) {
             clock_pause((int)a);
+        } else if (!strcmp(cmd, "exclude") && scanf("%llu %llu", &a, &b) == 2) {
+            clock_exclude_at(a, b);
         }
     }
     return 0;
@@ -174,6 +176,26 @@ def test_a_pause_is_excluded(driver):
     guest = [g for g, _, _ in got]
     assert guest == [0, 10 * MS, 20 * MS, 20 * MS, 20 * MS, 23 * MS], got
     assert got[-1][1] == 1, got  # the resume bumps the epoch
+
+
+@needs_msvc
+def test_a_wait_of_the_guest_threads_own_is_excluded(driver):
+    """A host holding the frame's end (host.c): the time up to the wait
+    counts, at the speed of the run, and the wait itself does not."""
+    got = run(
+        driver,
+        [
+            "config 30 0",
+            f"adv {T0}",
+            f"adv {T0 + 1 * MS}",
+            f"exclude {T0 + 2 * MS} {T0 + 9 * MS}",
+            f"adv {T0 + 9 * MS}",
+            f"adv {T0 + 10 * MS}",
+        ],
+    )
+    guest = [g for g, _, _ in got]
+    assert guest == [0, 30 * MS, 60 * MS, 90 * MS], got
+    assert got[-1][1] == 1, got  # an excluded span bumps the epoch, as a gap does
 
 
 @needs_msvc

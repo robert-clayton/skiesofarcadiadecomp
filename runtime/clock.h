@@ -17,6 +17,7 @@ uint64_t clock_host_ns(void);                  /* the host's monotonic time */
 uint64_t clock_advance_at(uint64_t host_ns);  /* guest ns, advancing to host_ns (the guest thread) */
 uint64_t clock_peek_at(uint64_t host_ns);     /* guest ns at host_ns, writing nothing (the report) */
 void clock_set_speed_at(unsigned speed, uint64_t host_ns);
+void clock_exclude_at(uint64_t from_host_ns, uint64_t to_host_ns); /* a wait of the guest thread's own: no guest time */
 void clock_pause(int on);                     /* any thread; takes effect at the next read */
 int clock_pause_requested(void);
 unsigned clock_epoch(void);                   /* bumped by each gap, speed change and resume */

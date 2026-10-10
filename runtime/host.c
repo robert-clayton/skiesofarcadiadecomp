@@ -34,6 +34,8 @@ void watchdog_fallback(void);
 void si_set_motor_sink(void (*fn)(unsigned speed));
 void si_set_motor_window(int open);
 void clock_pause(int on);
+uint64_t clock_host_ns(void);
+void clock_exclude_at(uint64_t from_host_ns, uint64_t to_host_ns);
 void audio_set_muted(int on);
 
 static plat_a32 g_state = SOA_HOST_IDLE;
@@ -512,13 +514,17 @@ void host_frame_end(CpuState* s, unsigned frame)
         g_mf[g_build].n = 0; /* building() starts it afresh at the next model */
         g_mf[g_build].frame = -1;
         /* a host that asked is waited for, half a second at most: it reads
-         * this frame's memory and queues what the next is to begin with */
+         * this frame's memory and queues what the next is to begin with.
+         * The wait is no time of the game's: its clock leaves the span out,
+         * or a run at many times real speed would pass seconds a frame */
         if (g_hold) {
             unsigned waited = 0;
+            uint64_t from = clock_host_ns();
             while (g_hold && plat_load64(&g_go) < (int64_t)frame && waited < 500u) {
                 plat_sleep_ms(1);
                 waited++;
             }
+            if (waited) clock_exclude_at(from, clock_host_ns());
         }
     }
     writes_apply();
