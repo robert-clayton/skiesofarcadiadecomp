@@ -21,6 +21,7 @@
 #include "gxr_export.h"
 #include "ninja.h"
 #include "plat.h"
+#include "mod.h"
 #include <fenv.h>
 #include <math.h>
 #include <stdio.h>
@@ -466,7 +467,7 @@ static struct {
     uint32_t address;
     SoaHostAnswer volatile fn;
     void* volatile user;
-} g_replace[MAX_REPLACE] = {{0x80096DA4u, NULL, NULL}};
+} g_replace[MAX_REPLACE] = {{0x80096DA4u, NULL, NULL}, {0x801165C4u, NULL, NULL}, {0x8011660Cu, NULL, NULL}, {0x8011753Cu, NULL, NULL}};
 
 int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user)
 {
@@ -479,6 +480,13 @@ int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user)
             return 1;
         }
     return 0;
+}
+
+static int host_call_game(SoaHostCall* call, uint32_t address, const uint32_t* args, unsigned n, uint32_t* r3)
+{
+    char why[160];
+    if (!call || !call->runtime) return 0;
+    return mod_call_guest((CpuState*)call->runtime, address, args, n, NULL, 0, r3, NULL, why, sizeof why);
 }
 
 int host_answer(CpuState* s, uint32_t address, int after)
@@ -497,8 +505,14 @@ int host_answer(CpuState* s, uint32_t address, int after)
             c.sp = s->gpr[1];
             for (r = 0; r < 8; r++) c.gpr[r] = s->gpr[3 + r];
             c.frame = g_mf[g_build].frame;
+            c.game = host_call_game;
+            c.runtime = s;
+            for (r = 0; r < 8; r++) c.fpr[r] = s->fpr[1 + r].ps0;
             how = fn(g_replace[k].user, &c);
-            if (how == 1) s->gpr[3] = c.gpr[0];
+            if (how == 1) {
+                s->gpr[3] = c.gpr[0];
+                s->fpr[1].ps0 = s->fpr[1].ps1 = c.fpr[0];
+            }
             return how == 1 || how == 2 ? how : 0;
         }
     return 0;

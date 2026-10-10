@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 19u
+#define SOA_HOST_ABI 21u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -566,11 +566,15 @@ SOA_HOST_API void soa_host_go(long frame);
  * Only the addresses the runtime was built to hand over can be named
  * (runtime/replace.c); soa_host_replace returns 0 for any other and 1 when
  * the function is set. A null function hands the address back to the game.
+ * From inside its answer the host may call a function of the game's by its
+ * address (the call's `game`, ABI 20).
  * The host's function must not block, and what it reads and writes of mem is
  * the game's own memory, big-endian, with no lock: nothing else touches it
  * while the game's thread is in the call.
  *
- * Replaceable so far: 0x80096DA4, the field camera's task. */
+ * Replaceable so far: 0x80096DA4, the field camera's task; and three of the
+ * party's leader's walk: 0x801165C4 the frame's start, 0x8011660C the pad's
+ * step (it answers the speed in f1), 0x8011753C the floor and the walls. */
 #define SOA_HOST_GAMES 0
 #define SOA_HOST_ANSWERED 1
 #define SOA_HOST_BOTH 2
@@ -582,6 +586,18 @@ typedef struct SoaHostCall {
     uint32_t sp;        /* r1: the game's stack is below it */
     uint32_t gpr[8];    /* r3 to r10 as the function was called; after, gpr[0] is what it returned */
     long frame;         /* the frame being built */
+    /* ABI 20. A function of the game's, called by the host from inside its
+     * answer, on the game's thread: its arguments in r3 on (eight at most),
+     * what it returns in *r3. Every register is put back after, so the
+     * game sees nothing of the call but what the function did to memory.
+     * 0 when it is refused (not the start of a function of this program).
+     * For what only the game's own code can do: a block of its heap. */
+    int (*game)(struct SoaHostCall* call, uint32_t address, const uint32_t* args, unsigned n, uint32_t* r3);
+    void* runtime;      /* the runtime's own */
+    /* ABI 21. f1 to f8 as the function was called; fpr[0] is what a function
+     * that answers in a float register returns: the host's to set when it
+     * answers such a one, and the game's own after it has run. */
+    double fpr[8];
 } SoaHostCall;
 typedef int (*SoaHostAnswer)(void* user, SoaHostCall* call);
 SOA_HOST_API int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user);

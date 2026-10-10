@@ -36,3 +36,6 @@
 0x8025ED74  strstr                # src/sdk/msl/strstr.c
 0x8023F704  VIGetRetraceCount     # runtime/tick.c: the main loop's safe point, and SOA_UNCAP's tick (PLAN M2)
 0x80096DA4  field_camera_task     # runtime/replace.c: the field camera's task, which a host may answer in the game's place (soa_host_replace)
+0x801165C4  leader_start          # runtime/replace.c: the leader's walk begins a frame (carried by its ground, the record kept as "before"); a host may answer it
+0x8011660C  leader_pad_step       # runtime/replace.c: the pad's step added to the leader's place; answers its speed in f1; a host may answer it
+0x8011753C  leader_floor_walls    # runtime/replace.c: the leader put on the floor and pushed out of the walls; a host may answer it

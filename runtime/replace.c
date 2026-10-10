@@ -12,13 +12,19 @@
  * it and the host be called once more afterwards (to hold its own answer to
  * the game's).
  *
- * The one so far is the field camera's task (0x80096DA4): it reads the
- * camera's request, the party, the pad and the ground, and writes the camera
- * the next frame is drawn with.
+ * The field camera's task (0x80096DA4): it reads the camera's request, the
+ * party, the pad and the ground, and writes the camera the next frame is
+ * drawn with. And three functions of the party's leader's walk, which the
+ * code of its standing, walking, jogging and running calls: the frame's start
+ * (0x801165C4), the pad's step (0x8011660C, which answers the speed in f1),
+ * and the floor and the walls (0x8011753C).
  */
 #include "cpu.h"
 
 void recomp_fn_80096DA4(CpuState* s);
+void recomp_fn_801165C4(CpuState* s);
+void recomp_fn_8011660C(CpuState* s);
+void recomp_fn_8011753C(CpuState* s);
 #ifdef SOA_HOST
 int host_answer(CpuState* s, uint32_t address, int after); /* host.c */
 #endif
@@ -43,4 +49,22 @@ void fn_80096DA4(CpuState* s)
 {
     s->pc = 0x80096DA4u;
     replaceable(s, 0x80096DA4u, recomp_fn_80096DA4);
+}
+
+void fn_801165C4(CpuState* s)
+{
+    s->pc = 0x801165C4u;
+    replaceable(s, 0x801165C4u, recomp_fn_801165C4);
+}
+
+void fn_8011660C(CpuState* s)
+{
+    s->pc = 0x8011660Cu;
+    replaceable(s, 0x8011660Cu, recomp_fn_8011660C);
+}
+
+void fn_8011753C(CpuState* s)
+{
+    s->pc = 0x8011753Cu;
+    replaceable(s, 0x8011753Cu, recomp_fn_8011753C);
 }
