@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 18u
+#define SOA_HOST_ABI 19u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -545,6 +545,46 @@ SOA_HOST_API long soa_host_memory(unsigned index, void* out, unsigned max, unsig
 SOA_HOST_API int soa_host_write(uint32_t address, const void* data, unsigned bytes);
 SOA_HOST_API void soa_host_hold(int on);
 SOA_HOST_API void soa_host_go(long frame);
+
+/* ---- A function of the game's, answered by the host (ABI 19) ----
+ *
+ * soa_host_replace names a function of the game's by its address and a
+ * function of the host's to be called whenever the game calls it: on the
+ * game's thread, before the game's own runs, with the game's memory and the
+ * arguments it was called with. What the host's returns says what happens
+ * next:
+ *
+ *   SOA_HOST_GAMES     the game's own runs, as if the host had not been asked
+ *   SOA_HOST_ANSWERED  the host has done the function's work in the game's
+ *                      memory; the game's own is not run, and gpr[0] is what
+ *                      it returns
+ *   SOA_HOST_BOTH      the game's own runs, and the host is called once more
+ *                      when it has (after is 1, gpr[0] its result): to hold
+ *                      its own answer to the game's, or to see what the
+ *                      function wrote
+ *
+ * Only the addresses the runtime was built to hand over can be named
+ * (runtime/replace.c); soa_host_replace returns 0 for any other and 1 when
+ * the function is set. A null function hands the address back to the game.
+ * The host's function must not block, and what it reads and writes of mem is
+ * the game's own memory, big-endian, with no lock: nothing else touches it
+ * while the game's thread is in the call.
+ *
+ * Replaceable so far: 0x80096DA4, the field camera's task. */
+#define SOA_HOST_GAMES 0
+#define SOA_HOST_ANSWERED 1
+#define SOA_HOST_BOTH 2
+typedef struct SoaHostCall {
+    uint32_t address;   /* the function */
+    uint32_t after;     /* 0 before the game's own; 1 after it, when the host asked for both */
+    uint8_t* mem;       /* the game's memory: the byte at guest address a is mem[a & 0x01FFFFFF] */
+    uint32_t mem_bytes; /* how much of it is the console's RAM: 24 MB, guest 0x80000000 up */
+    uint32_t sp;        /* r1: the game's stack is below it */
+    uint32_t gpr[8];    /* r3 to r10 as the function was called; after, gpr[0] is what it returned */
+    long frame;         /* the frame being built */
+} SoaHostCall;
+typedef int (*SoaHostAnswer)(void* user, SoaHostCall* call);
+SOA_HOST_API int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user);
 
 /* Pause holds the guest at the end of a frame, and its clock with it (M19);
  * mute silences what soa_host_audio returns. */

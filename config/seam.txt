@@ -55,6 +55,7 @@ libc __cxa_atexit
 libc __register_atfork
 twin 0x80005434
 twin 0x80005520
+twin 0x80096DA4
 twin 0x801EF7E0
 twin 0x80232E38
 twin 0x80232E64

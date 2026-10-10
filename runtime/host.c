@@ -457,6 +457,53 @@ int soa_host_write(uint32_t address, const void* data, unsigned bytes)
     return queued;
 }
 
+/* A function of the game's the host answers (replace.c calls host_answer on
+ * the guest's thread). One slot an address; the host sets it from its own
+ * thread, the function last and the user first, and clears the function
+ * first. */
+#define MAX_REPLACE 4
+static struct {
+    uint32_t address;
+    SoaHostAnswer volatile fn;
+    void* volatile user;
+} g_replace[MAX_REPLACE] = {{0x80096DA4u, NULL, NULL}};
+
+int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user)
+{
+    unsigned k;
+    for (k = 0; k < MAX_REPLACE; k++)
+        if (g_replace[k].address && g_replace[k].address == address) {
+            g_replace[k].fn = NULL;
+            g_replace[k].user = user;
+            g_replace[k].fn = fn;
+            return 1;
+        }
+    return 0;
+}
+
+int host_answer(CpuState* s, uint32_t address, int after)
+{
+    unsigned k, r;
+    for (k = 0; k < MAX_REPLACE; k++)
+        if (g_replace[k].address == address) {
+            SoaHostAnswer fn = g_replace[k].fn;
+            SoaHostCall c;
+            int how;
+            if (!fn) return 0;
+            c.address = address;
+            c.after = after ? 1u : 0u;
+            c.mem = s->mem;
+            c.mem_bytes = MEM1_SIZE;
+            c.sp = s->gpr[1];
+            for (r = 0; r < 8; r++) c.gpr[r] = s->gpr[3 + r];
+            c.frame = g_mf[g_build].frame;
+            how = fn(g_replace[k].user, &c);
+            if (how == 1) s->gpr[3] = c.gpr[0];
+            return how == 1 || how == 2 ? how : 0;
+        }
+    return 0;
+}
+
 void soa_host_hold(int on)
 {
     g_hold = on ? 1 : 0;
