@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 17u
+#define SOA_HOST_ABI 18u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -510,6 +510,39 @@ SOA_HOST_API int soa_host_flat_texture(uint32_t texture, uint32_t gen, uint8_t* 
  * before the game has drawn a model. The game may be writing there as it
  * is read: models and images stay put while they are in use. */
 SOA_HOST_API int soa_host_read(uint32_t address, void* out, unsigned bytes);
+
+/* ---- the game's memory as a frame ends, and writes into it (ABI 18) ----------------
+ * soa_host_read copies memory as it stands while the game runs on, so what it
+ * returns may be part one frame and part the next. A host that holds the
+ * game's state to a frame names the ranges it wants, and the runtime copies
+ * them as each frame ends, with the frame's models: soa_host_memory then
+ * gives them as of the frame soa_host_models last returned.
+ *
+ * soa_host_watch_memory replaces the list (64 ranges and 128 KB in all at
+ * most; a range outside MEM1, or past the limit, is kept in its place in the
+ * list with nothing copied). soa_host_memory copies range `index` of the
+ * list into out and returns the frame it is of, or -1 if no frame has been
+ * copied with this list yet, or the range was not kept; *n is how many bytes.
+ *
+ * soa_host_write queues bytes for a guest address (1,024 at a time, 32 writes
+ * a frame at most; 0 if it is not queued). They are written at the end of the
+ * frame the game is in, after that frame's ranges are copied, so the next
+ * frame begins with them.
+ *
+ * soa_host_hold(1) has the game wait at each frame's end that has something
+ * to show, after it is published and before the queued writes are written,
+ * until soa_host_go names that frame or a later one, or half a second has
+ * passed: a host that works something out from one frame's memory and writes
+ * it back before the next frame begins. soa_host_hold(0) lets it run on. */
+typedef struct SoaHostRange {
+    uint32_t address; /* guest, 0x80000000 up */
+    uint32_t bytes;
+} SoaHostRange;
+SOA_HOST_API void soa_host_watch_memory(const SoaHostRange* ranges, unsigned n);
+SOA_HOST_API long soa_host_memory(unsigned index, void* out, unsigned max, unsigned* n);
+SOA_HOST_API int soa_host_write(uint32_t address, const void* data, unsigned bytes);
+SOA_HOST_API void soa_host_hold(int on);
+SOA_HOST_API void soa_host_go(long frame);
 
 /* Pause holds the guest at the end of a frame, and its clock with it (M19);
  * mute silences what soa_host_audio returns. */

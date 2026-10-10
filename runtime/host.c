@@ -305,6 +305,10 @@ unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rate)
 #define MAX_FLAT 2048u
 #define MAX_FLAT_VERTS 16384u
 #define FLAT_TEXTURES 1024u     /* the renderer's texture cache has this many slots (TexCfg.tex_id) */
+#define MAX_WATCH 64u           /* ranges of memory copied as a frame ends (soa_host_watch_memory) */
+#define MAX_WATCH_BYTES (128u * 1024u)
+#define MAX_WRITES 32u          /* writes queued for a frame's end (soa_host_write) */
+#define MAX_WRITE_BYTES 1024u
 
 typedef struct {
     long frame;
@@ -334,6 +338,8 @@ typedef struct {
     unsigned n_soft;                 /* depth under this frame: solid strips after it there are drawn in order */
     SoaHostFlatDraw flat[MAX_FLAT];
     SoaHostFlatVertex fv[MAX_FLAT_VERTS];
+    unsigned watch_gen;              /* which list of ranges the copy below was made with (0: none) */
+    uint8_t watch[MAX_WATCH_BYTES];  /* the game's memory in those ranges as the frame ended */
 } ModelFrame;
 
 static ModelFrame g_mf[2];
@@ -374,16 +380,148 @@ static ModelFrame* building(CpuState* s)
     return building_frame();
 }
 
-void host_frame_end(unsigned frame)
+/* ---- memory as a frame ends, and writes into it (ABI 18) ----------------------------
+ * The ranges a host named are copied into the frame being published, so it
+ * has them as of that frame and not as they stand when it comes to read.
+ * What a host queued is written afterwards: the next frame begins with it. */
+typedef struct {
+    uint32_t address, bytes, at; /* bytes 0: named, and not kept */
+} WatchRange;
+static WatchRange g_watch[MAX_WATCH];
+static unsigned g_nwatch, g_watch_gen; /* under g_mf_lock; the generation climbs with each new list */
+
+typedef struct {
+    uint32_t address, bytes;
+    uint8_t data[MAX_WRITE_BYTES];
+} HostWrite;
+static HostWrite g_writes[MAX_WRITES];
+static unsigned g_nwrites;
+static PlatLock g_write_lock;
+static volatile int g_hold;
+static plat_a64 g_go; /* the last frame a holding host has let go */
+
+void soa_host_watch_memory(const SoaHostRange* ranges, unsigned n)
+{
+    unsigned k, at = 0;
+    plat_lock(&g_mf_lock);
+    g_nwatch = 0;
+    for (k = 0; ranges && k < n && k < MAX_WATCH; k++) {
+        uint32_t off = ranges[k].address & 0x01FFFFFFu;
+        WatchRange* w = &g_watch[g_nwatch++];
+        w->address = ranges[k].address;
+        w->at = at;
+        w->bytes = 0;
+        if (ranges[k].address < 0x80000000u || ranges[k].address >= 0x81800000u || off + (uint64_t)ranges[k].bytes > MEM1_SIZE ||
+            at + (uint64_t)ranges[k].bytes > MAX_WATCH_BYTES)
+            continue;
+        w->bytes = ranges[k].bytes;
+        at += ranges[k].bytes;
+    }
+    g_watch_gen++;
+    if (!g_watch_gen) g_watch_gen = 1;
+    plat_unlock(&g_mf_lock);
+}
+
+long soa_host_memory(unsigned index, void* out, unsigned max, unsigned* n)
+{
+    long frame = -1;
+    unsigned count = 0;
+    plat_lock(&g_mf_lock);
+    if (g_ready >= 0 && index < g_nwatch && g_watch[index].bytes && g_mf[g_ready].watch_gen == g_watch_gen) {
+        const ModelFrame* r = &g_mf[g_ready];
+        count = g_watch[index].bytes < max ? g_watch[index].bytes : max;
+        if (out) memcpy(out, r->watch + g_watch[index].at, count);
+        frame = r->frame;
+    }
+    plat_unlock(&g_mf_lock);
+    if (n) *n = count;
+    return frame;
+}
+
+int soa_host_write(uint32_t address, const void* data, unsigned bytes)
+{
+    uint32_t off = address & 0x01FFFFFFu;
+    int queued = 0;
+    if (!data || !bytes || bytes > MAX_WRITE_BYTES || address < 0x80000000u || address >= 0x81800000u || off + (uint64_t)bytes > MEM1_SIZE) return 0;
+    plat_lock(&g_write_lock);
+    if (g_nwrites < MAX_WRITES) {
+        HostWrite* w = &g_writes[g_nwrites++];
+        w->address = address;
+        w->bytes = bytes;
+        memcpy(w->data, data, bytes);
+        queued = 1;
+    }
+    plat_unlock(&g_write_lock);
+    return queued;
+}
+
+void soa_host_hold(int on)
+{
+    g_hold = on ? 1 : 0;
+}
+
+void soa_host_go(long frame)
+{
+    plat_xchg64(&g_go, (int64_t)frame);
+}
+
+/* The watched ranges, into the frame about to be published. The list is the
+ * host's to change at any time: it is read under the lock, and the memory
+ * copied outside it. */
+static void watch_copy(ModelFrame* b)
+{
+    WatchRange list[MAX_WATCH];
+    unsigned k, n, gen;
+    uint8_t* mem = g_mem;
+    plat_lock(&g_mf_lock);
+    n = g_nwatch;
+    gen = g_watch_gen;
+    memcpy(list, g_watch, n * sizeof *list);
+    plat_unlock(&g_mf_lock);
+    b->watch_gen = 0;
+    if (!mem || !n) return;
+    for (k = 0; k < n; k++)
+        if (list[k].bytes) memcpy(b->watch + list[k].at, mem + (list[k].address & 0x01FFFFFFu), list[k].bytes);
+    b->watch_gen = gen;
+}
+
+static void writes_apply(void)
+{
+    uint8_t* mem = g_mem;
+    unsigned k;
+    plat_lock(&g_write_lock);
+    for (k = 0; mem && k < g_nwrites; k++) {
+        gxr_hook_hazard(g_writes[k].address, g_writes[k].bytes); /* the frame may still be copying there */
+        memcpy(mem + (g_writes[k].address & 0x01FFFFFFu), g_writes[k].data, g_writes[k].bytes);
+    }
+    if (mem) g_nwrites = 0;
+    plat_unlock(&g_write_lock);
+}
+
+void host_frame_end(CpuState* s, unsigned frame)
 {
     ModelFrame* b = &g_mf[g_build];
-    if ((!b->n && !b->nf && !b->na) || b->frame != (long)frame) return; /* a frame with nothing in it leaves the last one standing */
-    plat_lock(&g_mf_lock);
-    g_ready = g_build;
-    plat_unlock(&g_mf_lock);
-    g_build ^= 1;
-    g_mf[g_build].n = 0; /* building() starts it afresh at the next model */
-    g_mf[g_build].frame = -1;
+    if (s) g_mem = s->mem;
+    /* a frame with nothing in it leaves the last one standing */
+    if ((b->n || b->nf || b->na) && b->frame == (long)frame) {
+        watch_copy(b);
+        plat_lock(&g_mf_lock);
+        g_ready = g_build;
+        plat_unlock(&g_mf_lock);
+        g_build ^= 1;
+        g_mf[g_build].n = 0; /* building() starts it afresh at the next model */
+        g_mf[g_build].frame = -1;
+        /* a host that asked is waited for, half a second at most: it reads
+         * this frame's memory and queues what the next is to begin with */
+        if (g_hold) {
+            unsigned waited = 0;
+            while (g_hold && plat_load64(&g_go) < (int64_t)frame && waited < 500u) {
+                plat_sleep_ms(1);
+                waited++;
+            }
+        }
+    }
+    writes_apply();
 }
 
 static void feed_model(CpuState* s, const NinjaVisit* v)
