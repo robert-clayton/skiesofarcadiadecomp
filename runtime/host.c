@@ -539,12 +539,12 @@ int soa_host_write(uint32_t address, const void* data, unsigned bytes)
  * the guest's thread). One slot an address; the host sets it from its own
  * thread, the function last and the user first, and clears the function
  * first. */
-#define MAX_REPLACE 4
+#define MAX_REPLACE 5
 static struct {
     uint32_t address;
     SoaHostAnswer volatile fn;
     void* volatile user;
-} g_replace[MAX_REPLACE] = {{0x80096DA4u, NULL, NULL}, {0x801165C4u, NULL, NULL}, {0x8011660Cu, NULL, NULL}, {0x8011753Cu, NULL, NULL}};
+} g_replace[MAX_REPLACE] = {{0x80096DA4u, NULL, NULL}, {0x801165C4u, NULL, NULL}, {0x8011660Cu, NULL, NULL}, {0x8011753Cu, NULL, NULL}, {0x80117BE4u, NULL, NULL}};
 
 int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user)
 {

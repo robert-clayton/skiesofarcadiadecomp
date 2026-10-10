@@ -39,3 +39,4 @@
 0x801165C4  leader_start          # runtime/replace.c: the leader's walk begins a frame (carried by its ground, the record kept as "before"); a host may answer it
 0x8011660C  leader_pad_step       # runtime/replace.c: the pad's step added to the leader's place; answers its speed in f1; a host may answer it
 0x8011753C  leader_floor_walls    # runtime/replace.c: the leader put on the floor and pushed out of the walls; a host may answer it
+0x80117BE4  leader_scan           # runtime/replace.c: what the leader's body touches, or what is before it at the A button: the thing chosen, its script's entry started; a host may answer it

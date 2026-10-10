@@ -574,7 +574,10 @@ SOA_HOST_API void soa_host_go(long frame);
  *
  * Replaceable so far: 0x80096DA4, the field camera's task; and three of the
  * party's leader's walk: 0x801165C4 the frame's start, 0x8011660C the pad's
- * step (it answers the speed in f1), 0x8011753C the floor and the walls. */
+ * step (it answers the speed in f1), 0x8011753C the floor and the walls;
+ * 0x80117BE4, the scan of what the leader's body touches or what is before it
+ * at the A button (r3 which, r4 the leader's record, r5 the body; it answers
+ * 0 or 1 in r3). */
 #define SOA_HOST_GAMES 0
 #define SOA_HOST_ANSWERED 1
 #define SOA_HOST_BOTH 2

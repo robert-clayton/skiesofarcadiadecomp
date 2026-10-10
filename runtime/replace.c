@@ -17,7 +17,11 @@
  * drawn with. And three functions of the party's leader's walk, which the
  * code of its standing, walking, jogging and running calls: the frame's start
  * (0x801165C4), the pad's step (0x8011660C, which answers the speed in f1),
- * and the floor and the walls (0x8011753C).
+ * and the floor and the walls (0x8011753C). And the scan the party's task
+ * makes with the leader's body and, at the A button, with a second body before
+ * it (0x80117BE4: r3 which of the two, r4 the leader's record, r5 the body):
+ * everything touched is flagged, the thing to act on is chosen, and its
+ * script's entry is started or the leader handed to a ladder.
  */
 #include "cpu.h"
 
@@ -25,6 +29,7 @@ void recomp_fn_80096DA4(CpuState* s);
 void recomp_fn_801165C4(CpuState* s);
 void recomp_fn_8011660C(CpuState* s);
 void recomp_fn_8011753C(CpuState* s);
+void recomp_fn_80117BE4(CpuState* s);
 #ifdef SOA_HOST
 int host_answer(CpuState* s, uint32_t address, int after); /* host.c */
 #endif
@@ -67,4 +72,10 @@ void fn_8011753C(CpuState* s)
 {
     s->pc = 0x8011753Cu;
     replaceable(s, 0x8011753Cu, recomp_fn_8011753C);
+}
+
+void fn_80117BE4(CpuState* s)
+{
+    s->pc = 0x80117BE4u;
+    replaceable(s, 0x80117BE4u, recomp_fn_80117BE4);
 }
