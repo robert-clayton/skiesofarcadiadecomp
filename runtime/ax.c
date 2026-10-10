@@ -459,27 +459,35 @@ static void apply_updates(CpuState* s, PB* pb, int ms)
     }
 }
 
+static int g_starts_at_tick = -1; /* SOA_AX_STARTS=tick: a voice starts only at a tick's beginning, as before */
+
 static void process_voice(CpuState* s, uint32_t addr, uint8_t* aram)
 {
     PB pb;
     Voice v;
     int32_t samples[MS_SAMPLES];
-    int ms, i;
+    int ms, i, counted = 0;
     uint32_t ratio, frac;
     int16_t last[4];
 
+    /* A block is gone through a millisecond at a time whether or not it is
+     * running: the driver starts a voice either by setting "running" before
+     * the tick or by listing "running = 1" among the changes for one of the
+     * four milliseconds after the first, and stops one the same two ways.
+     * Until 2026-10-10 this returned when the block was not running after the
+     * first millisecond's changes, and left the loop when a voice stopped, so
+     * a voice started inside a tick never ran at all: about five of every six
+     * the game starts (2,990 of 3,536 over six runs; soa-ue5's
+     * docs/audio-voices.md has the count). SOA_AX_STARTS=tick is the old way,
+     * to hear the difference by. */
+    if (g_starts_at_tick < 0) {
+        const char* e = getenv("SOA_AX_STARTS");
+        g_starts_at_tick = e && !strcmp(e, "tick") ? 1 : 0;
+    }
     pb_read(s, addr, &pb);
     apply_updates(s, &pb, 0);
     census_voice(addr, &pb);
-    if (!pb.w[PB_RUNNING]) { pb_write(s, addr, &pb); return; }
-    g_voices++;
-    if (g_verbose && g_voices <= 6)
-        fprintf(stderr, "[ax] voice pb %08X fmt %04X loop %u addr %04X%04X..%04X%04X cur %04X%04X ratio %04X%04X ctrl %04X vol %04X/%d gains L %04X R %04X AL %04X AR %04X updates %u %u %u %u %u\n",
-                addr, pb.w[PB_AUDIO_ADDR + 1], pb.w[PB_AUDIO_ADDR], pb.w[PB_AUDIO_ADDR + 2], pb.w[PB_AUDIO_ADDR + 3],
-                pb.w[PB_AUDIO_ADDR + 4], pb.w[PB_AUDIO_ADDR + 5], pb.w[PB_AUDIO_ADDR + 6], pb.w[PB_AUDIO_ADDR + 7],
-                pb.w[PB_SRC], pb.w[PB_SRC + 1], pb.w[PB_MIXER_CTRL], pb.w[PB_VOL_ENV], (int16_t)pb.w[PB_VOL_ENV + 1],
-                pb.w[PB_MIXER + MX_L], pb.w[PB_MIXER + MX_R], pb.w[PB_MIXER + MX_AL], pb.w[PB_MIXER + MX_AR],
-                pb.w[PB_UPDATES], pb.w[PB_UPDATES + 1], pb.w[PB_UPDATES + 2], pb.w[PB_UPDATES + 3], pb.w[PB_UPDATES + 4]);
+    if (g_starts_at_tick && !pb.w[PB_RUNNING]) { pb_write(s, addr, &pb); return; }
 
     v.pb = &pb;
     v.aram = aram;
@@ -490,7 +498,21 @@ static void process_voice(CpuState* s, uint32_t addr, uint8_t* aram)
         int16_t dvol;
         uint16_t* mx;
         if (ms) apply_updates(s, &pb, ms);
-        if (!pb.w[PB_RUNNING]) break;
+        if (!pb.w[PB_RUNNING]) {
+            if (g_starts_at_tick) break;
+            continue;
+        }
+        if (!counted) {
+            counted = 1;
+            g_voices++;
+            if (g_verbose && g_voices <= 6)
+                fprintf(stderr, "[ax] voice pb %08X fmt %04X loop %u addr %04X%04X..%04X%04X cur %04X%04X ratio %04X%04X ctrl %04X vol %04X/%d gains L %04X R %04X AL %04X AR %04X updates %u %u %u %u %u\n",
+                        addr, pb.w[PB_AUDIO_ADDR + 1], pb.w[PB_AUDIO_ADDR], pb.w[PB_AUDIO_ADDR + 2], pb.w[PB_AUDIO_ADDR + 3],
+                        pb.w[PB_AUDIO_ADDR + 4], pb.w[PB_AUDIO_ADDR + 5], pb.w[PB_AUDIO_ADDR + 6], pb.w[PB_AUDIO_ADDR + 7],
+                        pb.w[PB_SRC], pb.w[PB_SRC + 1], pb.w[PB_MIXER_CTRL], pb.w[PB_VOL_ENV], (int16_t)pb.w[PB_VOL_ENV + 1],
+                        pb.w[PB_MIXER + MX_L], pb.w[PB_MIXER + MX_R], pb.w[PB_MIXER + MX_AL], pb.w[PB_MIXER + MX_AR],
+                        pb.w[PB_UPDATES], pb.w[PB_UPDATES + 1], pb.w[PB_UPDATES + 2], pb.w[PB_UPDATES + 3], pb.w[PB_UPDATES + 4]);
+        }
 
         /* (re)load the voice's position and decoder state: an update may have changed them */
         v.fmt = pb.w[PB_AUDIO_ADDR + 1];
@@ -581,7 +603,11 @@ static void process_voice(CpuState* s, uint32_t addr, uint8_t* aram)
         pb.w[PB_ADPCM + 19] = (uint16_t)v.yn2;
         pb.w[PB_SRC + 2] = (uint16_t)frac;
         for (i = 0; i < 4; i++) pb.w[PB_SRC + 3 + i] = (uint16_t)last[i];
-        if (v.stopped) { pb.w[PB_RUNNING] = 0; break; }
+        if (v.stopped) {
+            pb.w[PB_RUNNING] = 0;
+            if (g_starts_at_tick) break;
+            v.stopped = 0; /* (the changes of the milliseconds left are still the block's) */
+        }
     }
     pb_write(s, addr, &pb);
 }
