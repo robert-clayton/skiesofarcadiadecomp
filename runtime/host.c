@@ -290,6 +290,83 @@ unsigned soa_host_audio(int16_t* lr, unsigned frames, unsigned* rate)
     plat_unlock(&g_audio_lock);
     return bytes / 4u;
 }
+/* ---- the sound driver's voices (ABI 22) ----------------------------------------
+ * ax.c's tap, on the thread that mixes: each tick whole into a ring the host
+ * empties. Full, the oldest is let go. */
+#define MAX_TICKS 96u
+#define TICK_BLOCKS 64u
+#define TICK_CHANGES 4096u
+typedef char voice_block_is_216[sizeof(SoaHostVoiceBlock) == 216 ? 1 : -1];
+typedef struct {
+    SoaHostVoiceTick head;
+    uint8_t blocks[TICK_BLOCKS * sizeof(SoaHostVoiceBlock)];
+    uint8_t changes[TICK_CHANGES * 4u];
+} VoiceTick;
+typedef void (*AxTap)(uint32_t tick, const uint8_t* blocks, unsigned nblocks, const uint8_t* changes, unsigned nchanges,
+                      const int32_t* back, const int16_t* mixed);
+void ax_tap(AxTap fn);
+static VoiceTick g_ticks[MAX_TICKS];
+static unsigned g_tick_head, g_tick_used, g_tick_dropped;
+static PlatLock g_tick_lock;
+static plat_a64 g_ended; /* the frames the game has ended */
+
+static void voice_tick(uint32_t tick, const uint8_t* blocks, unsigned nblocks, const uint8_t* changes, unsigned nchanges,
+                       const int32_t* back, const int16_t* mixed)
+{
+    VoiceTick* t;
+    if (nblocks > TICK_BLOCKS) nblocks = TICK_BLOCKS;
+    if (nchanges > TICK_CHANGES) nchanges = TICK_CHANGES;
+    plat_lock(&g_tick_lock);
+    if (g_tick_used == MAX_TICKS) {
+        g_tick_head = (g_tick_head + 1u) % MAX_TICKS;
+        g_tick_used--;
+        g_tick_dropped++;
+    }
+    t = &g_ticks[(g_tick_head + g_tick_used) % MAX_TICKS];
+    t->head.tick = tick;
+    t->head.frame = (uint32_t)plat_load64(&g_ended);
+    t->head.blocks = (uint16_t)nblocks;
+    t->head.changes = (uint16_t)nchanges;
+    memcpy(t->head.back, back, sizeof t->head.back);
+    memcpy(t->head.mixed, mixed, sizeof t->head.mixed);
+    memcpy(t->blocks, blocks, nblocks * sizeof(SoaHostVoiceBlock));
+    memcpy(t->changes, changes, nchanges * 4u);
+    g_tick_used++;
+    plat_unlock(&g_tick_lock);
+}
+
+void soa_host_watch_voices(int on)
+{
+    ax_tap(on ? voice_tick : NULL);
+    plat_lock(&g_tick_lock);
+    g_tick_head = g_tick_used = g_tick_dropped = 0;
+    plat_unlock(&g_tick_lock);
+}
+
+unsigned soa_host_voices(uint8_t* out, unsigned max_bytes, unsigned* dropped)
+{
+    unsigned at = 0;
+    plat_lock(&g_tick_lock);
+    while (out && g_tick_used) {
+        const VoiceTick* t = &g_ticks[g_tick_head];
+        unsigned blocks = t->head.blocks * (unsigned)sizeof(SoaHostVoiceBlock), changes = t->head.changes * 4u;
+        unsigned bytes = (unsigned)sizeof(SoaHostVoiceTick) + blocks + changes;
+        if (bytes > max_bytes - at) break;
+        memcpy(out + at, &t->head, sizeof(SoaHostVoiceTick));
+        memcpy(out + at + sizeof(SoaHostVoiceTick), t->blocks, blocks);
+        memcpy(out + at + sizeof(SoaHostVoiceTick) + blocks, t->changes, changes);
+        at += bytes;
+        g_tick_head = (g_tick_head + 1u) % MAX_TICKS;
+        g_tick_used--;
+    }
+    if (dropped) {
+        *dropped = g_tick_dropped;
+        g_tick_dropped = 0;
+    }
+    plat_unlock(&g_tick_lock);
+    return at;
+}
+
 /* ---- the game's models (ninja.h's feed) -------------------------------------
  * Two frames' worth of records: the guest fills one while the host may copy
  * the other. A frame is published when the game ends it (main.c tells us),
@@ -565,6 +642,7 @@ void host_frame_end(CpuState* s, unsigned frame)
 {
     ModelFrame* b = &g_mf[g_build];
     if (s) g_mem = s->mem;
+    plat_xchg64(&g_ended, (int64_t)frame);
     /* a frame with nothing in it leaves the last one standing */
     if ((b->n || b->nf || b->na) && b->frame == (long)frame) {
         watch_copy(b);

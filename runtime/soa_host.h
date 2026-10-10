@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 21u
+#define SOA_HOST_ABI 22u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -601,6 +601,50 @@ typedef struct SoaHostCall {
 } SoaHostCall;
 typedef int (*SoaHostAnswer)(void* user, SoaHostCall* call);
 SOA_HOST_API int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user);
+
+/* The sound driver's voices, a tick at a time (ABI 22), for a host that mixes
+ * them itself (soa-ue5's docs/audio-mix-cpp.md). The game's sound driver
+ * hands the mixer a list of voice blocks every five milliseconds of sound: 160
+ * frames at 32 kHz. With the watch on, each tick is kept as the runtime's own
+ * mixer meets it:
+ *
+ *   every block on the list, in the list's order, as the driver left it and
+ *   before the mixer has made a change in it or moved a word: its guest
+ *   address (the same block's at every tick), its 192 bytes as memory has
+ *   them (big-endian), for a stream (its word 8 not 0) the sixteen bytes of
+ *   the console's sound memory from the frame its cursor is in, and how many
+ *   of the tick's changes are its own;
+ *   the changes, four bytes each as memory has them (a word's number, its
+ *   value), the blocks' one after another;
+ *   `back`: what the tick's command list added to left and right that is not
+ *   this tick's voices (what came back from the game's effects), left's 160
+ *   and then right's;
+ *   `mixed`: what the runtime's mixer wrote for the tick, left, right, left,
+ *   right, so a host can hold its own mix beside it.
+ *
+ * The runtime's mixer runs on whatever the host does: the game reads a
+ * stream's cursor back from its block. soa_host_voices copies whole ticks,
+ * oldest first, into `out` while they fit: a SoaHostVoiceTick, then its
+ * `blocks` SoaHostVoiceBlock, then its `changes` times four bytes; it returns
+ * the bytes written, and in `dropped` (if given) how many ticks were let go
+ * unread since the last call, the queue holding 96 (about half a second). A
+ * tick is whole in itself: one let go costs five milliseconds and nothing
+ * after it. soa_host_watch_voices(0) stops the keeping and empties the queue. */
+typedef struct {
+    uint32_t id;         /* the block's guest address */
+    uint8_t words[192];  /* as the driver left it */
+    uint8_t under[16];   /* a stream's bytes under its cursor */
+    uint16_t changes;    /* how many of the tick's changes are this block's */
+    uint16_t stream;     /* 1: `under` is set */
+} SoaHostVoiceBlock;     /* 216 bytes */
+typedef struct {
+    uint32_t tick, frame;      /* the tick's number since the start; the frames the game had ended by then */
+    uint16_t blocks, changes;  /* how many of each follow */
+    int32_t back[2][160];
+    int16_t mixed[320];
+} SoaHostVoiceTick;
+SOA_HOST_API void soa_host_watch_voices(int on);
+SOA_HOST_API unsigned soa_host_voices(uint8_t* out, unsigned max_bytes, unsigned* dropped);
 
 /* Pause holds the guest at the end of a frame, and its clock with it (M19);
  * mute silences what soa_host_audio returns. */

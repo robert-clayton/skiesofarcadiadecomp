@@ -612,12 +612,77 @@ static void process_voice(CpuState* s, uint32_t addr, uint8_t* aram)
     pb_write(s, addr, &pb);
 }
 
+/* ---- the tap (host.c's, for soa_host_voices) ---------------------------------
+ * A host that mixes the voices itself is handed, for each tick: every block on
+ * the list as the driver left it, before this mixer has made a change in it or
+ * moved a word; the tick's changes; for a stream the sixteen bytes of sound
+ * memory under its cursor; what the list adds to left and right that is not
+ * the tick's voices; and what was written out. A block's record is 216 bytes,
+ * soa_host.h's SoaHostVoiceBlock: its address, its 192 bytes as memory has
+ * them, the sixteen bytes, how many changes are its own, whether a stream. */
+#define TAP_BLOCKS 64u
+#define TAP_BLOCK_BYTES 216u
+#define TAP_CHANGES 4096u
+typedef void (*AxTap)(uint32_t tick, const uint8_t* blocks, unsigned nblocks, const uint8_t* changes, unsigned nchanges,
+                      const int32_t* back, const int16_t* mixed);
+static AxTap g_tap;
+static uint8_t g_tap_blocks[TAP_BLOCKS * TAP_BLOCK_BYTES];
+static uint8_t g_tap_changes[TAP_CHANGES * 4u];
+static unsigned g_tap_nblocks, g_tap_nchanges;
+static int32_t g_tap_voices[2][FRAME_SAMPLES]; /* what the tick's voices added to left and right */
+static int32_t g_tap_back[2 * FRAME_SAMPLES];  /* the rest of what was written out: left's, then right's */
+static int16_t g_tap_mixed[2 * FRAME_SAMPLES]; /* what was written out: left, right, left, right */
+static int g_tap_out;
+
+void ax_tap(AxTap fn) { g_tap = fn; }
+
+static void tap_block(CpuState* s, uint32_t addr, const uint8_t* aram)
+{
+    uint8_t* b;
+    uint16_t w[PB_WORDS], n16, stream;
+    uint32_t data;
+    unsigned i, n = 0;
+    if (g_tap_nblocks >= TAP_BLOCKS) return;
+    b = g_tap_blocks + g_tap_nblocks * TAP_BLOCK_BYTES;
+    memset(b, 0, TAP_BLOCK_BYTES);
+    memcpy(b, &addr, 4);
+    for (i = 0; i < PB_WORDS; i++) {
+        w[i] = rd16(s, addr + 2u * i);
+        b[4u + 2u * i] = (uint8_t)(w[i] >> 8);
+        b[5u + 2u * i] = (uint8_t)w[i];
+    }
+    stream = w[PB_IS_STREAM] ? 1 : 0;
+    if (stream) {
+        uint32_t cur = ((uint32_t)w[PB_AUDIO_ADDR + 6] << 16) | w[PB_AUDIO_ADDR + 7];
+        for (i = 0; i < 16u; i++) b[196u + i] = aram[((cur >> 4) * 8u + i) & ARAM_MASK];
+    }
+    data = (((uint32_t)w[PB_UPDATES + 5] << 16) | w[PB_UPDATES + 6]) & 0x7FFFFFFFu;
+    for (i = 0; i < 5u; i++) n += w[PB_UPDATES + i];
+    if (!data) n = 0;
+    if (n > 4096u) n = 4096u; /* as apply_updates reads no further */
+    if (n > TAP_CHANGES - g_tap_nchanges) n = TAP_CHANGES - g_tap_nchanges;
+    for (i = 0; i < n; i++) {
+        uint16_t off = rd16(s, data + i * 4u), val = rd16(s, data + i * 4u + 2u);
+        uint8_t* c = g_tap_changes + (g_tap_nchanges + i) * 4u;
+        c[0] = (uint8_t)(off >> 8);
+        c[1] = (uint8_t)off;
+        c[2] = (uint8_t)(val >> 8);
+        c[3] = (uint8_t)val;
+    }
+    g_tap_nchanges += n;
+    n16 = (uint16_t)n;
+    memcpy(b + 212, &n16, 2);
+    memcpy(b + 214, &stream, 2);
+    g_tap_nblocks++;
+}
+
 static void process_pb_list(CpuState* s, uint32_t addr)
 {
     uint8_t* aram = aram_memory();
     int guard = 0;
     while (addr && guard++ < 256) {
         uint32_t next;
+        if (g_tap) tap_block(s, addr, aram);
         process_voice(s, addr, aram);
         next = rd32(s, addr) & 0x7FFFFFFFu;
         if (next == addr) break;
@@ -694,6 +759,11 @@ void ax_command_list(CpuState* s, uint32_t addr)
     memset(g_auxb, 0, sizeof g_auxb);
     g_auxa_live = g_auxb_live = 0;
     g_frames++;
+    if (g_tap) {
+        g_tap_nblocks = g_tap_nchanges = 0;
+        g_tap_out = 0;
+        memset(g_tap_voices, 0, sizeof g_tap_voices);
+    }
 
     while (!end && guard++ < 64) {
         uint16_t cmd = rd16(s, p);
@@ -726,6 +796,16 @@ void ax_command_list(CpuState* s, uint32_t addr)
             p += 4;
             break;
         case 0x03: /* PROCESS_PB */
+            if (g_tap) {
+                /* (what the blocks add to left and right: the two after, less the two before) */
+                int c, i;
+                for (c = 0; c < 2; c++)
+                    for (i = 0; i < FRAME_SAMPLES; i++) g_tap_voices[c][i] -= g_main[c][i];
+                process_pb_list(s, pb_addr & 0x7FFFFFFFu);
+                for (c = 0; c < 2; c++)
+                    for (i = 0; i < FRAME_SAMPLES; i++) g_tap_voices[c][i] += g_main[c][i];
+                break;
+            }
             process_pb_list(s, pb_addr & 0x7FFFFFFFu);
             break;
         /* MIX_AUXA / MIX_AUXB / MIX_AUXB_LR: upload the bus, read back the
@@ -795,6 +875,16 @@ void ax_command_list(CpuState* s, uint32_t addr)
             uint32_t lr = ((uint32_t)rd16(s, p + 4) << 16) | rd16(s, p + 6);
             p += 8;
             output_samples(s, lr & 0x7FFFFFFFu, sa & 0x7FFFFFFFu);
+            if (g_tap) {
+                int c, i;
+                for (c = 0; c < 2; c++)
+                    for (i = 0; i < FRAME_SAMPLES; i++) g_tap_back[c * FRAME_SAMPLES + i] = g_main[c][i] - g_tap_voices[c][i];
+                for (i = 0; i < FRAME_SAMPLES; i++) {
+                    g_tap_mixed[2 * i] = clamp16(g_main[0][i]);
+                    g_tap_mixed[2 * i + 1] = clamp16(g_main[1][i]);
+                }
+                g_tap_out = 1;
+            }
             break;
         }
         case 0x0F: end = 1; break;
@@ -824,6 +914,7 @@ void ax_command_list(CpuState* s, uint32_t addr)
     }
     if ((unsigned)guard > g_cmds_hi) g_cmds_hi = (unsigned)guard;
     if (!end) g_lists_full++;
+    if (g_tap && g_tap_out) g_tap((uint32_t)g_frames, g_tap_blocks, g_tap_nblocks, g_tap_changes, g_tap_nchanges, g_tap_back, g_tap_mixed);
 }
 
 void ax_report(void)
