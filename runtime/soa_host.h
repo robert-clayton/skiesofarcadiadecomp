@@ -577,7 +577,12 @@ SOA_HOST_API void soa_host_go(long frame);
  * step (it answers the speed in f1), 0x8011753C the floor and the walls;
  * 0x80117BE4, the scan of what the leader's body touches or what is before it
  * at the A button (r3 which, r4 the leader's record, r5 the body; it answers
- * 0 or 1 in r3). */
+ * 0 or 1 in r3); and five of the party's ship's flight over the world map,
+ * r3 the ship's record: 0x800CFDF0 the pad's step, 0x80115EAC the place
+ * against the land and the bodies (r4 where the place is, r5 where the frame
+ * began; it answers 0 or 1 in r3), 0x80117290 out of the bodies, 0x80114950
+ * whether the ship may be where it is (0 or 1 in r3), 0x800D07F8 the floor
+ * under it. */
 #define SOA_HOST_GAMES 0
 #define SOA_HOST_ANSWERED 1
 #define SOA_HOST_BOTH 2

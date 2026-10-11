@@ -40,3 +40,8 @@
 0x8011660C  leader_pad_step       # runtime/replace.c: the pad's step added to the leader's place; answers its speed in f1; a host may answer it
 0x8011753C  leader_floor_walls    # runtime/replace.c: the leader put on the floor and pushed out of the walls; a host may answer it
 0x80117BE4  leader_scan           # runtime/replace.c: what the leader's body touches, or what is before it at the A button: the thing chosen, its script's entry started; a host may answer it
+0x800CFDF0  ship_pad_step         # runtime/replace.c: the ship's flight: the pad's step, the wind and a barrier's push, the place moved by it; a host may answer it
+0x80115EAC  ship_land             # runtime/replace.c: the ship's flight: the place against the land and the bodies; answers 1 in r3 if the place stands; a host may answer it
+0x80117290  ship_out_of_bodies    # runtime/replace.c: the ship's flight: its ball pushed out of every body it touches; a host may answer it
+0x80114950  ship_allowed          # runtime/replace.c: the ship's flight: whether the ship may be where it is, answered in r3; a host may answer it
+0x800D07F8  ship_floor_under      # runtime/replace.c: the ship's flight: the floor under it, its battle zone, the updraft, the count a battle is drawn by; a host may answer it

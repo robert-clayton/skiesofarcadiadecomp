@@ -21,7 +21,14 @@
  * makes with the leader's body and, at the A button, with a second body before
  * it (0x80117BE4: r3 which of the two, r4 the leader's record, r5 the body):
  * everything touched is flagged, the thing to act on is chosen, and its
- * script's entry is started or the leader handed to a ladder.
+ * script's entry is started or the leader handed to a ladder. And five
+ * functions of the party's ship's flight over the world map, each called
+ * once a frame by the flying frame (0x800D1630) and by nothing else, r3 the
+ * ship's record: the pad's step (0x800CFDF0), the place against the land and
+ * the bodies (0x80115EAC: r4 where the place is, r5 where the frame began; it
+ * answers 1 in r3 if the place stands), the ship's ball pushed out of the
+ * bodies (0x80117290), whether the ship may be where it is (0x80114950,
+ * answered in r3), and the floor under it (0x800D07F8).
  */
 #include "cpu.h"
 
@@ -30,6 +37,11 @@ void recomp_fn_801165C4(CpuState* s);
 void recomp_fn_8011660C(CpuState* s);
 void recomp_fn_8011753C(CpuState* s);
 void recomp_fn_80117BE4(CpuState* s);
+void recomp_fn_800CFDF0(CpuState* s);
+void recomp_fn_80115EAC(CpuState* s);
+void recomp_fn_80117290(CpuState* s);
+void recomp_fn_80114950(CpuState* s);
+void recomp_fn_800D07F8(CpuState* s);
 #ifdef SOA_HOST
 int host_answer(CpuState* s, uint32_t address, int after); /* host.c */
 #endif
@@ -78,4 +90,34 @@ void fn_80117BE4(CpuState* s)
 {
     s->pc = 0x80117BE4u;
     replaceable(s, 0x80117BE4u, recomp_fn_80117BE4);
+}
+
+void fn_800CFDF0(CpuState* s)
+{
+    s->pc = 0x800CFDF0u;
+    replaceable(s, 0x800CFDF0u, recomp_fn_800CFDF0);
+}
+
+void fn_80115EAC(CpuState* s)
+{
+    s->pc = 0x80115EACu;
+    replaceable(s, 0x80115EACu, recomp_fn_80115EAC);
+}
+
+void fn_80117290(CpuState* s)
+{
+    s->pc = 0x80117290u;
+    replaceable(s, 0x80117290u, recomp_fn_80117290);
+}
+
+void fn_80114950(CpuState* s)
+{
+    s->pc = 0x80114950u;
+    replaceable(s, 0x80114950u, recomp_fn_80114950);
+}
+
+void fn_800D07F8(CpuState* s)
+{
+    s->pc = 0x800D07F8u;
+    replaceable(s, 0x800D07F8u, recomp_fn_800D07F8);
 }
