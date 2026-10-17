@@ -17,7 +17,10 @@
  * as scratch, default 65536), --with-flagged (replay calls the recording
  * flagged too), --partial (a byte the game's call wrote that the candidate
  * left as it was is counted as left undone, not held: for a rule that
- * answers part of a function; the stretches are listed). Exit 0 when every
+ * answers part of a function; the stretches are listed), --no-hardware (the
+ * candidate is a native replacement and must touch no hardware, even where
+ * the game's call did; the hardware the game's calls touched is listed as
+ * retired, for the candidate to reproduce some other way). Exit 0 when every
  * call replayed agreed, 1 when one did not, 2 for a usage or a read error.
  */
 #include "replay.h"
@@ -28,7 +31,7 @@
 static int usage(void)
 {
     fprintf(stderr, "usage: soa-compare REC [--original] [--candidate NAME]... [--info] [--game PATH] [--only 0xADDR] "
-                    "[--show N] [--stack BYTES] [--with-flagged] [--partial] [--calls N]\n       soa-compare --list\n");
+                    "[--show N] [--stack BYTES] [--with-flagged] [--partial] [--no-hardware] [--calls N]\n       soa-compare --list\n");
     return 2;
 }
 
@@ -45,6 +48,8 @@ static int one(SoaReplayRun* run, const char* label)
         printf("  --partial: %llu more agree on every byte they wrote and every result, leaving undone %llu bytes the game's "
                "call wrote\n",
                (unsigned long long)t.partial, (unsigned long long)t.undone_bytes);
+    if (run->no_hardware && run->candidate)
+        printf("  --no-hardware: the candidate touched the hardware in %llu calls\n", (unsigned long long)t.hw_touched);
     if (run->candidate)
         printf("  the candidate answered %llu (%llu with the results left live), ran beside the game's own on %llu, left %llu to the game\n",
                (unsigned long long)(t.answered + t.live), (unsigned long long)t.live, (unsigned long long)t.both,
@@ -76,6 +81,7 @@ int main(int argc, char** argv)
         else if (!strcmp(a, "--list")) list = 1;
         else if (!strcmp(a, "--with-flagged")) run.with_flagged = 1;
         else if (!strcmp(a, "--partial")) run.partial = 1;
+        else if (!strcmp(a, "--no-hardware")) run.no_hardware = 1;
         else if (!strcmp(a, "--calls") && v) calls_of = strtoll(v, NULL, 0), info = 1, k++;
         else if (!strcmp(a, "--candidate") && v && nnames < 64) names[nnames++] = v, k++;
         else if (!strcmp(a, "--game") && v) run.game = v, k++;
@@ -116,7 +122,8 @@ int main(int argc, char** argv)
             for (j = 0; j < nnames; j++) asked |= !strcmp(cands[k]->name, names[j]);
             if (!asked) continue;
             run.candidate = cands[k];
-            snprintf(label, sizeof label, "candidate %s (%08X), held to the recording", cands[k]->name, cands[k]->address);
+            snprintf(label, sizeof label, "candidate %s (%08X), held to the recording%s", cands[k]->name, cands[k]->address,
+                     run.no_hardware ? " and to no hardware" : "");
             rc = one(&run, label);
             if (rc < 0) return 2;
             bad |= rc;

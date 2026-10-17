@@ -28,6 +28,11 @@
  *   game at up to twice the speed -- a battle speed-up (M11) or a
  *   measurement, never 60 fps. H3 did the same by zeroing the stored start;
  *   answering here leaves that word as the game wrote it.
+ * - At 0x801DC49C under the fixed-step clock (SOA_CLOCK=fixed), when the
+ *   spin is about to go round again, irq.c (tick_set_spin_wait) delivers what is due or moves the
+ *   clock to the next deadline, as its idle loop does: the spin is a wait,
+ *   and going round it a million times to add up a field of delivery points
+ *   would only cost the host time (docs/CLOCK.md).
  * - Anywhere else, and at both with nothing registered and the tick locked,
  *   it is the original, and selftest's twin case holds it to the recompiled
  *   one.
@@ -155,6 +160,16 @@ static void hold_while_paused(void)
     while (g_held && g_held()) plat_sleep_ms(20);
 }
 
+/* What the frame end's spin does when it is about to go round again: set
+ * (to irq.c's irq_fixed_wait) only under the fixed-step clock. A setter, as
+ * the hold's is, so this file still links alone. */
+static void (*g_spin_wait)(CpuState*);
+
+void tick_set_spin_wait(void (*fn)(CpuState*))
+{
+    g_spin_wait = fn;
+}
+
 /* Let the frame end's spin go after one field, from frame `frame` on; 0
  * locks it again. */
 void tick_unlock_from(unsigned frame)
@@ -176,6 +191,9 @@ void fn_8023F704(CpuState* s)
         g_released++;
         s->gpr[3] = mem_r32(s, FRAME_START_FIELDS) + 1;
         return;
+    } else if (s->lr == LR_FRAME_END_SPIN && g_spin_wait &&
+               mem_r32(s, RETRACE_COUNT) - mem_r32(s, FRAME_START_FIELDS) < 1u) {
+        g_spin_wait(s); /* the spin goes round again: under the fixed clock, a wait (docs/CLOCK.md) */
     }
     s->gpr[3] = mem_r32(s, RETRACE_COUNT);
 }

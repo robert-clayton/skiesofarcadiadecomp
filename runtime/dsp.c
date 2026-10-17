@@ -62,9 +62,10 @@ static uint64_t g_dma_due, g_dma_period, g_dma_blocks_done;
 static uint64_t g_ctl_starts, g_ctl_running, g_ctl_stops; /* the control writes, by kind */
 static uint32_t g_ctl_running_lr; /* LR at the first running write: 80241704, in fn_802416E4 */
 
+uint64_t guest_time_device(CpuState* s); /* hle.c: the timebase as a device reads it */
 static uint64_t tb_now(CpuState* s)
 {
-    return ((uint64_t)guest_timebase_hi(s) << 32) | guest_timebase_lo(s);
+    return guest_time_device(s);
 }
 
 static void push_out(uint32_t mail, int irq)
@@ -243,6 +244,14 @@ void dsp_poll(CpuState* s)
             audio_push_block(mem_ptr(s, g_dma_start | 0x80000000u), bytes, 32000);
         dsp_csr_raise(CSR_AIDINT);
     }
+}
+
+/* The fixed-step clock's idle skip (irq.c): when the AI DMA's block ends. */
+int dsp_next_due(uint64_t* due)
+{
+    if (!(g_dma_ctrl & 0x8000u) || !g_dma_period) return 0;
+    *due = g_dma_due;
+    return 1;
 }
 
 /* The self test's view of the DMA: blocks played, and a deadline pushed

@@ -79,6 +79,9 @@ int settings_console_to_log(char* path, size_t cap);
 void si_set_path_root(const char* root);
 void aram_census_prepare(void); /* aram.c: its disc reads before the clock starts (M19) */
 void tick_set_hold(int (*held)(void)); /* tick.c; M19's pause */
+void tick_set_spin_wait(void (*fn)(CpuState*)); /* tick.c; the fixed-step clock's frame-end wait */
+void irq_fixed_wait(CpuState* s);               /* irq.c */
+int hle_clock_fixed(void);                      /* hle.c: SOA_CLOCK=fixed */
 int clock_pause_requested(void);
 void si_set_pad2_source(int (*fn)(uint16_t* buttons, uint8_t stick[2], uint8_t cstick[2], uint8_t trig[2]));
 int si_read_pad(unsigned port, void* out);
@@ -1447,6 +1450,7 @@ int main(int argc, char** argv)
         si_set_motor_strength(rumble && *rumble ? atoi(rumble) : 100);
         si_set_chord_handler(on_chord);
         tick_set_hold(clock_pause_requested);
+        if (hle_clock_fixed()) tick_set_spin_wait(irq_fixed_wait); /* docs/CLOCK.md */
         si_set_pad2_source(window_pad2); /* P10a: port 2 for mods */
         mod_set_pad_reader(si_read_pad);
         mod_set_host_buttons(si_host_buttons);

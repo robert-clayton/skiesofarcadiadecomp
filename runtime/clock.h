@@ -28,4 +28,16 @@ unsigned long long clock_gaps(void);
 double clock_excluded_seconds(void);
 void clock_reset(void);                       /* tests */
 
+/* The fixed-step clock (SOA_CLOCK=fixed; docs/CLOCK.md), in timebase ticks:
+ * moved by the guest's work alone, so a run repeats exactly. */
+void clock_fixed_configure(uint64_t read_ticks, uint64_t poll_ticks, uint32_t rtc_seconds);
+int clock_fixed(void);                        /* 1: the fixed-step clock is the guest's */
+uint64_t clock_fixed_now(void);               /* guest ticks now, moving nothing */
+void clock_fixed_after_read(void);            /* a guest mftb or hardware read answered: `read` ticks on */
+void clock_fixed_poll(void);                  /* a delivery point at a loop's back edge: `poll` ticks on */
+int clock_fixed_skip_to(uint64_t tick);       /* the idle loop: forward to a deadline; 0 if it is not ahead */
+uint32_t clock_fixed_rtc(void);               /* the RTC: the fixed start date plus guest seconds */
+void clock_fixed_stats(unsigned long long* reads, unsigned long long* polls, unsigned long long* skips,
+                       uint64_t* skipped_ticks);
+
 #endif

@@ -53,7 +53,8 @@ static uint64_t g_due;
 uint32_t guest_timebase_lo(CpuState* s);
 uint32_t guest_timebase_hi(CpuState* s);
 #define TB_HZ 40500000ull
-static uint64_t tb_now(CpuState* s) { return ((uint64_t)guest_timebase_hi(s) << 32) | guest_timebase_lo(s); }
+uint64_t guest_time_device(CpuState* s); /* hle.c: the timebase as a device reads it */
+static uint64_t tb_now(CpuState* s) { return guest_time_device(s); }
 
 static void complete(void)
 {
@@ -73,6 +74,14 @@ static void complete(void)
 void di_poll(CpuState* s)
 {
     if (g_busy && tb_now(s) >= g_due) complete();
+}
+
+/* The fixed-step clock's idle skip (irq.c): when the command in flight is due. */
+int di_next_due(uint64_t* due)
+{
+    if (!g_busy) return 0;
+    *due = g_due;
+    return 1;
 }
 static uint64_t g_reads, g_bytes;
 

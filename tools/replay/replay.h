@@ -100,6 +100,10 @@ typedef struct {
     int with_flagged;          /* 1: calls with a flag (an interrupt inside, ...) are replayed too */
     int partial;               /* 1: a byte the game's call wrote and the candidate left as it was is counted as
                                   left undone, not held: for a rule that answers part of a function */
+    int no_hardware;           /* 1: the candidate is a native replacement, held to touching no hardware at all,
+                                  even where the game's call did (its reads end the call, its stores are
+                                  counted; either is a difference); the hardware the game's calls touched is
+                                  listed as retired, for the candidate to have reproduced some other way */
     int show;                  /* mismatching calls told in full; the rest counted */
     int quiet;
 } SoaReplayRun;
@@ -107,6 +111,7 @@ typedef struct {
 typedef struct {
     uint64_t calls, matched, mismatched, unreplayable, flagged_skipped;
     uint64_t partial, undone_bytes; /* with run->partial: calls that agree but for what they left undone */
+    uint64_t hw_touched;            /* with run->no_hardware: calls in which the candidate touched the hardware */
     uint64_t answered, games, both, live; /* a candidate's answers */
     uint64_t bytes_held, regs_held;
     double seconds;

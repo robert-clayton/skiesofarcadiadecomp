@@ -167,9 +167,82 @@ double clock_excluded_seconds(void)
     return (double)g_excluded_ns / (double)NS;
 }
 
+/* ---- the fixed-step clock (docs/CLOCK.md) -----------------------------
+ *
+ * SOA_CLOCK=fixed: guest time is counted in timebase ticks (40.5 MHz) and
+ * moves only with the guest's own work, never with the host's: a guest read
+ * of the timebase's low word (mftb) or of the hardware moves it `read` ticks
+ * after it has answered, a delivery point at a loop's back edge moves it `poll` ticks,
+ * and the scheduler's idle loop, with nothing to deliver, moves it to the
+ * next deadline the devices or the host have (irq.c). So the same inputs give
+ * the same guest time at every instruction, on any host, at any load and any
+ * SOA_SPEED. The real clock above is not read at all while it is on. */
+static int g_fixed;
+static uint64_t g_fx_ticks, g_fx_read = 8, g_fx_poll = 32, g_fx_skipped;
+static unsigned long long g_fx_reads, g_fx_polls, g_fx_skips;
+static uint32_t g_fx_rtc = 31622400u; /* 2001-01-01 00:00:00, in seconds since 2000 */
+
+void clock_fixed_configure(uint64_t read_ticks, uint64_t poll_ticks, uint32_t rtc_seconds)
+{
+    g_fixed = 1;
+    g_fx_read = read_ticks;
+    g_fx_poll = poll_ticks;
+    g_fx_rtc = rtc_seconds;
+}
+
+int clock_fixed(void)
+{
+    return g_fixed;
+}
+
+uint64_t clock_fixed_now(void)
+{
+    return g_fx_ticks;
+}
+
+void clock_fixed_after_read(void)
+{
+    g_fx_ticks += g_fx_read;
+    g_fx_reads++;
+}
+
+void clock_fixed_poll(void)
+{
+    g_fx_ticks += g_fx_poll;
+    g_fx_polls++;
+}
+
+int clock_fixed_skip_to(uint64_t tick)
+{
+    if (tick <= g_fx_ticks) return 0;
+    g_fx_skipped += tick - g_fx_ticks;
+    g_fx_ticks = tick;
+    g_fx_skips++;
+    return 1;
+}
+
+uint32_t clock_fixed_rtc(void)
+{
+    return g_fx_rtc + (uint32_t)(g_fx_ticks / 40500000ull);
+}
+
+void clock_fixed_stats(unsigned long long* reads, unsigned long long* polls, unsigned long long* skips,
+                       uint64_t* skipped_ticks)
+{
+    if (reads) *reads = g_fx_reads;
+    if (polls) *polls = g_fx_polls;
+    if (skips) *skips = g_fx_skips;
+    if (skipped_ticks) *skipped_ticks = g_fx_skipped;
+}
+
 /* Test only: back to the start. */
 void clock_reset(void)
 {
+    g_fixed = 0;
+    g_fx_ticks = g_fx_skipped = 0;
+    g_fx_read = 8, g_fx_poll = 32;
+    g_fx_reads = g_fx_polls = g_fx_skips = 0;
+    g_fx_rtc = 31622400u;
     g_started = 0;
     g_last_host_ns = g_guest_ns = g_origin_host_ns = 0;
     g_speed = 1;

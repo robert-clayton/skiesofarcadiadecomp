@@ -48,7 +48,8 @@ static uint64_t g_ar_due;
 uint32_t guest_timebase_lo(CpuState* s);
 uint32_t guest_timebase_hi(CpuState* s);
 #define TB_HZ 40500000ull
-static uint64_t tb_now(CpuState* s) { return ((uint64_t)guest_timebase_hi(s) << 32) | guest_timebase_lo(s); }
+uint64_t guest_time_device(CpuState* s); /* hle.c: the timebase as a device reads it */
+static uint64_t tb_now(CpuState* s) { return guest_time_device(s); }
 static uint16_t g_csr = CSR_HALT | CSR_DSPINIT, g_ar_size, g_ar_mode, g_ar_refresh;
 static uint32_t g_mmaddr, g_araddr;
 static uint16_t g_cnt_hi; /* the register bank is 16-bit; the low half of CNT starts the DMA */
@@ -426,6 +427,14 @@ static void dma(CpuState* s, uint32_t cnt)
 void aram_poll(CpuState* s)
 {
     if (g_ar_busy && tb_now(s) >= g_ar_due) { g_ar_busy = 0; g_csr |= CSR_ARINT; }
+}
+
+/* The fixed-step clock's idle skip (irq.c): when the DMA in flight is due. */
+int aram_next_due(uint64_t* due)
+{
+    if (!g_ar_busy) return 0;
+    *due = g_ar_due;
+    return 1;
 }
 
 void aram_poll(CpuState* s);

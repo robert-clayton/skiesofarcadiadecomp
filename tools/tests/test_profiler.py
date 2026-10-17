@@ -139,6 +139,8 @@ void aram_census_prepare(void) {}
 const uint8_t* gxr_screen(int* w, int* h) { *w = 0; *h = 0; return NULL; }
 int png_write_rgba(const char* path, const uint8_t* rgba, int w, int h, int stride) { (void)path; (void)rgba; (void)w; (void)h; (void)stride; return 0; }
 int clock_pause_requested(void) { return 0; }
+int hle_clock_fixed(void) { return 0; }                  /* SOA_CLOCK=fixed is off: */
+void irq_fixed_wait(CpuState* s) { (void)s; }            /* the frame end's wait is never set */
 void si_set_pad2_source(int (*fn)(uint16_t*, uint8_t*, uint8_t*, uint8_t*)) { (void)fn; }
 int si_read_pad(unsigned port, void* out) { (void)port; (void)out; return 0; }
 int window_pad2(uint16_t* b, uint8_t* s, uint8_t* c, uint8_t* t) { (void)b; (void)s; (void)c; (void)t; return 0; }

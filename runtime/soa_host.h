@@ -30,8 +30,10 @@ extern "C" {
 #endif
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
- * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 23u
+ * against the number it was built with before calling anything else. ABI 24
+ * added functions only (the clock and native events, at the end); no layout
+ * moved. */
+#define SOA_HOST_ABI 24u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -726,6 +728,55 @@ SOA_HOST_API void soa_host_mute(int on);
  * another of one run: the frames between, and what a pad script presses at
  * each, are the same ones. A frame already past is not a request. */
 SOA_HOST_API void soa_host_skip_to(unsigned frame, unsigned speed);
+
+/* ---- The guest's clock and work at a guest time (ABI 24; docs/CLOCK.md) ----
+ *
+ * Guest time is the console's timebase: SOA_HOST_TICKS_PER_SECOND ticks a
+ * second, 675,000 a field at 60 Hz. soa_host_set_clock, before
+ * soa_host_start, chooses its source: SOA_HOST_CLOCK_REAL (the default:
+ * host time times SOA_SPEED, as SOA_CLOCK unset) or SOA_HOST_CLOCK_FIXED (as
+ * SOA_CLOCK=fixed: moved by the guest's own work alone, so the same pad
+ * input, card image and seed give the same frames and calls on every run and
+ * every machine). It returns 0, changing nothing, once the run has started.
+ * soa_host_guest_ticks is guest ticks now, from any thread (0 before the
+ * guest first reads the clock).
+ *
+ * soa_host_schedule asks for `fn` to run on the guest's thread at guest tick
+ * `at`, and with `period` not 0 every `period` ticks after (counted from the
+ * tick it was due, so a 5 ms tick, 202,500 ticks, does not drift). It runs at
+ * the first point at or after `at` where the runtime delivers interrupts --
+ * the scheduler's idle loop, or a loop with interrupts enabled -- as an
+ * interrupt handler: the game's registers are all put back after it,
+ * interrupts are off while it runs, and if what it did woke a game thread the
+ * scheduler runs next. `due` is the tick it was due at, `now` the tick it runs
+ * at. Through `call` it has the game's memory, and `game` and
+ * `game_original` call the game's functions (a sound driver's callback, say);
+ * address is 0 and after is 0, and `original` does nothing. Like a
+ * replacement it must not block. It returns the event's id, or 0 when 32 are
+ * pending already or fn is NULL; soa_host_cancel(id) cancels it (1 when it
+ * was pending).
+ *
+ * soa_host_raise marks interrupt `number` pending, a number of the OS's
+ * interrupt table (5 AI, 6 ARAM, 7 DSP, 9-16 EXI, 18-19 PE, 20 SI, 21 DI, 24
+ * VI): at the next delivery point the game's handler for it is called as
+ * the device's interrupt would call it, once however many times it was
+ * raised. 0 for a number past 31.
+ *
+ * With the fixed clock, an event that falls while the game is idle runs on
+ * its tick exactly (the idle loop goes straight to the earliest deadline);
+ * one that falls while it is busy runs at the next delivery point, and the
+ * run's report gives the worst lateness. Events scheduled from the game's
+ * thread (from a replacement, or from another event) repeat exactly run to
+ * run; one scheduled from another thread lands where the game happens to be. */
+#define SOA_HOST_TICKS_PER_SECOND 40500000u
+#define SOA_HOST_CLOCK_REAL 0u
+#define SOA_HOST_CLOCK_FIXED 1u
+typedef void (*SoaHostEvent)(void* user, SoaHostCall* call, uint64_t due, uint64_t now);
+SOA_HOST_API int soa_host_set_clock(unsigned mode);
+SOA_HOST_API uint64_t soa_host_guest_ticks(void);
+SOA_HOST_API int soa_host_schedule(uint64_t at, uint64_t period, SoaHostEvent fn, void* user);
+SOA_HOST_API int soa_host_cancel(int id);
+SOA_HOST_API int soa_host_raise(unsigned number);
 
 #ifdef __cplusplus
 }

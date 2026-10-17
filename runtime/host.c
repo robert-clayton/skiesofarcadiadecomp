@@ -23,6 +23,7 @@
 #include "plat.h"
 #include "mod.h"
 #include "swap.h"
+#include "irq.h"
 #include <fenv.h>
 #include <math.h>
 #include <stdio.h>
@@ -564,6 +565,11 @@ static void host_original(SoaHostCall* call)
     call->fpr[0] = s->fpr[1].ps0;
 }
 
+static void host_no_original(SoaHostCall* call)
+{
+    (void)call; /* an event answers no function of the game's */
+}
+
 static int host_swap(CpuState* s, uint32_t address, SwapFn fnp, void* user, int after)
 {
     SoaHostAnswer fn = (SoaHostAnswer)fnp;
@@ -594,6 +600,57 @@ static int host_swap(CpuState* s, uint32_t address, SwapFn fnp, void* user, int 
     }
     if (how == SOA_HOST_ANSWERED_LIVE) return SWAP_ANSWERED;
     return how == SOA_HOST_BOTH ? SWAP_BOTH : SWAP_GAMES;
+}
+
+/* ---- the clock and native events (ABI 24; docs/CLOCK.md) ---- */
+
+int soa_host_set_clock(unsigned mode)
+{
+    if (plat_load32(&g_state) != SOA_HOST_IDLE || mode > SOA_HOST_CLOCK_FIXED) return 0;
+    plat_setenv("SOA_CLOCK", mode == SOA_HOST_CLOCK_FIXED ? "fixed" : "real"); /* read when the run starts */
+    return 1;
+}
+
+uint64_t soa_host_guest_ticks(void)
+{
+    return hle_guest_ticks();
+}
+
+/* irq.c's event, the host's function carried as its `extra` */
+static void host_event(CpuState* s, void* user, void (*extra)(void), uint64_t due, uint64_t now)
+{
+    SoaHostEvent fn = (SoaHostEvent)extra;
+    SoaHostCall c;
+    unsigned r;
+    memset(&c, 0, sizeof c);
+    c.mem = s->mem;
+    c.mem_bytes = MEM1_SIZE;
+    c.sp = s->gpr[1];
+    for (r = 0; r < 8; r++) c.gpr[r] = s->gpr[3 + r];
+    c.frame = g_mf[g_build].frame;
+    c.game = host_call_game;
+    c.runtime = s;
+    for (r = 0; r < 8; r++) c.fpr[r] = s->fpr[1 + r].ps0;
+    c.r = s->gpr;
+    c.f = (SoaHostPair*)s->fpr;
+    c.original = host_no_original;
+    c.game_original = host_call_game_original;
+    fn(user, &c, due, now);
+}
+
+int soa_host_schedule(uint64_t at, uint64_t period, SoaHostEvent fn, void* user)
+{
+    return fn ? irq_event_add(at, period, host_event, user, (void (*)(void))fn) : 0;
+}
+
+int soa_host_cancel(int id)
+{
+    return irq_event_cancel(id);
+}
+
+int soa_host_raise(unsigned number)
+{
+    return irq_raise(number);
 }
 
 int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user)

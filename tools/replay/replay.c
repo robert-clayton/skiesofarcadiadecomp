@@ -11,6 +11,9 @@
  *                                    every other entry told to the trace
  *   the timebase, a hardware read    the recording's, in order
  *   a store to the hardware          held to the recording's, in order
+ *   (with no_hardware, a candidate's hardware read ends the call and its
+ *   stores are counted: either is a difference; the recording's timebase
+ *   reads are given in their own order, the hardware's skipped)
  *   VIGetRetraceCount                the word in memory the runtime's reads
  *   the cache calls, OSReport, the game's debug print, the trace and watch
  *   points, the Ninja model notes    nothing, as they do nothing to memory
@@ -92,6 +95,10 @@ static uint32_t g_ninputs, g_input_at;
 static int g_input_bad;
 static uint32_t g_stores_off, g_store_ea; /* stores to the hardware not the game's call's, and the first */
 static uint64_t g_store_v;
+static int g_nohw;            /* run->no_hardware, for a candidate: it must touch no hardware at all */
+static uint32_t g_hw_reads, g_hw_stores, g_hw_ea; /* what this call's candidate did to the hardware, the first */
+static uint64_t g_hw_v;
+static int g_hw_read_stop;    /* a hardware read ended the call (no_hardware) */
 
 static int g_trace;           /* the entries told, into g_called */
 static RecCallee* g_called;
@@ -136,7 +143,12 @@ EXPORT void guest_resumed(CpuState* s) { stop("a thread resumed", s->pc); }
 static void store(CpuState* s, uint32_t kind, uint32_t ea, uint64_t v)
 {
     const RecInput* in = g_input_at < g_ninputs ? &g_inputs[g_input_at] : NULL;
-    (void)s;
+    (void)s, (void)kind;
+    if (g_nohw) { /* a native replacement stores to no hardware: counted, and dropped */
+        if (!g_hw_reads && !g_hw_stores) g_hw_ea = ea, g_hw_v = v;
+        g_hw_stores++;
+        return;
+    }
     if (in && in->kind == kind && in->ea == ea) {
         g_input_at++;
         if (in->value == v) return;
@@ -146,6 +158,18 @@ static void store(CpuState* s, uint32_t kind, uint32_t ea, uint64_t v)
 
 static uint64_t input(CpuState* s, uint32_t kind, uint32_t ea)
 {
+    if (g_nohw) {
+        if (kind >= REC_IN_MMIO) { /* nothing to give it but a difference */
+            if (!g_hw_reads && !g_hw_stores) g_hw_ea = ea, g_hw_v = 0;
+            g_hw_reads++;
+            g_hw_read_stop = 1;
+            stop("a hardware read, where a native replacement must make none", s->pc);
+        }
+        /* the timebase reads in their own order: the hardware's around them are what the candidate does not do */
+        while (g_input_at < g_ninputs && (REC_KIND(g_inputs[g_input_at].kind) == REC_MMIO_STORE ||
+                                          REC_KIND(g_inputs[g_input_at].kind) == REC_IN_MMIO))
+            g_input_at++;
+    }
     if (g_input_at < g_ninputs && g_inputs[g_input_at].kind == kind && g_inputs[g_input_at].ea == ea)
         return g_inputs[g_input_at++].value;
     g_input_bad = 1;
@@ -625,6 +649,91 @@ static void tell_undone(void)
     free(list);
 }
 
+/* Which device a hardware address is, for the reader. */
+static const char* peripheral(uint32_t ea)
+{
+    static const struct { uint32_t lo, hi; const char* name; } map[] = {
+        {0xCC000000u, 0xCC001000u, "CP"},   {0xCC001000u, 0xCC002000u, "PE"},  {0xCC002000u, 0xCC003000u, "VI"},
+        {0xCC003000u, 0xCC004000u, "PI"},   {0xCC004000u, 0xCC005000u, "MI"},  {0xCC005000u, 0xCC006000u, "DSP"},
+        {0xCC006000u, 0xCC006400u, "DI"},   {0xCC006400u, 0xCC006800u, "SI"},  {0xCC006800u, 0xCC006C00u, "EXI"},
+        {0xCC006C00u, 0xCC007000u, "AI"},   {0xCC008000u, 0xCC009000u, "GX FIFO"},
+    };
+    unsigned k;
+    for (k = 0; k < sizeof map / sizeof map[0]; k++)
+        if (ea >= map[k].lo && ea < map[k].hi) return map[k].name;
+    return "hardware";
+}
+
+/* ---- the recorded hardware a native candidate retires (no_hardware) ----
+ *
+ * Every hardware access the game's replayed calls made, by register and
+ * kind: what the candidate is expected to have reproduced some other way --
+ * a read's value it must know without asking, a store's effect it must have
+ * made happen natively. What the hardware did to memory (a DMA's bytes) is
+ * in the pages and held as ever. */
+#define RETIRED_SLOTS 256
+typedef struct {
+    uint32_t ea, kind; /* REC_IN_MMIO or REC_MMIO_STORE, with the size in bits 8 on */
+    uint64_t accesses, calls, last_call;
+    uint64_t values[4];
+    uint32_t nvalues; /* distinct values seen, up to 5 (5: more than 4) */
+} Retired;
+static Retired g_retired[RETIRED_SLOTS];
+static uint32_t g_nretired, g_retired_lost;
+static uint64_t g_retired_call;
+
+static void retired_note(const RecInput* in)
+{
+    uint32_t k, v;
+    Retired* r = NULL;
+    for (k = 0; k < g_nretired; k++)
+        if (g_retired[k].ea == in->ea && g_retired[k].kind == in->kind) { r = &g_retired[k]; break; }
+    if (!r) {
+        if (g_nretired == RETIRED_SLOTS) { g_retired_lost++; return; }
+        r = &g_retired[g_nretired++];
+        memset(r, 0, sizeof *r);
+        r->ea = in->ea, r->kind = in->kind;
+        r->last_call = ~0ull;
+    }
+    r->accesses++;
+    if (r->last_call != g_retired_call) r->calls++, r->last_call = g_retired_call;
+    for (v = 0; v < r->nvalues && v < 4 && r->values[v] != in->value; v++) {}
+    if (v == r->nvalues && r->nvalues < 5) {
+        if (r->nvalues < 4) r->values[r->nvalues] = in->value;
+        r->nvalues++;
+    }
+}
+
+static int by_register(const void* a, const void* b)
+{
+    const Retired *x = (const Retired*)a, *y = (const Retired*)b;
+    return x->ea != y->ea ? (x->ea < y->ea ? -1 : 1) : (x->kind < y->kind ? -1 : x->kind > y->kind);
+}
+
+static void tell_retired(uint64_t calls)
+{
+    uint32_t k, v, any = 0;
+    qsort(g_retired, g_nretired, sizeof *g_retired, by_register);
+    for (k = 0; k < g_nretired; k++) any += g_retired[k].calls != 0;
+    if (!any) {
+        printf("  --no-hardware: the game's %llu calls touched no hardware; nothing is retired\n", (unsigned long long)calls);
+        return;
+    }
+    printf("  --no-hardware: the hardware the game's calls touched, retired; the candidate is expected to reproduce\n"
+           "  each effect some other way (a read's value known natively, a store's effect made natively):\n");
+    for (k = 0; k < g_nretired; k++) {
+        const Retired* r = &g_retired[k];
+        int stored = REC_KIND(r->kind) == REC_MMIO_STORE;
+        printf("    %-7s %08X %s%u: %llu %s in %llu of %llu calls; ", peripheral(r->ea), r->ea, stored ? "store" : "read",
+               (r->kind >> 8) * 8, (unsigned long long)r->accesses, r->accesses == 1 ? "time" : "times",
+               (unsigned long long)r->calls, (unsigned long long)calls);
+        printf("%s", r->nvalues == 1 ? "always " : "values ");
+        for (v = 0; v < r->nvalues && v < 4; v++) printf("%s%llX", v ? ", " : "", (unsigned long long)r->values[v]);
+        printf("%s\n", r->nvalues > 4 ? ", ..." : "");
+    }
+    if (g_retired_lost) printf("    ... and %u accesses to registers past the first %u\n", g_retired_lost, RETIRED_SLOTS);
+}
+
 #define LINES_A_CALL 24
 
 static int bits_eq(double a, double b)
@@ -770,12 +879,17 @@ static int held(Hold* h, const Call* c, int original, uint32_t results, uint32_t
             }
         }
     }
+    if (g_nohw && g_hw_stores) {
+        off++;
+        tell(h, &said, c, "touched the hardware, where a native replacement must not: %u store(s); the first %s %08X = %llX",
+             g_hw_stores, peripheral(g_hw_ea), g_hw_ea, (unsigned long long)g_hw_v);
+    }
     if (g_stores_off) {
         off++;
         tell(h, &said, c, "%u stores to the hardware not the game's call's: the first %08X = %llX", g_stores_off,
              g_store_ea, (unsigned long long)g_store_v);
     }
-    for (k = g_input_at; k < c->head.inputs; k++)
+    for (k = g_input_at; !g_nohw && k < c->head.inputs; k++)
         if (REC_KIND(c->inputs[k].kind) == REC_MMIO_STORE) {
             off++;
             tell(h, &said, c, "the game's call stored %llX to the hardware at %08X, and this did not",
@@ -895,6 +1009,9 @@ EXPORT int soa_replay(const SoaReplayRun* run, SoaReplayTotals* t)
                 r.head.functions, r.head.game, g_game->count, g_game->record ? g_game->record : "");
     g_cand = run->candidate;
     g_cand_index = g_cand ? index_of(g_cand->address) : -1;
+    g_nohw = run->no_hardware && !run->original && g_cand;
+    g_nretired = g_retired_lost = 0;
+    g_retired_call = 0;
     if (g_cand && g_cand_index < 0) {
         fprintf(stderr, "[replay] %s: %08X is not a translated function of this game library\n", g_cand->name, g_cand->address);
         return 0;
@@ -927,6 +1044,14 @@ EXPORT int soa_replay(const SoaReplayRun* run, SoaReplayTotals* t)
         g_input_at = 0;
         g_input_bad = 0;
         g_stores_off = 0;
+        g_hw_reads = g_hw_stores = 0;
+        g_hw_read_stop = 0;
+        if (g_nohw) {
+            g_retired_call++;
+            for (i = 0; i < c.head.inputs; i++)
+                if (REC_KIND(c.inputs[i].kind) == REC_MMIO_STORE || REC_KIND(c.inputs[i].kind) == REC_IN_MMIO)
+                    retired_note(&c.inputs[i]);
+        }
         g_seen = c.head.seen;
         g_frame = c.head.frame;
         g_ncalled = 0;
@@ -936,6 +1061,20 @@ EXPORT int soa_replay(const SoaReplayRun* run, SoaReplayTotals* t)
         g_why = NULL;
         run_call(c.head.address);
         g_trace = 0;
+        if (g_why && g_hw_read_stop) { /* not unreplayable: the candidate did what it must not */
+            if (!run->quiet && h.shown < h.show) {
+                printf("  call %llu of %08X (frame %llu):\n    touched the hardware, where a native replacement must "
+                       "not: a read of %s %08X (the call ends there)\n",
+                       (unsigned long long)c.head.seen, c.head.address, (unsigned long long)c.head.frame,
+                       peripheral(g_hw_ea), g_hw_ea);
+                h.shown++;
+            }
+            t->mismatched++;
+            t->hw_touched++;
+            keep_touches();
+            for (i = 0; i < c.head.pages; i++) g_valid[c.page[i]] = !g_dirty[c.page[i]] && !c.post_n[i];
+            continue;
+        }
         if (g_why) {
             for (k = 0; k < nreasons && strcmp(reasons[k], g_why); k++) {}
             if (k == nreasons && nreasons < 16) reasons[nreasons] = g_why, reason_n[nreasons++] = 0;
@@ -953,6 +1092,7 @@ EXPORT int soa_replay(const SoaReplayRun* run, SoaReplayTotals* t)
         h.undone = 0;
         g_undone_call++;
         off = held(&h, &c, run->original, g_cand ? g_cand->results : 0u, sp);
+        if (g_nohw && (g_hw_reads || g_hw_stores)) t->hw_touched++;
         if (off) t->mismatched++;
         else if (h.undone) t->partial++;
         else t->matched++;
@@ -963,6 +1103,8 @@ EXPORT int soa_replay(const SoaReplayRun* run, SoaReplayTotals* t)
     t->bytes_held = h.bytes, t->regs_held = h.regs;
     t->undone_bytes = h.undone_bytes;
     if (h.partial) tell_undone();
+    if (g_nohw) tell_retired(t->calls);
+    g_nohw = 0;
     for (k = 0; k < nreasons; k++)
         printf("  not replayable: %llu calls met %s\n", (unsigned long long)reason_n[k], reasons[k]);
     free(c.page), free(c.flags), free(c.post_n), free(c.here), free((void*)c.pre), free((void*)c.post), free(c.buf);

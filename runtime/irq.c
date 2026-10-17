@@ -9,9 +9,20 @@
  *
  * Devices modelled so far: the VI retrace (the game's heartbeat) and the
  * decrementer (which drives OSAlarm).
+ *
+ * Native code adds two more sources (docs/CLOCK.md): events scheduled at a
+ * guest tick, run at the first delivery point at or after it as a handler
+ * would be (irq_event_add; soa_host_schedule), and interrupt lines it marks
+ * pending, which call the game's own handler for that interrupt number at the
+ * next delivery point (irq_raise; soa_host_raise). Under the fixed-step clock
+ * (SOA_CLOCK=fixed) a delivery point at a loop's back edge moves guest time a
+ * step, and the idle loop with nothing to deliver moves it to the next
+ * deadline: the retrace, the decrementer, a device's, an event's.
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include "cpu.h"
+#include "clock.h"
+#include "irq.h"
 #include "plat.h"
 #include <setjmp.h>
 #include <stdio.h>
@@ -32,6 +43,9 @@ int di_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v);
 int di_irq_pending(void);
 void di_poll(CpuState* s);
 void aram_poll(CpuState* s);
+int di_next_due(uint64_t* due);
+int aram_next_due(uint64_t* due);
+int dsp_next_due(uint64_t* due);
 void dvd_report(void);
 int gx_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out);
 int gx_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v);
@@ -80,9 +94,10 @@ void exi_report(void);
 uint32_t guest_timebase_lo(CpuState* s);
 uint32_t guest_timebase_hi(CpuState* s);
 
+uint64_t guest_time_device(CpuState* s); /* hle.c: the timebase as a device reads it */
 static uint64_t tb_now(CpuState* s)
 {
-    return ((uint64_t)guest_timebase_hi(s) << 32) | guest_timebase_lo(s);
+    return guest_time_device(s);
 }
 
 /* ---- VI --------------------------------------------------------------- */
@@ -305,6 +320,132 @@ static uint32_t interrupt_handler(CpuState* s, uint32_t irq)
 
 static int g_pace = -1;
 
+/* ---- native sources: events at a guest tick, and interrupt lines -------
+ *
+ * Both are set from any thread and run on the guest's, inside a delivery,
+ * as a handler is: every register put back after, MSR[EE] clear while it
+ * runs, no delivery nested in it, and the scheduler run after it if it woke a
+ * thread (irq_poll). An event is due at a tick of guest time and runs at the
+ * first delivery point at or after it; a periodic one is then due `period`
+ * ticks after the tick it was due at, not after when it ran, so a 5 ms
+ * sound tick does not drift. Lateness (the tick it ran at less the tick it
+ * was due at) is kept for the report. A line is a number in the OS's
+ * interrupt table (0-31): at the next delivery point the game's handler in
+ * that slot is called with it, as the device's own interrupt would. */
+typedef struct {
+    int id; /* 0: a free slot */
+    uint64_t due, period;
+    IrqEventFn fn;
+    void* user;
+    void (*extra)(void);
+} IrqEvent;
+static IrqEvent g_events[IRQ_EVENTS];
+static PlatLock g_event_lock;
+static int g_event_next_id;
+static volatile int g_nevents; /* pending, so a delivery with none costs one test */
+static volatile uint32_t g_lines; /* raised and not yet delivered, a bit a number */
+static uint64_t g_event_runs, g_event_late_max, g_event_late_sum, g_line_runs, g_line_unhandled;
+
+int irq_event_add(uint64_t due, uint64_t period, IrqEventFn fn, void* user, void (*extra)(void))
+{
+    int k, id = 0;
+    if (!fn) return 0;
+    plat_lock(&g_event_lock);
+    for (k = 0; k < IRQ_EVENTS; k++)
+        if (!g_events[k].id) {
+            if (++g_event_next_id <= 0) g_event_next_id = 1;
+            id = g_event_next_id;
+            g_events[k].id = id;
+            g_events[k].due = due;
+            g_events[k].period = period;
+            g_events[k].fn = fn;
+            g_events[k].user = user;
+            g_events[k].extra = extra;
+            g_nevents++;
+            break;
+        }
+    plat_unlock(&g_event_lock);
+    return id;
+}
+
+int irq_event_cancel(int id)
+{
+    int k, found = 0;
+    if (id <= 0) return 0;
+    plat_lock(&g_event_lock);
+    for (k = 0; k < IRQ_EVENTS; k++)
+        if (g_events[k].id == id) g_events[k].id = 0, found = 1, g_nevents--;
+    plat_unlock(&g_event_lock);
+    return found;
+}
+
+int irq_raise(unsigned number)
+{
+    uint32_t was;
+    if (number >= 32) return 0;
+    plat_lock(&g_event_lock);
+    was = g_lines;
+    g_lines = was | (1u << number);
+    plat_unlock(&g_event_lock);
+    return 1;
+}
+
+uint64_t irq_guest_ticks(CpuState* s)
+{
+    return tb_now(s);
+}
+
+/* The earliest event's tick in *due; 0 when there is none. */
+static int event_next_due(uint64_t* due)
+{
+    int k, any = 0;
+    if (!g_nevents) return 0;
+    plat_lock(&g_event_lock);
+    for (k = 0; k < IRQ_EVENTS; k++)
+        if (g_events[k].id && (!any || g_events[k].due < *due)) *due = g_events[k].due, any = 1;
+    plat_unlock(&g_event_lock);
+    return any;
+}
+
+/* A native event, run as call_guest_handler runs the game's. */
+static void call_native(CpuState* s, const IrqEvent* e, uint64_t now)
+{
+    RegisterFile saved;
+    regs_save(s, &saved);
+    s->msr &= ~0x8000u;
+    g_in_handler++;
+    g_delivered++;
+    e->fn(s, e->user, e->extra, e->due, now);
+    g_in_handler--;
+    regs_restore(s, &saved);
+}
+
+/* Every event due by `now`, earliest first; a periodic one that is several
+ * periods behind runs once a period, up to 64 times a pass. */
+static void run_events(CpuState* s, uint64_t now)
+{
+    unsigned runs;
+    if (!g_nevents) return;
+    for (runs = 0; runs < 64; runs++) {
+        int k, best = -1;
+        IrqEvent e;
+        plat_lock(&g_event_lock);
+        for (k = 0; k < IRQ_EVENTS; k++)
+            if (g_events[k].id && g_events[k].due <= now && (best < 0 || g_events[k].due < g_events[best].due)) best = k;
+        if (best >= 0) {
+            e = g_events[best];
+            if (e.period) g_events[best].due += e.period;
+            else g_events[best].id = 0, g_nevents--;
+        }
+        plat_unlock(&g_event_lock);
+        if (best < 0) return;
+        g_event_runs++;
+        if (now - e.due > g_event_late_max) g_event_late_max = now - e.due;
+        g_event_late_sum += now - e.due;
+        call_native(s, &e, now);
+    }
+}
+
 /* runtime/record.c (SOA_RECORD): while a recorded call runs, interrupts wait
  * for it to return -- its recording slows it a thousandfold, and with the
  * guest's clock the host's, one would land inside nearly every call -- unless
@@ -339,6 +480,23 @@ static void deliver_pending(CpuState* s)
             static int warned;
             if (!warned++) fprintf(stderr, "[irq] decrementer expired before its handler was installed\n");
         }
+    }
+
+    /* Native events due by now, then the lines native code raised. */
+    run_events(s, now);
+    if (g_lines) {
+        uint32_t lines;
+        unsigned n;
+        plat_lock(&g_event_lock);
+        lines = g_lines;
+        g_lines = 0;
+        plat_unlock(&g_event_lock);
+        for (n = 0; n < 32; n++)
+            if ((lines >> n) & 1u) {
+                handler = interrupt_handler(s, n);
+                if (handler) { g_line_runs++; call_guest_handler(s, handler, n); }
+                else g_line_unhandled++;
+            }
     }
 
     /* Pixel engine: a draw-done or token the command stream produced. */
@@ -437,11 +595,34 @@ static void deliver_pending(CpuState* s)
     if (g_pace) plat_yield();
 }
 
+/* The fixed-step clock with nothing runnable and nothing delivered: guest
+ * time goes to the next deadline ahead of it -- the retrace, the
+ * decrementer, a disc, ARAM or AI DMA completion, a native event -- which
+ * the next pass of the idle loop delivers. With none ahead (the VI handler
+ * not yet installed, its deadline behind) a field's worth. */
+static void fixed_idle_skip(CpuState* s)
+{
+    uint64_t now = tb_now(s), best = 0, t;
+    int any = 0;
+#define DUE(t) do { if ((t) > now && (!any || (t) < best)) best = (t), any = 1; } while (0)
+    DUE(g_vi_last + VI_PERIOD_TICKS);
+    if (g_dec_armed) DUE(g_dec_set + g_dec_value);
+    if (di_next_due(&t)) DUE(t);
+    if (aram_next_due(&t)) DUE(t);
+    if (dsp_next_due(&t)) DUE(t);
+    if (event_next_due(&t)) DUE(t);
+#undef DUE
+    if (!any) best = now + VI_PERIOD_TICKS;
+    clock_fixed_skip_to(best);
+}
+
 /* SelectThread's idle loop, 0x80237BA8: `lwz RunQueueBits; beq`. Nothing is
  * runnable, interrupts are enabled, IdleContext is current. Deliver. */
 void hook_80237BA8(CpuState* s)
 {
+    uint64_t before = g_delivered;
     deliver_pending(s);
+    if (clock_fixed() && g_delivered == before && !g_in_handler) fixed_idle_skip(s);
 }
 
 /* Every backward branch in recompiled code lands here (emit.py). A thread
@@ -450,15 +631,14 @@ void hook_80237BA8(CpuState* s)
  * have made it after the handler returned. Rate-limited: the devices are
  * clocked by the timebase, which is not worth reading on every iteration. */
 #define OS_RESCHEDULE 0x80237C84u
-void irq_poll(CpuState* s)
+/* Deliver, and run the scheduler if a handler woke a thread; 1 if anything
+ * was delivered. */
+static int deliver_and_reschedule(CpuState* s)
 {
-    static unsigned n;
-    uint64_t before;
-    if (!(s->msr & 0x8000u) || g_in_handler) return; /* MSR[EE] clear, or nested */
-    if (++n & 0xFu) return;
-    before = g_delivered;
+    uint64_t before = g_delivered;
     deliver_pending(s);
-    if (g_delivered != before) {
+    if (g_delivered == before) return 0;
+    {
         /* The scheduler is guest code too: it clobbers volatile registers
          * the interrupted loop is still using. */
         RegisterFile saved;
@@ -468,6 +648,27 @@ void irq_poll(CpuState* s)
         dispatch(s, OS_RESCHEDULE);
         regs_restore(s, &saved);
     }
+    return 1;
+}
+
+void irq_poll(CpuState* s)
+{
+    static unsigned n;
+    if (!(s->msr & 0x8000u) || g_in_handler) return; /* MSR[EE] clear, or nested */
+    if (++n & 0xFu) return;
+    if (clock_fixed()) clock_fixed_poll(); /* the guest's work is its clock's */
+    deliver_and_reschedule(s);
+}
+
+/* A wait the runtime recognises in the game's own code (tick.c: the frame
+ * end's spin on the retrace count). Under the fixed-step clock it is the
+ * idle loop's case: deliver what is due, and with nothing due go to the next
+ * deadline, rather than spin the guest until delivery points add up to a
+ * field. Under the real clock it does nothing; the spin is the game's. */
+void irq_fixed_wait(CpuState* s)
+{
+    if (!clock_fixed() || !(s->msr & 0x8000u) || g_in_handler) return;
+    if (!deliver_and_reschedule(s)) fixed_idle_skip(s);
 }
 
 void irq_report(void)
@@ -489,6 +690,22 @@ void irq_report(void)
     fprintf(stderr, "[irq] %llu DSP mails, %llu AI DMA blocks, %llu ARAM DMAs delivered\n",
             (unsigned long long)g_dsp_count, (unsigned long long)g_aid_count,
             (unsigned long long)g_ar_count);
+    if (g_event_runs || g_line_runs || g_line_unhandled)
+        fprintf(stderr, "[irq] native: %llu events run, late by at most %llu ticks (%.1f us), %.1f ticks on average; "
+                        "%llu raised lines delivered, %llu with no handler installed\n",
+                (unsigned long long)g_event_runs, (unsigned long long)g_event_late_max,
+                (double)g_event_late_max * 1e6 / (double)TB_HZ,
+                g_event_runs ? (double)g_event_late_sum / (double)g_event_runs : 0.0, (unsigned long long)g_line_runs,
+                (unsigned long long)g_line_unhandled);
+    if (clock_fixed()) {
+        unsigned long long reads, polls, skips;
+        uint64_t skipped;
+        clock_fixed_stats(&reads, &polls, &skips, &skipped);
+        fprintf(stderr, "[clock] fixed: %llu ticks of guest time (%.3f s): %llu timebase and hardware reads, %llu delivery points, "
+                        "%llu idle skips for %llu ticks\n",
+                (unsigned long long)clock_fixed_now(), (double)clock_fixed_now() / (double)TB_HZ, reads, polls, skips,
+                (unsigned long long)skipped);
+    }
 }
 
 uint64_t irq_retrace_count(void)

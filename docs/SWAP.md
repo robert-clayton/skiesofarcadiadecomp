@@ -104,7 +104,7 @@ cooperatively).
 - A handler must keep the caller's non-volatile registers (r1, r2, r13–r31,
   f14–f31) as it found them.
 
-## What the host gets (`soa_host.h`, ABI 23)
+## What the host gets (`soa_host.h`, ABI 23; 24 adds the clock and events)
 
 `SoaHostCall` keeps its ABI 22 layout. These fields are appended at the end:
 
@@ -189,6 +189,14 @@ The checks:
   guest. The byte guard is portable C.
 
 ## What changed (and what to rebuild)
+
+- **Host ABI 23 → 24** (2026-10-17, `runtime/soa_host.h`): new entry points
+  only, at the end of the header: `soa_host_set_clock`,
+  `soa_host_guest_ticks`, `soa_host_schedule`, `soa_host_cancel`,
+  `soa_host_raise` (docs/CLOCK.md). No struct moved, `SoaHostCall` included:
+  an event's function is handed one, with `address` 0. A plugin built
+  against 23 refuses a 24 runtime as before; rebuilding it with the new
+  header is enough, with no source change.
 
 - **Host ABI 22 → 23** (`runtime/soa_host.h`). `SoaHostCall` grew at its end,
   and there are new entry points: `soa_host_functions`,

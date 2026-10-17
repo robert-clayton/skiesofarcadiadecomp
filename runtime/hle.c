@@ -131,6 +131,11 @@ unsigned g_record_polls; /* irq.c's deliveries held while a recorded call runs *
 void (*g_record_note)(CpuState* s, int kind, uint32_t ea, uint64_t v);
 #define RECORD_NOTE(s, kind, ea, v) do { if (g_record_armed && g_record_note) g_record_note((s), (kind), (ea), (v)); } while (0)
 
+/* SOA_CLOCK=fixed (docs/CLOCK.md): a hardware read moves the fixed-step
+ * clock as a timebase read does, after the answer, so a loop polling a
+ * device's status with interrupts off sees its deadline come. */
+static int g_clock_fixed;
+
 #define MMIO_READ(T, N)                                        \
     T mmio_read##N(CpuState* s, uint32_t ea)                   \
     {                                                          \
@@ -138,6 +143,7 @@ void (*g_record_note)(CpuState* s, int kind, uint32_t ea, uint64_t v);
         int handled = device_read(s, ea, sizeof(T), &v);       \
         note(s, handled ? "RD" : "rd", ea, sizeof(T), v);         \
         RECORD_NOTE(s, 4 | (int)sizeof(T) << 8, ea, (T)v);     \
+        if (g_clock_fixed) clock_fixed_after_read();           \
         return (T)v;                                           \
     }
 #define MMIO_WRITE(T, N)                                       \
@@ -307,16 +313,65 @@ static void clock_gap(double gap_s)
     fprintf(stderr, "[clock] frame %u: a gap of %.1f s wall counted as 0 s of guest time\n", gx_frame_count(), gap_s);
 }
 
+/* SOA_CLOCK=fixed (docs/CLOCK.md): the fixed-step clock's three numbers,
+ * each a non-negative whole number or the default. */
+static unsigned long long env_ull(const char* name, unsigned long long dflt)
+{
+    const char* v = getenv(name);
+    char* end;
+    unsigned long long n;
+    if (!v || !*v) return dflt;
+    n = strtoull(v, &end, 0);
+    if (*end || v[0] == '-') {
+        fprintf(stderr, "[clock] %s=%s is not a whole number; %llu\n", name, v, dflt);
+        return dflt;
+    }
+    return n;
+}
+
+/* SOA_CLOCK=fixed, set up once: from main() before the guest runs
+ * (hle_clock_start), so the RTC is fixed from the first read too, or at the
+ * first timebase read of a program that has no main of ours. */
+static int fixed_setup(void)
+{
+    static int done;
+    const char* src = getenv("SOA_CLOCK");
+    if (done || !src || strcmp(src, "fixed")) return g_clock_fixed;
+    done = 1;
+    {
+        unsigned long long rd = env_ull("SOA_CLOCK_READ_TICKS", 8), poll = env_ull("SOA_CLOCK_POLL_TICKS", 32);
+        unsigned long long rtc = env_ull("SOA_CLOCK_RTC", 31622400ull);
+        clock_fixed_configure(rd, poll, (uint32_t)rtc);
+        g_clock_fixed = 1;
+        fprintf(stderr, "[clock] SOA_CLOCK=fixed: guest time moves %llu ticks a timebase or hardware read, %llu a delivery "
+                        "point, and to the next deadline when idle; SOA_SPEED and the host's clock are not read; "
+                        "the RTC starts at %llu s past 2000\n", rd, poll, rtc);
+    }
+    return 1;
+}
+
 /* The Gekko timebase: clock.c's guest time (M19), which is monotonic and
  * does not count a host sleep or stall past SOA_CLOCK_GAP_MS; or, with
- * SOA_CLOCK=utc, the old wall time since the first read, times SOA_SPEED. */
+ * SOA_CLOCK=utc, the old wall time since the first read, times SOA_SPEED;
+ * or, with SOA_CLOCK=fixed, clock.c's fixed-step ticks, which only the
+ * guest's own work moves. */
 static uint64_t timebase(void)
 {
     uint64_t ns;
+    if (g_clock_fixed) {
+        g_tb_started = 1;
+        return clock_fixed_now();
+    }
     if (!g_tb_started) {
         const char* src = getenv("SOA_CLOCK");
         const char* gap = getenv("SOA_CLOCK_GAP_MS");
         g_clock_utc = src && !strcmp(src, "utc");
+        if (fixed_setup()) {
+            g_tb_started = 1;
+            return clock_fixed_now();
+        }
+        if (src && *src && strcmp(src, "utc") && strcmp(src, "real"))
+            fprintf(stderr, "[clock] SOA_CLOCK=%s is not fixed, utc or real; the real clock\n", src);
         clock_configure(hle_speed(), gap && *gap ? atol(gap) : -1, clock_gap);
         if (g_clock_utc) {
             struct timespec ts;
@@ -373,6 +428,7 @@ static double wall_hz(void)
  * the run and not whatever part of it happened to ask first. */
 void hle_clock_start(void)
 {
+    fixed_setup();
     if (g_wall_started) return;
     g_wall_started = 1;
     g_wall_origin = wall_now();
@@ -478,8 +534,20 @@ double hle_wall_seconds(void)
 double hle_guest_seconds(void)
 {
     if (!g_tb_started) return 0.0;
+    if (g_clock_fixed) return (double)clock_fixed_now() / (double)TB_HZ;
     /* the report may run on the UI thread: read the clock, do not advance it */
     return g_clock_utc ? (double)timebase() / (double)TB_HZ : (double)clock_peek_at(clock_host_ns()) / 1e9;
+}
+
+/* Guest ticks now from any thread (irq.h): the clock read, not advanced. */
+uint64_t hle_guest_ticks(void)
+{
+    uint64_t ns;
+    if (!g_tb_started) return 0;
+    if (g_clock_fixed) return clock_fixed_now();
+    if (g_clock_utc) return timebase();
+    ns = clock_peek_at(clock_host_ns());
+    return ns / 1000000000ull * TB_HZ + ns % 1000000000ull * TB_HZ / 1000000000ull;
 }
 
 /* The race seed (seed.c, PLAN-GAMEPLAY-MODS P6): with SOA_SEED set, a read
@@ -489,11 +557,17 @@ double hle_guest_seconds(void)
 extern int g_seed_on;
 uint32_t seed_pin(uint32_t lr, uint32_t tb);
 
+/* 1 while a device model reads the timebase (guest_time_device): under the
+ * fixed-step clock only the guest's own mftb moves time. */
+static int g_tb_device;
+
 uint32_t guest_timebase_lo(CpuState* s)
 {
     uint32_t v = (uint32_t)timebase();
     v = g_seed_on && s->pc == 0x8023851Cu ? seed_pin(s->lr, v) : v;
     RECORD_NOTE(s, 2, 0, v);
+    /* after the answer, so mftbu, mftb, mftbu (OSGetTime) agree on the high word */
+    if (g_clock_fixed && !g_tb_device) clock_fixed_after_read();
     return v;
 }
 uint32_t guest_timebase_hi(CpuState* s)
@@ -501,4 +575,24 @@ uint32_t guest_timebase_hi(CpuState* s)
     uint32_t v = (uint32_t)(timebase() >> 32);
     RECORD_NOTE(s, 3, 0, v);
     return v;
+}
+
+/* The timebase as the device models read it (irq.c, dvd.c, aram.c, dsp.c):
+ * the same two reads as ever, high word first, so the real clock and a
+ * recording see what they saw; under the fixed-step clock they move nothing. */
+uint64_t guest_time_device(CpuState* s)
+{
+    uint64_t v;
+    g_tb_device = 1;
+    v = (uint64_t)guest_timebase_hi(s) << 32;
+    v |= guest_timebase_lo(s);
+    g_tb_device = 0;
+    return v;
+}
+
+/* 1: the fixed-step clock is the guest's (SOA_CLOCK=fixed, read at the first
+ * timebase read). */
+int hle_clock_fixed(void)
+{
+    return g_clock_fixed;
 }

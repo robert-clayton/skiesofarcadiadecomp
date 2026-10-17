@@ -23,6 +23,7 @@
  * every save sit out a 100 ms timeout and fail.
  */
 #define _CRT_SECURE_NO_WARNINGS
+#include "clock.h"
 #include "cpu.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -438,6 +439,7 @@ static uint32_t rtc_seconds(void)
     /* seconds since 2000-01-01 00:00:00 local */
     time_t now = time(NULL);
     struct tm t2000;
+    if (clock_fixed()) return clock_fixed_rtc(); /* SOA_CLOCK=fixed: a fixed date, plus guest time (docs/CLOCK.md) */
     memset(&t2000, 0, sizeof t2000);
     t2000.tm_year = 100; t2000.tm_mon = 0; t2000.tm_mday = 1;
     return (uint32_t)(now - mktime(&t2000));

@@ -101,6 +101,8 @@ DIR/soa-compare --list                                               the candida
     --with-flagged   replay the calls the recording flagged too
     --partial        a byte the game's call wrote and the candidate left as it was is
                      "left undone": counted and listed by stretch, not held
+    --no-hardware    the candidate is a native replacement of the platform: it must
+                     touch no hardware, even where the game's call did (below)
 ```
 
 The exit code is 0 when every replayed call agreed, 1 when one did not, and
@@ -161,6 +163,51 @@ candidate wrote, every result and kept register, nothing written or read
 outside the recording. A wrong value is still a difference. A call that
 agrees except for undone bytes is counted apart from one that agrees in
 full.
+
+**`--no-hardware`** is for a native replacement of an SDK function (soa-ue5's
+Layer 1: disc, pad, card, sound, timing). The game's recorded call read and
+stored the console's registers; the native one talks to the native device
+instead, and must not touch MMIO at all. Under it, for a candidate (the self
+check is held as ever):
+
+- a hardware read by the candidate, or by any function of the game's it
+  calls, ends the call, which counts as not agreeing ("a read of AI
+  CC006C00 (the call ends there)"): there is no value to give it;
+- a store to the hardware is counted, dropped, and is a difference ("1
+  store(s); the first AI CC006C08 = 5");
+- the recording's own hardware accesses are not held: the game's stores need
+  not be made, and its timebase reads are given in their own order, the
+  hardware's between them skipped;
+- everything else is held as before: memory, results, the kept registers.
+  What the hardware did to memory -- a DMA's bytes, a device model's copy --
+  is in the recorded pages, so the candidate must still have put it there.
+
+After the run it lists the hardware the game's replayed calls touched,
+register by register, as *retired*: what the candidate is expected to
+reproduce some other way, a read's value known natively, a store's effect
+made natively. For example:
+
+```
+  --no-hardware: the hardware the game's calls touched, retired; the candidate is expected to reproduce
+  each effect some other way (a read's value known natively, a store's effect made natively):
+    AI      CC006C00 read32: 6 times in 6 of 6 calls; values 40, 41, 42, 43, ...
+    AI      CC006C04 store32: 6 times in 6 of 6 calls; values 41, 42, 43, 44, ...
+```
+
+(`test_replay_nohw.py`: a native candidate fails the ordinary compare on
+the missing store and passes `--no-hardware`; one that leaves the call to
+the translation fails on the read, one that stores through a game function
+fails on the store.)
+
+**Recording under the fixed-step clock** (`SOA_CLOCK=fixed`,
+docs/CLOCK.md) gives a recorded run that repeats, recording and all.
+Interrupts are still held while a recorded call runs, so it is not the
+unrecorded run frame for frame: letting them land inside recorded calls
+(where a fixed clock would put them) was tried, with `SOA_RENDER=1`: 1,521
+frames identical to the unrecorded run, and then a rasterizer worker's copy
+into guest memory (`run_copy_pixels`) met a page the recorder had protected
+and the run died (SIGSEGV). Holding them avoids that; letting them in needs
+the recorder and the renderer's copies to agree first.
 
 **What a candidate's calls into the game do.** They run the game's own
 translation against the restored memory. A candidate that calls a maker of
@@ -292,9 +339,9 @@ replay into one `soa-compare` (g++ -O2) without one Unreal header or shim.
 - **POSIX only** (`mprotect` and `SIGSEGV`). Windows refuses `SOA_RECORD`.
   The page size is the host's. A recording replays on a machine with the
   same page size and the same game library.
-- **Interrupts are held** while a recorded call runs. The recorded run's
-  timing is therefore not the unrecorded run's, so record a run for its
-  calls, not for its frames.
+- **Interrupts are held** while a recorded call runs, under the real clock.
+  The recorded run's timing is therefore not the unrecorded run's, so record
+  a run for its calls, not for its frames.
 - **A store to the disc's interface drops the call.** Calls that start disc
   reads are not recorded.
 - **The GX pipe, the decrementer, thread switches** end a replayed call as
