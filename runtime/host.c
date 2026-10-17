@@ -22,6 +22,7 @@
 #include "ninja.h"
 #include "plat.h"
 #include "mod.h"
+#include "swap.h"
 #include <fenv.h>
 #include <math.h>
 #include <stdio.h>
@@ -89,6 +90,7 @@ int soa_host_start(const SoaHostStart* start, char* why, size_t cap)
         goto refused;
     }
     if (soa_load_game(start->game, why, cap) != 0) goto refused;
+    swap_attach(); /* what the host asked to swap before there was a game */
     /* The switches the run reads, set as soa.ini's are: only where the
      * environment has not set them already. */
     if (start->root && *start->root) {
@@ -535,31 +537,9 @@ int soa_host_write(uint32_t address, const void* data, unsigned bytes)
     return queued;
 }
 
-/* A function of the game's the host answers (replace.c calls host_answer on
- * the guest's thread). One slot an address; the host sets it from its own
- * thread, the function last and the user first, and clears the function
- * first. */
-#define MAX_REPLACE 10
-static struct {
-    uint32_t address;
-    SoaHostAnswer volatile fn;
-    void* volatile user;
-} g_replace[MAX_REPLACE] = {{0x80096DA4u, NULL, NULL}, {0x801165C4u, NULL, NULL}, {0x8011660Cu, NULL, NULL}, {0x8011753Cu, NULL, NULL}, {0x80117BE4u, NULL, NULL},
-                           {0x800CFDF0u, NULL, NULL}, {0x80115EACu, NULL, NULL}, {0x80117290u, NULL, NULL}, {0x80114950u, NULL, NULL}, {0x800D07F8u, NULL, NULL}};
-
-int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user)
-{
-    unsigned k;
-    for (k = 0; k < MAX_REPLACE; k++)
-        if (g_replace[k].address && g_replace[k].address == address) {
-            g_replace[k].fn = NULL;
-            g_replace[k].user = user;
-            g_replace[k].fn = fn;
-            return 1;
-        }
-    return 0;
-}
-
+/* A function of the game's the host answers (ABI 19; any function since ABI
+ * 23): swap.c's guard calls host_swap on the guest's thread, with the host's
+ * function and user as soa_host_replace gave them. */
 static int host_call_game(SoaHostCall* call, uint32_t address, const uint32_t* args, unsigned n, uint32_t* r3)
 {
     char why[160];
@@ -567,33 +547,76 @@ static int host_call_game(SoaHostCall* call, uint32_t address, const uint32_t* a
     return mod_call_guest((CpuState*)call->runtime, address, args, n, NULL, 0, r3, NULL, why, sizeof why);
 }
 
-int host_answer(CpuState* s, uint32_t address, int after)
+static int host_call_game_original(SoaHostCall* call, uint32_t address, const uint32_t* args, unsigned n, uint32_t* r3)
 {
-    unsigned k, r;
-    for (k = 0; k < MAX_REPLACE; k++)
-        if (g_replace[k].address == address) {
-            SoaHostAnswer fn = g_replace[k].fn;
-            SoaHostCall c;
-            int how;
-            if (!fn) return 0;
-            c.address = address;
-            c.after = after ? 1u : 0u;
-            c.mem = s->mem;
-            c.mem_bytes = MEM1_SIZE;
-            c.sp = s->gpr[1];
-            for (r = 0; r < 8; r++) c.gpr[r] = s->gpr[3 + r];
-            c.frame = g_mf[g_build].frame;
-            c.game = host_call_game;
-            c.runtime = s;
-            for (r = 0; r < 8; r++) c.fpr[r] = s->fpr[1 + r].ps0;
-            how = fn(g_replace[k].user, &c);
-            if (how == 1) {
-                s->gpr[3] = c.gpr[0];
-                s->fpr[1].ps0 = s->fpr[1].ps1 = c.fpr[0];
-            }
-            return how == 1 || how == 2 ? how : 0;
-        }
-    return 0;
+    char why[160];
+    if (!call || !call->runtime) return 0;
+    return swap_call_original((CpuState*)call->runtime, address, args, n, NULL, 0, r3, NULL, why, sizeof why);
+}
+
+static void host_original(SoaHostCall* call)
+{
+    CpuState* s;
+    if (!call || !call->runtime) return;
+    s = (CpuState*)call->runtime;
+    swap_original(s, call->address);
+    call->gpr[0] = s->gpr[3];
+    call->fpr[0] = s->fpr[1].ps0;
+}
+
+static int host_swap(CpuState* s, uint32_t address, SwapFn fnp, void* user, int after)
+{
+    SoaHostAnswer fn = (SoaHostAnswer)fnp;
+    SoaHostCall c;
+    unsigned r;
+    int how;
+    c.address = address;
+    c.after = after ? 1u : 0u;
+    c.mem = s->mem;
+    c.mem_bytes = MEM1_SIZE;
+    c.sp = s->gpr[1];
+    for (r = 0; r < 8; r++) c.gpr[r] = s->gpr[3 + r];
+    c.frame = g_mf[g_build].frame;
+    c.game = host_call_game;
+    c.runtime = s;
+    for (r = 0; r < 8; r++) c.fpr[r] = s->fpr[1 + r].ps0;
+    c.r = s->gpr;
+    c.f = (SoaHostPair*)s->fpr; /* Fpr's layout: */
+    (void)sizeof(char[sizeof(Fpr) == sizeof(SoaHostPair) && offsetof(Fpr, ps1) == offsetof(SoaHostPair, ps1) ? 1 : -1]);
+    c.original = host_original;
+    c.game_original = host_call_game_original;
+    how = fn(user, &c);
+    if (after) return SWAP_GAMES;
+    if (how == SOA_HOST_ANSWERED) {
+        s->gpr[3] = c.gpr[0];
+        s->fpr[1].ps0 = s->fpr[1].ps1 = c.fpr[0];
+        return SWAP_ANSWERED;
+    }
+    if (how == SOA_HOST_ANSWERED_LIVE) return SWAP_ANSWERED;
+    return how == SOA_HOST_BOTH ? SWAP_BOTH : SWAP_GAMES;
+}
+
+int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user)
+{
+    return swap_set(address, fn ? host_swap : NULL, (SwapFn)fn, user);
+}
+
+unsigned soa_host_functions(unsigned* native)
+{
+    return swap_functions(native);
+}
+
+void soa_host_count_calls(int on)
+{
+    swap_count(on);
+}
+
+unsigned soa_host_call_counts(SoaHostCallCount* out, unsigned max)
+{
+    /* SwapCount and SoaHostCallCount are one layout; the build holds them to it */
+    typedef char same_size[sizeof(SwapCount) == sizeof(SoaHostCallCount) ? 1 : -1];
+    (void)sizeof(same_size);
+    return swap_counts((SwapCount*)out, max);
 }
 
 void soa_host_hold(int on)

@@ -2235,6 +2235,86 @@ static int game_table_selftest(CpuState* s, char* got, size_t cap)
     );
 }
 
+/* ---- any function swapped (runtime/swap.c, docs/SWAP.md) -------------------
+ * sprintf (0x8025CB24), translated in every build, answered by a replacement
+ * in each of the ways one can: not at all, in its place, after it, and around
+ * its original run in place; counted; and two addresses refused, one inside a
+ * function and one the runtime answers itself (VIGetRetraceCount). */
+#include "swap.h"
+static int g_swap_mode;
+static uint32_t g_swap_buf;
+
+static int swap_test_handler(CpuState* s, uint32_t address, SwapFn fn, void* user, int after)
+{
+    (void)fn;
+    (void)user;
+    if (!after) g_swap_buf = s->gpr[3];
+    switch (g_swap_mode) {
+    case 1:
+        put_string(s, s->gpr[3], "native");
+        s->gpr[3] = 6;
+        return SWAP_ANSWERED;
+    case 2:
+        if (after) mem_w8(s, g_swap_buf, (uint8_t)(mem_r8(s, g_swap_buf) - 32));
+        return SWAP_BOTH;
+    case 3:
+        swap_original(s, address);
+        mem_w8(s, g_swap_buf + 1, (uint8_t)(mem_r8(s, g_swap_buf + 1) - 32));
+        return SWAP_ANSWERED;
+    default:
+        return SWAP_GAMES;
+    }
+}
+
+static void swap_sprintf(CpuState* s, int mode, char* out, size_t cap)
+{
+    g_swap_mode = mode;
+    put_string(s, SCRATCH, "");
+    put_string(s, SCRATCH + 0x100, "%s.%s");
+    put_string(s, SCRATCH + 0x200, "abc");
+    put_string(s, SCRATCH + 0x300, "def");
+    s->gpr[3] = SCRATCH;
+    s->gpr[4] = SCRATCH + 0x100;
+    s->gpr[5] = SCRATCH + 0x200;
+    s->gpr[6] = SCRATCH + 0x300;
+    call(s, 0x8025CB24u);
+    get_string(s, SCRATCH, out, cap);
+}
+
+static int swap_selftest(CpuState* s, char* got, size_t cap)
+{
+    const uint32_t SPRINTF = 0x8025CB24u;
+    char a[32], g[32], b[32], o[32];
+    uint32_t ra, rb;
+    SwapCount c[256];
+    unsigned n, k, refused = 0;
+    uint64_t calls = 0, answered = 0, translated = 0;
+    if (swap_index(SPRINTF) < 0) {
+        snprintf(got, cap, "no swap table (%d)", swap_index(SPRINTF));
+        return check("any function swapped", got, "answered native/6, games abc.def, both Abc.def/7, original aBc.def, "
+                                                  "counted 2 1 1, refused 2");
+    }
+    swap_set(SPRINTF, swap_test_handler, NULL, NULL);
+    swap_count(1);
+    swap_sprintf(s, 1, a, sizeof a);
+    ra = s->gpr[3];
+    swap_sprintf(s, 0, g, sizeof g);
+    swap_count(0);
+    swap_sprintf(s, 2, b, sizeof b);
+    rb = s->gpr[3];
+    swap_sprintf(s, 3, o, sizeof o);
+    swap_set(SPRINTF, NULL, NULL, NULL);
+    n = swap_counts(c, 256);
+    for (k = 0; k < n && k < 256; k++)
+        if (c[k].address == SPRINTF) calls = c[k].calls, answered = c[k].answered, translated = c[k].translated;
+    refused += !swap_set(SPRINTF + 4, swap_test_handler, NULL, NULL);
+    refused += !swap_set(0x8023F704u, swap_test_handler, NULL, NULL);
+    snprintf(got, cap, "answered %s/%u, games %s, both %s/%u, original %s, counted %llu %llu %llu, refused %u", a, ra, g,
+             b, rb, o, (unsigned long long)calls, (unsigned long long)answered, (unsigned long long)translated, refused);
+    return check("any function swapped", got,
+                 "answered native/6, games abc.def, both Abc.def/7, original aBc.def, counted 2 1 1, refused 2");
+}
+
 int selftest(CpuState* s)
 {
     char got[256];
@@ -2364,6 +2444,7 @@ int selftest(CpuState* s)
     failures += call_guest_selftest(s, got, sizeof got);
     failures += fused_selftest(s, got, sizeof got);
     failures += game_table_selftest(s, got, sizeof got);
+    failures += swap_selftest(s, got, sizeof got);
 
     fprintf(stderr, "[selftest] %d failure(s)\n", failures);
     return failures;

@@ -38,6 +38,7 @@ runtime mmio_write8
 runtime mmio_write16
 runtime mmio_write32
 runtime mmio_write64
+runtime soa_swap_enter
 runtime trace_hit
 runtime watch_hit
 libc _setjmp
@@ -55,16 +56,6 @@ libc __cxa_atexit
 libc __register_atfork
 twin 0x80005434
 twin 0x80005520
-twin 0x80096DA4
-twin 0x800CFDF0
-twin 0x800D07F8
-twin 0x80114950
-twin 0x80115EAC
-twin 0x801165C4
-twin 0x8011660C
-twin 0x80117290
-twin 0x8011753C
-twin 0x80117BE4
 twin 0x801EF7E0
 twin 0x80232E38
 twin 0x80232E64

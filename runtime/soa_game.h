@@ -16,9 +16,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SOA_GAME_ABI 1u
+#define SOA_GAME_ABI 2u /* 2: the swap table (runtime/swap.c, docs/SWAP.md) */
 
 typedef void (*SoaFn)(CpuState* s);
+
+/* The swap guard's bytes are the game's own, hidden in a split build's game
+ * library (<out>/functions.h says the same). */
+#ifndef SOA_SWAP_HIDDEN
+#if defined(_MSC_VER)
+#define SOA_SWAP_HIDDEN
+#else
+#define SOA_SWAP_HIDDEN __attribute__((visibility("hidden")))
+#endif
+#endif
 
 typedef struct {
     uint32_t abi;  /* SOA_GAME_ABI */
@@ -33,6 +43,17 @@ typedef struct {
     const char *dol_sha1, *boot_sha1, *fst_sha1;
     /* the translated body at a guest address the self test runs, or NULL */
     SoaFn (*twin)(uint32_t addr);
+    /* ABI 2, the swap table (runtime/swap.c, docs/SWAP.md): every function the
+     * recompiler knows, in address order, with its index the one its entry's
+     * SOA_SWAP(index) guard names. swap is the guard's byte an index (0: the
+     * translation runs and nothing else is asked; swap.c's own to write),
+     * address the function's guest address, kind 1 where the runtime answers
+     * the function itself (config/hle.txt: no guard, never swapped). All NULL
+     * and count 0 in a table built without them (a test's stand-in game). */
+    uint8_t* swap;
+    const uint32_t* address;
+    const uint8_t* kind;
+    uint32_t count;
 } SoaGame;
 
 #if defined(_MSC_VER)

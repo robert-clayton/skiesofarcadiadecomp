@@ -692,7 +692,7 @@ def main() -> int:
             f"{len(hle)} functions bound to HLE, {len(hooks)} runtime hooks, "
             f"{len(savepoints)} savepoints"
         )
-    em = Emitter(dol, functions, tables, code, names, hle, hooks, savepoints, traces)
+    em = Emitter(dol, functions, tables, code, names, hle, hooks, savepoints, traces, swap=True)
     entries = sorted(functions)
     if args.limit:
         entries = entries[: args.limit]
@@ -708,7 +708,11 @@ def main() -> int:
     baked = seam.baked_digest(player_build.inputs_record(RUNTIME.parent))
     (args.out / "game_table.c").write_text(
         seam.game_table_c(
-            the_seam, hle, entries, seam.record(args.no_decomp, baked, dol_sha1, prof.name)
+            the_seam,
+            hle,
+            entries,
+            seam.record(args.no_decomp, baked, dol_sha1, prof.name),
+            functions=functions,
         ),
         encoding="utf-8",
     )

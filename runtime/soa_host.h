@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. */
-#define SOA_HOST_ABI 22u
+#define SOA_HOST_ABI 23u
 
 /* One controller in the game's own terms, as si.c reads it.
  *
@@ -563,16 +563,34 @@ SOA_HOST_API void soa_host_go(long frame);
  *                      its own answer to the game's, or to see what the
  *                      function wrote
  *
- * Only the addresses the runtime was built to hand over can be named
- * (runtime/replace.c); soa_host_replace returns 0 for any other and 1 when
- * the function is set. A null function hands the address back to the game.
+ * Any function of the game's can be named (ABI 23; docs/SWAP.md): every
+ * translated function begins with a guard that is one byte read until a
+ * replacement is set for it. soa_host_replace returns 1 when the function is
+ * set and 0 for an address that starts no function of this program, or one
+ * the runtime answers natively itself (config/hle.txt: the SDK's cache and
+ * context calls, OSReport, the MSL string calls, VIGetRetraceCount). Before
+ * soa_host_start it returns 1 and keeps the request (64 at most) until the
+ * game library is loaded, when one that names no such function is refused
+ * with a line in the log. A null function hands the address back to the game.
+ * A replacement may be set or cleared from any thread at any time; a call the
+ * guest is already inside finishes as it began, so a host that needs a frame
+ * boundary does it while held (soa_host_hold).
+ *
  * From inside its answer the host may call a function of the game's by its
- * address (the call's `game`, ABI 20).
+ * address (the call's `game`, ABI 20), run the game's own translation of the
+ * function it is answering on the live registers (`original`, ABI 23), or
+ * call any function's translation even where it has a replacement
+ * (`game_original`, ABI 23). Through `r` and `f` it reads and writes the
+ * game's registers themselves, and answers with SOA_HOST_ANSWERED_LIVE when
+ * it has left the function's results there (r3, r4, f1...) itself. Calls the
+ * function makes, its recursion among them, meet the replacements as the
+ * game's would.
  * The host's function must not block, and what it reads and writes of mem is
  * the game's own memory, big-endian, with no lock: nothing else touches it
  * while the game's thread is in the call.
  *
- * Replaceable so far: 0x80096DA4, the field camera's task; and three of the
+ * Replaced in soa-ue5 so far (the plugin's, not a list the runtime keeps):
+ * 0x80096DA4, the field camera's task; and three of the
  * party's leader's walk: 0x801165C4 the frame's start, 0x8011660C the pad's
  * step (it answers the speed in f1), 0x8011753C the floor and the walls;
  * 0x80117BE4, the scan of what the leader's body touches or what is before it
@@ -586,6 +604,10 @@ SOA_HOST_API void soa_host_go(long frame);
 #define SOA_HOST_GAMES 0
 #define SOA_HOST_ANSWERED 1
 #define SOA_HOST_BOTH 2
+#define SOA_HOST_ANSWERED_LIVE 3 /* ABI 23: answered, the results left in the live registers (r, f) by the host */
+typedef struct {
+    double ps0, ps1; /* a floating-point register: a double, or a pair of singles */
+} SoaHostPair;
 typedef struct SoaHostCall {
     uint32_t address;   /* the function */
     uint32_t after;     /* 0 before the game's own; 1 after it, when the host asked for both */
@@ -606,9 +628,47 @@ typedef struct SoaHostCall {
      * that answers in a float register returns: the host's to set when it
      * answers such a one, and the game's own after it has run. */
     double fpr[8];
+    /* ABI 23. The game's registers themselves, r0 to r31 and f0 to f31, live:
+     * what the host writes here the game sees (gpr and fpr above are copies).
+     * r1, r2, r13 to r31 and f14 to f31 are the caller's, as the game's own
+     * calling convention has them, and are left as they were. */
+    uint32_t* r;
+    SoaHostPair* f;
+    /* ABI 23. The game's own translation of this function, now, on the live
+     * registers, the host's replacement bypassed for this one call: what it
+     * returns is then in r3 and f1, and copied to gpr[0] and fpr[0]. For a
+     * host that wants the original's work before or around its own, and then
+     * answers (SOA_HOST_ANSWERED_LIVE keeps what the original left). */
+    void (*original)(struct SoaHostCall* call);
+    /* ABI 23. As `game`, but the translation of the function at address even
+     * where a replacement is set for it. */
+    int (*game_original)(struct SoaHostCall* call, uint32_t address, const uint32_t* args, unsigned n, uint32_t* r3);
 } SoaHostCall;
 typedef int (*SoaHostAnswer)(void* user, SoaHostCall* call);
 SOA_HOST_API int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user);
+
+/* ---- How much of the game still runs translated (ABI 23; docs/SWAP.md) ----
+ *
+ * soa_host_functions is how many functions the program has, and in *native
+ * (if given) how many of them the runtime answers natively itself. With
+ * counting on (soa_host_count_calls(1), which also zeroes every count) every
+ * call of every translated function is counted on the guest's thread, at the
+ * cost of a call into the runtime each, until soa_host_count_calls(0), which
+ * keeps the counts for reading. soa_host_call_counts copies one record a
+ * function with any count, in address order, while they fit in `out`, and
+ * returns how many there are. `calls` is the game's calls of it, `answered`
+ * the ones a replacement answered, `translated` the runs of its translation
+ * (for the game, or for a replacement through `original`); a function whose
+ * `translated` stays 0 over a recorded play is one the game no longer needs
+ * translated. Counts read while the guest runs may be a call behind. */
+typedef struct {
+    uint32_t address;
+    uint32_t replaced; /* 1: a replacement is set for it now */
+    uint64_t calls, answered, translated;
+} SoaHostCallCount;
+SOA_HOST_API unsigned soa_host_functions(unsigned* native);
+SOA_HOST_API void soa_host_count_calls(int on);
+SOA_HOST_API unsigned soa_host_call_counts(SoaHostCallCount* out, unsigned max);
 
 /* The sound driver's voices, a tick at a time (ABI 22), for a host that mixes
  * them itself (soa-ue5's docs/audio-mix-cpp.md). The game's sound driver

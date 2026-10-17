@@ -193,6 +193,31 @@ _PS_PAIR = {
     "ps_merge11": ("{a1}", "{b1}"),
 }
 
+# The guard at the head of every translated function (docs/SWAP.md): one
+# byte read and a branch never taken until runtime/swap.c sets the byte, to
+# send the call to a replacement, or to count it. soa_swap_enter answers 1
+# when the call has been answered (the translation is not to run), 0 when the
+# translation is to run as if nothing had asked. The byte is read volatile:
+# the host sets it from its own thread while the guest runs.
+SWAP_GUARD = """#ifndef SOA_SWAP_HIDDEN
+#if defined(_MSC_VER)
+#define SOA_SWAP_HIDDEN
+#else
+#define SOA_SWAP_HIDDEN __attribute__((visibility("hidden")))
+#endif
+#endif
+#if defined(__GNUC__) || defined(__clang__)
+#define SOA_SWAP_RARE(x) __builtin_expect(!!(x), 0)
+#else
+#define SOA_SWAP_RARE(x) (x)
+#endif
+extern SOA_SWAP_HIDDEN uint8_t soa_swap_flags[];
+int soa_swap_enter(CpuState* s, uint32_t index); /* runtime/swap.c */
+#define SOA_SWAP(i) \\
+    do { \\
+        if (SOA_SWAP_RARE(((volatile uint8_t*)soa_swap_flags)[i]) && soa_swap_enter(s, (i))) return; \\
+    } while (0)"""
+
 _PSQ = frozenset(
     ["psq_l", "psq_lu", "psq_lx", "psq_lux", "psq_st", "psq_stu", "psq_stx", "psq_stux"]
 )
@@ -210,6 +235,7 @@ class Emitter:
         hooks: dict[int, str] | None = None,
         savepoints: dict[int, str] | None = None,
         traces: dict[int, str] | None = None,
+        swap: bool = False,
     ):
         self.dol = dol
         self.functions = functions
@@ -220,6 +246,12 @@ class Emitter:
         self.hooks = hooks or {}  # addresses where the runtime is called first
         self.savepoints = savepoints or {}  # call sites wrapped in setjmp (thread parking)
         self.traces = traces or {}  # addresses that report themselves when SOA_TRACE is set
+        # swap: every translated function's entry is guarded by SOA_SWAP(index)
+        # (runtime/swap.c, docs/SWAP.md), the index its place in address order,
+        # which is also the swap table's (seam.swap_table_c). Off by default,
+        # so a lone function compiles against cpu.h alone.
+        self.swap = swap
+        self.index = {a: n for n, a in enumerate(sorted(functions))}
         self.stats = EmitStats()
         self._hooked = False  # the function being emitted delivers interrupts at a hook
 
@@ -247,6 +279,10 @@ class Emitter:
             head = f"/* {self.hle[fn.entry]} -- bound to HLE; recompiled body kept */\n"
             name = "recomp_" + name
         out = [f"{head}void {name}(CpuState* s)", "{"]
+        if self.swap and fn.entry not in self.hle:
+            # First, before the entry's own label: a loop back to the entry
+            # is not a second call.
+            out.append(f"    SOA_SWAP({self.index[fn.entry]});")
         for a in addrs:
             if a in labels:
                 out.append(f"{label(a)}:;")
@@ -266,6 +302,8 @@ class Emitter:
 
     def prototypes(self) -> str:
         lines = ["#pragma once", '#include "cpu.h"', ""]
+        if self.swap:
+            lines += SWAP_GUARD.splitlines() + [""]
         for a in sorted(self.functions):
             lines.append(f"void {c_name(a)}(CpuState* s);")
             if a in self.hle:

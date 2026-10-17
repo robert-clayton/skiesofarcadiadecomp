@@ -93,11 +93,54 @@ def c_string(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def game_table_c(seam: Seam, bound: Iterable[int], emitted: Iterable[int], rec: str) -> str:
+def swap_table_c(functions: Iterable[int], bound: Iterable[int]) -> tuple[str, str]:
+    """The swap table's C (docs/SWAP.md) for game_table_c: the definitions,
+    and the four SoaGame fields that name them. `functions` is every function
+    the recompiler knows; its sorted order is the index each entry's
+    SOA_SWAP(index) guard names (soa.recomp.Emitter, swap=True). The guard's
+    bytes are hidden, as the translated code that reads them is, so a split
+    build's game library still exports soa_game alone."""
+    order = sorted(set(functions))
+    bound = set(bound)
+    if not order:
+        return "", "0, 0, 0, 0"
+    words = ",\n".join(
+        "    " + ", ".join(f"0x{a:08X}u" for a in order[k : k + 8]) for k in range(0, len(order), 8)
+    )
+    kinds = ",\n".join(
+        "    " + ", ".join("1" if a in bound else "0" for a in order[k : k + 32])
+        for k in range(0, len(order), 32)
+    )
+    n = len(order)
+    defs = f"""
+/* The swap table (runtime/swap.c, docs/SWAP.md): the guard's byte, the
+ * address and the kind of each of the {n} functions, in address order. */
+SOA_SWAP_HIDDEN uint8_t soa_swap_flags[{n}];
+static const uint32_t g_swap_address[{n}] = {{
+{words}
+}};
+static const uint8_t g_swap_kind[{n}] = {{
+{kinds}
+}};
+"""
+    return defs, f"soa_swap_flags, g_swap_address, g_swap_kind, {n}u"
+
+
+def game_table_c(
+    seam: Seam,
+    bound: Iterable[int],
+    emitted: Iterable[int],
+    rec: str,
+    functions: Iterable[int] | None = None,
+) -> str:
     """<out>/game_table.c. `bound` is this build's bindings (after
-    --no-decomp), `emitted` the functions translated (all but --limit's)."""
+    --no-decomp), `emitted` the functions translated (all but --limit's), and
+    `functions`, when given, every function the recompiler knows, for the swap
+    table (swap_table_c); without it the table has none, as a test's stand-in
+    game, whose functions carry no guard, has none."""
     bound = set(bound)
     emitted = set(emitted)
+    swap_defs, swap_fields = swap_table_c(functions or (), bound)
     desc = (len(rec.encode("utf-8")) + 1 + 3) & ~3
     cases = "\n".join(
         f"    case 0x{a:08X}u: return {body_name(a, bound)};" for a in seam.twins if a in emitted
@@ -117,7 +160,7 @@ extern const char disc_sys_dol_sha1[], disc_sys_boot_sha1[], disc_sys_fst_sha1[]
 int dispatch_known(uint32_t addr);
 
 #define SOA_GAME_RECORD {c_string(rec)}
-
+{swap_defs}
 static SoaFn twin(uint32_t addr)
 {{
     switch (addr) {{
@@ -129,7 +172,7 @@ static SoaFn twin(uint32_t addr)
 static const SoaGame g_game = {{SOA_GAME_ABI, (uint32_t)sizeof(SoaGame), SOA_GAME_RECORD, {entry}, dispatch,
                                dispatch_known, disc_sys_dol, disc_sys_boot, disc_sys_fst, &disc_sys_dol_size,
                                &disc_sys_boot_size, &disc_sys_fst_size, disc_sys_dol_sha1, disc_sys_boot_sha1,
-                               disc_sys_fst_sha1, twin}};
+                               disc_sys_fst_sha1, twin, {swap_fields}}};
 
 const SoaGame* soa_game(void)
 {{

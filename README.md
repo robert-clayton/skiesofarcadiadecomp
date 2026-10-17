@@ -340,6 +340,7 @@ an unquoted path with a space in it is two arguments.
 | `SOA_MMIO=1` | log the first few accesses of every hardware register as they happen |
 | `SOA_SELFTEST=1` | run the library and device checks instead of the game |
 | `SOA_PROFILE=n` | `0` turns off the end-of-run sampling profile (one fewer thread); `n>1` shows n rows |
+| `SOA_COUNT_CALLS=1` or `=file.tsv` | count every call of every translated function (docs/SWAP.md); the report's `[swap]` line says how many were called and how many still ran translated, and a path also gets every count, a line a function (address, calls, answered, translated). Costs about a tenth of the run's speed while on (9% over the opening) |
 | `SOA_SYMBOLS=path` | function names for that profile (default `config/functions.tsv`, found by running from the repository root) |
 | `SOA_CARD=path` | memory card image for slot A (default `build/cards/slotA.raw`, created blank on the first write; `tools/cardformat.py write` makes one the game will mount) |
 | `SOA_CARD_VERBOSE=1` | one `[card]` line per EXI transaction: the frame, the device, the command and the card address |

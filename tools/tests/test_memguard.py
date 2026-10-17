@@ -74,6 +74,7 @@ double gxr_seconds(uint64_t t) { (void)t; return 0.0; }
 double gxr_producer_span(void) { return 0.0; }
 void hle_dump(CpuState* s, uint32_t pc) { (void)s; (void)pc; }
 void threads_init(CpuState* s) { (void)s; }
+void swap_env(void) {}
 void dvd_init(const char* p) { (void)p; }
 int selftest(CpuState* s) { (void)s; return 0; }
 int gx_replay(CpuState* s, const char* b) { (void)s; (void)b; return 0; }
