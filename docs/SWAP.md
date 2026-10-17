@@ -75,6 +75,15 @@ like any other function. The host's semantics are unchanged:
 | `SOA_HOST_BOTH` (2) | the translation runs, then the host is called with `after` = 1 |
 | `SOA_HOST_ANSWERED_LIVE` (3, new) | the translation is skipped; the host has left the results in the live registers itself |
 
+**A delivery point** (bit 3, `SWAP_DUE`): under the fixed clock's quiet
+rule (docs/CLOCK.md) every byte gets this bit whenever something has come
+due -- the clock moved, the guest wrote the hardware -- and the next guard to
+run delivers it before anything else, then the bits are cleared. A
+replaced function's entry is its translation's entry, so an interrupt that
+falls due just before a call runs at the same place whether the replacement
+or the translation answers. It costs one pass over the bytes each way, a
+few hundred times a frame, and only under the fixed clock.
+
 **A trace** (`swap_trace`, bit 2, `SWAP_TRACE`): every guard calls a
 function with the entry's address, until it is cleared. The recorder
 (docs/RECORD.md) uses it to list the calls a recorded call makes. Like
@@ -89,8 +98,8 @@ same lock, so a call sees either the old pair or the new one, never half of
 each. A call already inside a replacement when it is cleared finishes in
 that replacement. A host that needs a frame boundary changes replacements
 while the guest is held (`soa_host_hold`). A request made before
-`soa_host_start` is kept (64 at most) and applied once the game library is
-loaded. An address that starts no function is logged and refused at that
+`soa_host_start` is kept (as many as are made: the list grows; it was 64 at
+most before 2026-10-17) and applied once the game library is loaded. An address that starts no function is logged and refused at that
 point. `g_skip` is a single global, which is safe because only one guest
 context runs at a time (guest threads are fibers that switch
 cooperatively).
@@ -138,6 +147,18 @@ Outside a host, `SOA_COUNT_CALLS=1` (or `=file.tsv`) turns counting on from
 the start of a run. The end-of-run report then gets a `[swap]` line, and a
 TSV with one line per function if a path was given. Combined with
 `SOA_PAD_FILE`, this counts over a recorded play.
+
+## A swap on against off
+
+The check for any swap that does not change timing semantics: the same pad
+script and card copy under `SOA_CLOCK=fixed`, once with the replacement set
+and once without, must give the same frame hashes and the same call counts
+but for what the answer replaces (its `translated` count, and the calls its
+translation made). The fixed clock's quiet rule makes that hold: ordinary
+code costs no guest time, so an answer that reads no clock or hardware moves
+nothing. docs/CLOCK.md, "Native answers and the clock", has the design and
+the runs: the 10 former `replace.c` functions and the six disc lookups
+answered over three scenes, 12,000 frames, no frame different.
 
 ## Measurements (2026-10-17, this machine, gcc 16, `--optimize`)
 

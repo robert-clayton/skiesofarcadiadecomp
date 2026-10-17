@@ -152,6 +152,7 @@ static int g_clock_fixed;
         RECORD_NOTE(s, 1 | (int)sizeof(T) << 8, ea, v);        \
         note(s, "wr", ea, sizeof(T), v);                          \
         device_write(s, ea, sizeof(T), v);                     \
+        if (g_clock_fixed) clock_fixed_mark();                 \
     }
 
 MMIO_READ(uint8_t, 8)
@@ -339,13 +340,21 @@ static int fixed_setup(void)
     if (done || !src || strcmp(src, "fixed")) return g_clock_fixed;
     done = 1;
     {
-        unsigned long long rd = env_ull("SOA_CLOCK_READ_TICKS", 8), poll = env_ull("SOA_CLOCK_POLL_TICKS", 32);
-        unsigned long long rtc = env_ull("SOA_CLOCK_RTC", 31622400ull);
+        unsigned long long rd = env_ull("SOA_CLOCK_READ_TICKS", 8), poll = env_ull("SOA_CLOCK_POLL_TICKS", 0);
+        unsigned long long rtc = env_ull("SOA_CLOCK_RTC", 31622400ull), spin = env_ull("SOA_CLOCK_SPIN", 4194304);
         clock_fixed_configure(rd, poll, (uint32_t)rtc);
+        clock_fixed_set_spin(spin);
         g_clock_fixed = 1;
-        fprintf(stderr, "[clock] SOA_CLOCK=fixed: guest time moves %llu ticks a timebase or hardware read, %llu a delivery "
-                        "point, and to the next deadline when idle; SOA_SPEED and the host's clock are not read; "
-                        "the RTC starts at %llu s past 2000\n", rd, poll, rtc);
+        if (poll)
+            fprintf(stderr, "[clock] SOA_CLOCK=fixed: guest time moves %llu ticks a timebase or hardware read, %llu a delivery "
+                            "point, and to the next deadline when idle; SOA_SPEED and the host's clock are not read; "
+                            "the RTC starts at %llu s past 2000\n", rd, poll, rtc);
+        else
+            fprintf(stderr, "[clock] SOA_CLOCK=fixed: guest time moves %llu ticks a timebase or hardware read and to the "
+                            "next deadline when the guest waits (idle, the frame end, a loop whose state repeats, %llu back edges "
+                            "with nothing due); other code costs none, "
+                            "so a native answer moves nothing; SOA_SPEED and the host's clock are not read; "
+                            "the RTC starts at %llu s past 2000\n", rd, spin, rtc);
     }
     return 1;
 }

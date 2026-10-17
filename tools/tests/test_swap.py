@@ -144,6 +144,15 @@ static int handler(CpuState* s, uint32_t address, SwapFn fn, void* user, int aft
     }
 }
 
+/* the fixed clock's quiet rule: an entry that finds SWAP_DUE takes it */
+static unsigned taken;
+static void take(CpuState* s)
+{
+    (void)s;
+    taken++;
+    swap_due(0);
+}
+
 static uint32_t run(CpuState* s, int m)
 {
     mode = m;
@@ -158,6 +167,11 @@ int main(void)
     SwapCount c[4];
     unsigned n, k, native = 9;
     int early;
+    /* a host asks for many before the start: every request is kept (no
+     * fixed limit), the last for an address wins, and those that name no
+     * function are refused only once the table is there */
+    for (k = 0, n = 0; k < 1000; k++) n += (unsigned)swap_set(0x80100000u + 4u * k, handler, NULL, NULL);
+    printf("kept many %u\n", n);
     early = swap_set(CALLEE_ADDR, handler, NULL, NULL);    /* no table yet: kept */
     printf("before %d index %d\n", early, swap_index(CALLEE_ADDR));
     soa_game_table = soa_game();
@@ -185,6 +199,11 @@ int main(void)
     swap_set(CALLEE_ADDR, NULL, NULL, NULL);
     k = run(&s, 1);
     printf("cleared %u flags %u %u\n", k, soa_game()->swap[0], soa_game()->swap[1]);
+    swap_due_handler(take);
+    swap_due(1);
+    printf("due flags %u %u\n", soa_game()->swap[0], soa_game()->swap[1]);
+    k = run(&s, 0); /* the caller's entry takes it; the callee's finds it gone */
+    printf("due taken %u, %u, flags %u %u\n", taken, k, soa_game()->swap[0], soa_game()->swap[1]);
     return 0;
 }
 """
@@ -228,6 +247,7 @@ def test_a_translated_function_is_answered_in_each_way_and_counted(tmp_path):
     run = subprocess.run([str(tmp_path / "t")], capture_output=True, text=True, timeout=30)
     assert run.returncode == 0, run.stdout + run.stderr
     assert run.stdout.splitlines() == [
+        "kept many 1000",  # no fixed limit on requests made before the start
         "before 1 index -3",  # kept: there is no table to ask yet
         "kept 100",  # the request made before the table was applied when it came
         "games 41",
@@ -242,4 +262,9 @@ def test_a_translated_function_is_answered_in_each_way_and_counted(tmp_path):
         "functions 2 native 0",
         "refused 0 0",
         "cleared 41 flags 0 0",
+        # the quiet rule's due bit (SWAP_DUE, 8) in every byte, taken at the first entry
+        "due flags 8 8",
+        "due taken 1, 41, flags 0 0",
     ]
+    # each of the 1000 that named no function said so once the table came
+    assert run.stderr.count("not a function of the game's") == 1000

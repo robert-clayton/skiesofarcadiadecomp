@@ -50,6 +50,9 @@ uint64_t irq_guest_ticks(struct CpuState* s);
  * spin): under the fixed-step clock, deliver what is due or go to the next
  * deadline, as the idle loop does; nothing under the real clock. */
 void irq_fixed_wait(struct CpuState* s);
+/* The fixed clock's quiet rule (docs/CLOCK.md): a translated function's entry
+ * delivers what has come due, as a back edge does (swap.c calls it). */
+void irq_quiet_entry(struct CpuState* s);
 
 /* hle.c: guest ticks now from any thread, moving and writing nothing; 0
  * before the guest's first read of the timebase. */

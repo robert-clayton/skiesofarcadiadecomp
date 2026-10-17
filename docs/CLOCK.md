@@ -15,7 +15,7 @@ way native code gets work done at a precise guest time.
 | `SOA_CLOCK` | guest time is | for |
 |---|---|---|
 | unset (or `real`) | host monotonic time times `SOA_SPEED`; gaps over `SOA_CLOCK_GAP_MS` and pauses excluded | play |
-| `fixed` | moved by the guest's own work only (below); the host's clock and `SOA_SPEED` are never read | checks, recordings, comparing a native system against the scaffold |
+| `fixed` | moved only by the guest's reads of the clock and the hardware, and by its waits (below); the host's clock and `SOA_SPEED` are never read | checks, recordings, comparing a native system against the scaffold, a swap on against off |
 | `utc` | the pre-M19 wall clock | bisecting an old timing report |
 
 A host sets the same with `soa_host_set_clock(SOA_HOST_CLOCK_FIXED)` before
@@ -24,7 +24,9 @@ A host sets the same with `soa_host_set_clock(SOA_HOST_CLOCK_FIXED)` before
 ### What moves the fixed clock
 
 The unit is the timebase tick, and the clock is a counter of them
-(`clock_fixed_now`). Three things move it, and nothing else does:
+(`clock_fixed_now`). By default (the *quiet rule*, since 2026-10-17's
+"Native answers and the clock" below) two things move it, and nothing else
+does: no instruction the guest runs costs time by itself.
 
 1. **A read the guest makes.** Each `mftb` (the timebase's low word) and
    each hardware register read moves it `SOA_CLOCK_READ_TICKS` (default 8)
@@ -34,34 +36,59 @@ The unit is the timebase tick, and the clock is a counter of them
    must see its deadline come. `mftbu` alone moves nothing. The device
    models' own reads of the timebase (`guest_time_device`) move nothing
    either, so their polling costs no guest time.
-2. **A delivery point.** Every 16th back edge of a loop running with
-   interrupts enabled (`irq_poll`) moves it `SOA_CLOCK_POLL_TICKS` (default
-   32). This is an instruction count of a coarse kind: a loop that waits on
-   a flag an interrupt sets makes time pass by running. 32 ticks for 16
-   back edges is 2 ticks, about 24 of the Gekko's cycles, an iteration: a
-   plausible size for a small loop [inferred, not measured on hardware]. At
-   1, the boot's disc-load loop at `0x8021A024` (it calls `0x80219B7C` until
-   the read is in, pumping `0x801D150C`) went round for hundreds of millions
-   of iterations to wait out `dvd.c`'s transfer time (3 MB/s: 14 million
-   ticks a megabyte), 22 s of host time for one frame [measured: the
-   frametime maximum, and a sample of the polls' return addresses]. At 32 the 600 frames after
-   boot take 3.2 s, and retraces a frame are the same (2.27 against 2.26).
-3. **A wait.** When the scheduler has nothing to run (`hook_80237BA8`), or
-   the frame end's spin on the retrace count is about to go round again
-   (`tick.c`, `0x801DC49C`), and the delivery there found nothing due, the
-   clock jumps to the earliest deadline ahead: the next retrace, the
-   decrementer, a disc, ARAM or AI DMA completion, a native event. The next
-   pass delivers it. This is where most guest time goes, and why a fixed run
-   is faster than the game: a frame takes the time its work takes, then
-   skips to its retrace. (Without the spin's case the frame end spun a
-   field's worth of delivery points every frame: 122 ms of host time a
-   frame.)
+2. **A wait.** The clock jumps to the earliest deadline ahead -- the next
+   retrace, the decrementer, a disc, ARAM or AI DMA completion, a native
+   event -- when the guest waits and nothing is due:
+   - the scheduler has nothing to run (`hook_80237BA8`);
+   - the frame end's spin on the retrace count is about to go round again
+     (`tick.c`, `0x801DC49C`);
+   - **any other loop that waits**, found by its state: a back edge that
+     comes back to its block with every integer register, CR, LR, CTR and
+     XER as that block's last pass left them, with nothing sent down the
+     gather pipe since, twice running and with the floating registers the
+     same the second time, has gone round a loop that changed nothing it
+     holds. That is a loop waiting on what only an interrupt can change
+     (the boot's disc-load loop at `0x8021A024`, the SDK's ARQ and DSP
+     polls). Work moves a register every pass -- a pointer, a count, a value
+     read -- so it is never cut however long it runs (the longest run in
+     the opening is 864,321 back edges, uncut). The table of states is
+     emptied whenever something comes due. A wait that keeps a count in a
+     register is found by length, at `SOA_CLOCK_SPIN` back edges with
+     nothing due (default 4,194,304; it never fired in the runs below).
+
+   In each case what is pending is delivered first, and the clock moves
+   only when nothing was.
+
+**Delivery points.** Under the quiet rule something *comes due* when the
+clock moves (a read, a skip), the guest writes the hardware, or native code
+adds an event or raises a line. The first point after that with interrupts
+enabled delivers it: a loop's back edge, or the entry of any translated
+function (the swap guard: `SWAP_DUE` in every guard's byte, `runtime/quiet.c`).
+Nothing is delivered by a count of back edges. So a handler runs at a
+program point fixed by the reads and writes before it, not by how many
+instructions ran since -- which is what makes a native answer invisible
+(next section).
+
+**The old rule** is kept: `SOA_CLOCK_POLL_TICKS=32` (any value above 0)
+makes every 16th back edge with interrupts enabled a delivery point that
+moves the clock that many ticks, as before, and finds no waits by state
+(the idle loop and frame end still skip). It reproduces the runs measured
+below frame for frame (run A's 3,000 hashes again, 2026-10-17). At 32
+ticks for 16 back edges, 2 ticks (about 24 of the Gekko's cycles) an
+iteration [inferred, not measured on hardware]; at 1, the boot's
+disc-load loop went round for hundreds of millions of iterations to wait
+out `dvd.c`'s transfer time (3 MB/s: 14 million ticks a megabyte), 22 s of
+host time for one frame [measured].
 
 The retrace is still raised every 675,000 ticks of guest time
 (`irq.c`, as before), and the game still waits two of them a frame. So the
 "fixed amount per frame" is not imposed: it falls out, two fields a frame
-whenever a frame's work fits in its fields, and a measured number of fields
-when it does not -- the same number on every run.
+whenever a frame's work fits in its fields, and more when a load or a
+device makes the frame wait -- the same number on every run. Under the
+quiet rule a frame's own work takes almost no guest time (its reads: a few
+thousand ticks of 1,350,000), so a frame is late only for what it waits on:
+2.06 retraces a frame over the opening's 3,000 frames, against 2.07 under
+the old rule.
 
 **The calendar.** The RTC reads `SOA_CLOCK_RTC` (seconds since 2000-01-01,
 default 31,622,400: 2001-01-01) plus the guest seconds so far, so save
@@ -131,7 +158,10 @@ The report adds, when used:
 ```
 [irq] native: N events run, late by at most T ticks (U us), M ticks on average; L raised lines delivered, K with no handler installed
 [clock] fixed: T ticks of guest time (S s): R timebase and hardware reads, P delivery points, I idle skips for J ticks
+[clock] quiet: back edges cost no time; W waits found by a loop's repeated state (X went to the next deadline), Y by N back edges with nothing due (Z); the longest run of back edges that ended at something due was L
 ```
+
+(`P delivery points` counts the old rule's; it is 0 under the quiet rule.)
 
 ## Checking a native replacement of the platform
 
@@ -142,7 +172,9 @@ The hardware the recorded calls touched is listed as retired, register by
 register with the values seen, for the candidate to have reproduced some
 other way.
 
-## Measured (2026-10-17, this machine)
+## Measured (2026-10-17, this machine, the old rule)
+
+These runs predate the quiet rule and used what is now `SOA_CLOCK_POLL_TICKS=32`.
 
 Runs of the opening: the split build's game library (`gen/linux-split`)
 with a runtime built from this tree, headless, muted, the bench pad script
@@ -191,3 +223,140 @@ scheduler after it.
 
 **Recording** under the fixed clock: see docs/RECORD.md (interrupts are
 still held inside recorded calls).
+
+## Native answers and the clock (the quiet rule)
+
+**The problem.** Under the old rule translated code charged guest time as it
+ran: its loops hit delivery points (32 ticks every 16 back edges) and the
+16-edge count was global. A native answer (docs/SWAP.md) charges none, and
+moves the count's phase. So with a swap on, loads finished earlier, the
+delivery points fell elsewhere, and a fixed run with the swap on could not
+be compared frame for frame with one with it off -- the check every swap
+wants. Measured with the old rule, the 16 answers below on against off over
+the opening's 3,000 frames: 388 frames differ from frame 866, and 204
+functions' call counts differ outside what the answers replace.
+
+**The options weighed.**
+
+- *The swap guard charges what the translation would have* (recorded per
+  call, or modelled per function). Exact only if the charge reproduces the
+  translation's reads and back edges call by call, including the global
+  16-edge phase; a lookup's walks depend on the path, a camera's on the
+  scene. Per-swap work for every swap, and wrong whenever the model is.
+- *A native answer declares its cost* (`call->charge(ticks)`, with helpers
+  to measure it from recordings). The same model, written by hand per
+  swap.
+- *What the clock counts changes, so ordinary code costs nothing* and only
+  true time sources move it: the guest's reads of the clock and the
+  hardware, and its waits. Then an answer that reads no clock and touches no
+  hardware -- every answer that does not change timing semantics -- moves
+  nothing, with no work per swap. The cost is finding the waits, since a
+  loop that waits on an interrupt with the clock stopped would spin for
+  ever: the idle loop and the frame end were already known; the rest are
+  found by their repeated state (above). And the delivery points must not
+  depend on instruction counts either, hence "the first back edge or entry
+  after something came due".
+
+The third is the one taken, as the default of `SOA_CLOCK=fixed`; the real
+clock is unchanged (none of this runs unless the fixed clock is on). The
+loops that had to keep terminating do: the ARAM boot spin (interrupts off,
+hardware reads: unchanged), `mftb` waits (reads: unchanged), the boot's
+disc-load loop and the SDK's polls (found as waits: 2,650 in the opening,
+none by length).
+
+**What a swap must still do to be invisible.** Read no timebase and no
+hardware register, write no hardware register (those are time and device
+semantics, and a native device is expected to change them). Answers that do
+can say so in a later ABI (`call->charge`), if one ever needs to.
+
+**Measured** (2026-10-17, this tree, `gen/linux-host`'s game library with a
+host runtime built from it and a scratch host program; headless, muted,
+`SOA_RENDER=1 SOA_HASH=1`, `SOA_COUNT_CALLS`, fresh card copies). "On" is the
+16 answers: the 10 former `replace.c` functions (camera task, walk start,
+pad step, floor and walls, scan, and the ship's five; soa-ue5's rules as
+plain C++) and the six disc lookups (soa-ue5's `SoADiscSwap`). Counts are
+compared outside what the answers replace: each function's calls less the
+calls made inside an answered call (the translation's, off; the answer's own
+calls back into the game, on), measured by wrapping the 16.
+
+| run | frames | frames differing, on against off | call counts differing outside the answers | answered |
+|---|---:|---|---|---|
+| opening (bench pad script, blank card) | 3,000 | 0 | 0 of 1,797 functions | 2,141 camera, 4+4 walk, 164 disc |
+| world map flight (secrets card, load, stick up) | 4,400 | 0 | 0 of 2,501 | 680 of each ship function, 646 scan, 1,918 camera, 301 disc |
+| walking (final-boss card, load, stick down) | 4,600 | 0 | 3 of 2,026 (below) | 319 start, 85 pad step, 319 floor, 160 scan, 2,625 camera, 166 disc |
+| opening, old rule | 3,000 | 388, from frame 866 | 204 of 1,796 | as the first row |
+
+Guest time and reads are identical on against off in every quiet pair
+(e.g. the opening: 4,180,950,728 ticks, 703,141 reads). The answered
+functions' `translated` counts go to 0, and DVDConvertPathToEntrynum's
+calls drop (67 to 44: the translated Open and ChangeDir call it). The
+host runtime and the launcher give the same 3,000 hashes for the opening.
+Wall time under the quiet rule: 29 to 36 s for the opening at a load average
+of 20 to 26, against 27 to 31 s for the old rule.
+
+**The one known gap: polling loops around an answer.** Walking, 9 of 2,751
+waits were found one pass later with the answers on (2,742), and three
+functions those loops call (`0x801C6248`, OSDisableInterrupts,
+OSRestoreInterrupts) differ by 9, 117 and 9 calls in 1.3 million; the
+frames do not. A wait is found by every register, and a native answer leaves
+the volatile registers (r0, r4-r12, CTR, f0, f2-f13, CR0-1 and 5-7) as they
+were before the call while the translation leaves its own: a loop around a
+call can repeat its state on a different pass. Leaving the volatile
+registers out of the state was tried and is wrong: work in a leaf loop
+keeps its count there, and the opening went to 932 retraces a frame.
+
+## Deterministic runs in Unreal (design only)
+
+Under `SOA_CLOCK=fixed` the runtime repeats; a run in the editor does not
+(docs/layer1-disc.md in soa-ue5, "Stage 2 in Unreal": 0.13 to 0.52/255 off
+against off). What the plugin does from its own threads at its own time
+lands wherever the guest happens to be:
+
+- **The pad.** `USoAHostSubsystem::Tick` calls `SendPad` every Unreal frame,
+  which calls `soa_host_set_pad` (and the native pad's `SetLive`) from the
+  game thread; the guest's SI poll reads whatever is there at the retrace.
+  Which guest frame sees an Unreal frame's input depends on both frame
+  rates. Even with no key pressed, the port goes from absent (the script
+  alone) to present (the live pad merged with the script) at the first
+  Unreal tick, a time of the editor's.
+- **Hold and go.** `soa.HostHold` (`ASoAMirror::Update`) makes the guest
+  wait at each frame end for `soa_host_go(frame)`, but host.c gives up after
+  500 ms (`host_frame_end`), so a slow editor frame lets the game run ahead.
+  Without it the mirror and the tasks read and write memory at no
+  particular guest point.
+- **Writes.** `soa_host_write` (the camera's `Game.Write(CameraStateAt)` in
+  `SoACameraBeside.cpp`, and others) is applied at the next frame end, which
+  is the guest frame that happens to end next.
+- **Native answers that read Unreal state** (a camera mode that hands back
+  Unreal's camera) depend on the editor's frame, not the game's.
+- Pause and stall (`soa_host_pause` from the heartbeat, `HoldForAssets`)
+  stop the guest at a safe point and cost no guest time under the fixed
+  clock: harmless. The sound queue drops rather than blocks: harmless.
+  `soa.CallCounts on` from `-ExecCmds` starts counting a few seconds in:
+  harmless to the picture, but counts compare only from the start
+  (`GCountCallsAtStart`).
+
+A deterministic Unreal mode (`soa.Deterministic`, set before the start,
+with `soa_host_set_clock(SOA_HOST_CLOCK_FIXED)`) would need:
+
+1. **Lockstep at the frame end:** hold on from before the start, and no
+   timeout (a strict hold in the runtime: `soa_host_hold(2)`, or a timeout of
+   0 meaning none), so guest frame N+1 never starts before Unreal has let
+   frame N go.
+2. **Input at guest frame boundaries:** the pad the guest reads in frame N+1
+   is the one the host set while frame N was held -- latched by the runtime
+   at the frame end (as writes are) rather than read live from the host's
+   slot; `soa_host_set_pad` called only while held, or a new
+   `soa_host_set_pad_at(frame, pad)`. The port present (neutral) from the
+   start, or absent throughout for scripted runs. The live input recorded
+   by guest frame (`SOA_PAD_RECORD`'s format) replays the run.
+3. **Writes, schedules and raised lines only while held** (or from inside
+   replacements and events), so they land at a known frame end.
+4. **Answers that depend only on guest memory** in this mode: none that
+   reads Unreal's camera or time.
+5. Counting from the start, and the checks this file's runs use: frame
+   hashes from `soa_host_frame`'s count, and `soa_host_call_counts` at a
+   held frame.
+
+With those, a run in Unreal is a function of the pad record, the card and
+the build, as a headless one is.

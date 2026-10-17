@@ -30,6 +30,7 @@
 #include "clock.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "plat.h"
 
 #define NS 1000000000ull
@@ -181,6 +182,31 @@ static int g_fixed;
 static uint64_t g_fx_ticks, g_fx_read = 8, g_fx_poll = 32, g_fx_skipped;
 static unsigned long long g_fx_reads, g_fx_polls, g_fx_skips;
 static uint32_t g_fx_rtc = 31622400u; /* 2001-01-01 00:00:00, in seconds since 2000 */
+/* The quiet rule (poll ticks 0, the default; docs/CLOCK.md "Native answers
+ * and the clock"): ordinary code costs no guest time, so a native answer
+ * that skips a translation moves nothing a run can see. irq.c reads these
+ * two at every back edge, so they are plain globals, not calls. */
+int g_clock_quiet;
+volatile int g_clock_due;
+void (*g_clock_due_fn)(int on);
+
+/* Something may be due: told once, on the change, to whoever wants it (hle.c
+ * hands it to swap.c, which makes every function's entry look). */
+static void due(void)
+{
+    if (g_clock_due) return;
+    g_clock_due = 1;
+    if (g_clock_due_fn) g_clock_due_fn(1);
+}
+
+int clock_fixed_take_due(void)
+{
+    if (!g_clock_due) return 0;
+    g_clock_due = 0;
+    if (g_clock_due_fn) g_clock_due_fn(0);
+    return 1;
+}
+static unsigned long long g_fx_spin = 4194304, g_fx_waits[5], g_fx_spin_max;
 
 void clock_fixed_configure(uint64_t read_ticks, uint64_t poll_ticks, uint32_t rtc_seconds)
 {
@@ -188,6 +214,39 @@ void clock_fixed_configure(uint64_t read_ticks, uint64_t poll_ticks, uint32_t rt
     g_fx_read = read_ticks;
     g_fx_poll = poll_ticks;
     g_fx_rtc = rtc_seconds;
+    g_clock_quiet = poll_ticks == 0;
+    due();
+}
+
+void clock_fixed_set_spin(unsigned long long back_edges)
+{
+    g_fx_spin = back_edges ? back_edges : 1;
+}
+
+unsigned long long clock_fixed_spin(void)
+{
+    return g_fx_spin;
+}
+
+void clock_fixed_mark(void)
+{
+    if (g_clock_quiet) due();
+}
+
+/* how: 0 the run ended at something due; a wait found by the loop's
+ * repeated state (1 something delivered, 2 the clock went to the next
+ * deadline) or by its length (3, 4) */
+void clock_fixed_note_spin(unsigned long long run, int how)
+{
+    if (!how && run > g_fx_spin_max) g_fx_spin_max = run;
+    if (how > 0 && how < 5) g_fx_waits[how]++;
+}
+
+void clock_fixed_spin_stats(unsigned long long waits[5], unsigned long long* longest)
+{
+    unsigned k;
+    for (k = 0; k < 5; k++) waits[k] = g_fx_waits[k];
+    if (longest) *longest = g_fx_spin_max;
 }
 
 int clock_fixed(void)
@@ -204,6 +263,7 @@ void clock_fixed_after_read(void)
 {
     g_fx_ticks += g_fx_read;
     g_fx_reads++;
+    if (g_fx_read && g_clock_quiet) due();
 }
 
 void clock_fixed_poll(void)
@@ -218,6 +278,7 @@ int clock_fixed_skip_to(uint64_t tick)
     g_fx_skipped += tick - g_fx_ticks;
     g_fx_ticks = tick;
     g_fx_skips++;
+    if (g_clock_quiet) due();
     return 1;
 }
 
@@ -243,6 +304,11 @@ void clock_reset(void)
     g_fx_read = 8, g_fx_poll = 32;
     g_fx_reads = g_fx_polls = g_fx_skips = 0;
     g_fx_rtc = 31622400u;
+    g_clock_quiet = 0;
+    g_clock_due = 0;
+    g_clock_due_fn = NULL;
+    g_fx_spin = 4194304, g_fx_spin_max = 0;
+    memset(g_fx_waits, 0, sizeof g_fx_waits);
     g_started = 0;
     g_last_host_ns = g_guest_ns = g_origin_host_ns = 0;
     g_speed = 1;

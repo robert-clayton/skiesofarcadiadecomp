@@ -67,6 +67,7 @@ int gx_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out) { (void)s, (
 int gx_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v) { (void)s, (void)ea, (void)size, (void)v; return 0; }
 unsigned gx_pe_irq_pending(void) { return 0; }
 void gx_report(void) {}
+uint64_t gx_pipe_bytes(void) { return 0; }
 int aram_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out) { (void)s, (void)ea, (void)size, (void)out; return 0; }
 int aram_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v) { (void)s, (void)ea, (void)size, (void)v; return 0; }
 int aram_irq_pending(void) { return 0; }
@@ -123,7 +124,12 @@ int main(void)
     unsigned long long a, b, ids[64];
     unsigned n = 0;
     s.mem = (uint8_t*)calloc(1, MEM_IMAGE_SIZE);
-    clock_fixed_configure(8, 1000, 0);
+    if (getenv("QUIET")) { /* the quiet rule (poll ticks 0), with a short spin limit */
+        clock_fixed_configure(8, 0, 0);
+        clock_fixed_set_spin(strtoull(getenv("QUIET"), NULL, 10));
+    } else {
+        clock_fixed_configure(8, 1000, 0);
+    }
     wr32(&s, 0x80003040u + 4 * 24, 0x24u); /* the OS's VI handler: "24" */
     wr32(&s, 0x80003040u + 4 * 5, 0x5u);   /* AI's: "5" */
     s.gpr[3] = 77, s.gpr[31] = 31;
@@ -134,6 +140,20 @@ int main(void)
             s.msr |= 0x8000u;
             while (a--) irq_poll(&s);
             s.msr &= ~0x8000u;
+        } else if (!strcmp(cmd, "wait") && scanf("%llu", &a) == 1) {
+            /* a loop that changes no register: the same block, the same state */
+            s.msr |= 0x8000u;
+            s.pc = 0x80001000u;
+            while (a--) irq_poll(&s);
+            s.msr &= ~0x8000u;
+        } else if (!strcmp(cmd, "work") && scanf("%llu", &a) == 1) {
+            /* a loop that counts in a register: work, however long */
+            s.msr |= 0x8000u;
+            s.pc = 0x80002000u;
+            while (a--) s.gpr[5]++, irq_poll(&s);
+            s.msr &= ~0x8000u;
+        } else if (!strcmp(cmd, "read")) {
+            guest_timebase_lo(&s);
         } else if (!strcmp(cmd, "every") && scanf("%llu %llu", &a, &b) == 2) {
             ids[n] = (unsigned long long)irq_event_add(a, b, event, (void*)(b ? "tick" : "once"), NULL);
             printf("id %llu\n", ids[n]), n++;
@@ -178,8 +198,10 @@ def driver(tmp_path_factory):
     return exe
 
 
-def drive(exe, script):
-    run = subprocess.run([str(exe)], input=script, capture_output=True, text=True, timeout=60)
+def drive(exe, script, env=None):
+    run = subprocess.run(
+        [str(exe)], input=script, capture_output=True, text=True, timeout=60, env=dict(os.environ, **(env or {}))
+    )
     assert run.returncode == 0, run.stdout + run.stderr
     return run.stdout, run.stderr
 
@@ -232,3 +254,55 @@ def test_the_same_drive_gives_the_same_run(driver):
     b, eb = drive(driver, script)
     assert a == b and ea == eb
     assert "[clock] fixed:" in ea
+
+
+# ---- the quiet rule (docs/CLOCK.md, "Native answers and the clock") ----
+
+
+@gnu
+def test_quiet_work_costs_no_time_and_delivers_nothing(driver):
+    # a million back edges of work: the clock does not move, nothing is due
+    out, err = drive(driver, "work 1000000\nregs\n", {"QUIET": "4194304"})
+    assert out.splitlines()[-1].endswith(" now 0"), out
+    assert "handler" not in out
+    assert "0 waits found by a loop's repeated state" in err, err
+
+
+@gnu
+def test_quiet_a_loop_that_repeats_its_state_is_a_wait(driver):
+    # the first back edge delivers what came due at the start; then the third
+    # pass with the same registers is a wait: the clock goes to the retrace,
+    # which is delivered there and then
+    out, err = drive(driver, "wait 4\nregs\n", {"QUIET": "4194304"})
+    assert f"handler 24 r3 24 at {VI}" in out, out
+    assert out.splitlines()[-1] == f"r3 77 r31 31 now {VI}", out
+    assert "1 waits found by a loop's repeated state (1 went to the next deadline)" in err, err
+    # two passes are not enough
+    out, _ = drive(driver, "wait 3\nregs\n", {"QUIET": "4194304"})
+    assert out.splitlines()[-1].endswith(" now 0"), out
+
+
+@gnu
+def test_quiet_a_wait_that_counts_is_found_by_length(driver):
+    out, err = drive(driver, "work 1000\nregs\nwork 1\nregs\n", {"QUIET": "1000"})
+    lines = out.splitlines()
+    assert lines[0].endswith(" now 0") and lines[-1].endswith(f" now {VI}"), out
+    assert "1 by 1000 back edges with nothing due (1)" in err, err
+
+
+@gnu
+def test_quiet_an_event_is_delivered_at_the_first_back_edge_after_it_comes_due(driver):
+    # 8 ticks a read; the event due at 20 runs at the first back edge after
+    # the third read moved the clock to 24, not later and not at a count
+    out, _ = drive(driver, "every 20 0\nread\nread\nwork 5\nread\nwork 1\nregs\n", {"QUIET": "4194304"})
+    assert "event once due 20 at 24 ee 0" in out, out
+    assert out.count("event once") == 1
+
+
+@gnu
+def test_quiet_the_same_drive_gives_the_same_run(driver):
+    script = f"every 1234 {TICK5MS}\nidle 5\nwork 5000\nwait 7\nread\nwork 3\nraise 5\nwait 3\nidle 5\nregs\n"
+    a, ea = drive(driver, script, {"QUIET": "4096"})
+    b, eb = drive(driver, script, {"QUIET": "4096"})
+    assert a == b and ea == eb
+    assert "[clock] quiet:" in ea

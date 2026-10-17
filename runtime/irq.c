@@ -51,6 +51,7 @@ int gx_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out);
 int gx_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v);
 unsigned gx_pe_irq_pending(void);
 void gx_report(void);
+uint64_t gx_pipe_bytes(void); /* the bytes sent down the gather pipe so far */
 #define IRQ_PI_PE_TOKEN 18
 #define IRQ_PI_PE_FINISH 19
 int aram_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out);
@@ -365,6 +366,7 @@ int irq_event_add(uint64_t due, uint64_t period, IrqEventFn fn, void* user, void
             break;
         }
     plat_unlock(&g_event_lock);
+    if (id) clock_fixed_mark(); /* the quiet rule's next delivery point looks */
     return id;
 }
 
@@ -387,6 +389,7 @@ int irq_raise(unsigned number)
     was = g_lines;
     g_lines = was | (1u << number);
     plat_unlock(&g_event_lock);
+    clock_fixed_mark();
     return 1;
 }
 
@@ -651,10 +654,115 @@ static int deliver_and_reschedule(CpuState* s)
     return 1;
 }
 
+/* The fixed clock's quiet rule (clock.h; docs/CLOCK.md "Native answers and
+ * the clock"): no back edge costs guest time, and none is a delivery point by
+ * count. The first back edge with interrupts enabled after something may have
+ * come due delivers -- the same program point whether a native answer or a
+ * translation ran before it, since an answer that reads nothing moves
+ * nothing.
+ *
+ * A loop that waits on what only an interrupt can change has to be found, or
+ * it spins forever with the clock stopped. It is found by its state: each
+ * back edge notes the integer registers, CR, LR, CTR and XER under its block's
+ * address (a small table, emptied whenever something comes due), and a back
+ * edge that finds them as its block's last one left them, with nothing sent
+ * down the gather pipe since, has gone round a loop that changed none of
+ * them; once that happens twice running with the floating registers the
+ * same too, the loop is a wait. (The pipe counts because a function called
+ * twice with the same registers to draw the same thing twice would look
+ * like a loop that waits.) Work does not repeat
+ * its registers (a pointer, a count, a value read moves), so it is never cut,
+ * however long it runs. And where a wait is found depends only on the loop
+ * and on what came due before it -- not on how much other code ran since,
+ * so a native answer before the wait does not move it. A wait that keeps a
+ * count in a register is found by length alone, at `spin` back edges with
+ * nothing due (SOA_CLOCK_SPIN). Either way what is pending is delivered, and
+ * with nothing pending guest time goes to the next deadline, as the idle
+ * loop's does. */
+#define QUIET_SLOTS 256u
+
+typedef struct {
+    uint32_t pc, seen; /* seen: 0 empty, 1 noted, 2 noted twice the same, with the floats */
+    uint64_t stores;   /* gx_pipe_bytes() when noted: a loop that drew something is not a wait */
+    uint32_t gpr[32], cr, lr, ctr, xer;
+    Fpr fpr[32];
+} QuietSlot;
+
+static QuietSlot g_quiet[QUIET_SLOTS];
+static unsigned long long g_quiet_run;
+
+static void quiet_forget(void)
+{
+    unsigned k;
+    for (k = 0; k < QUIET_SLOTS; k++) g_quiet[k].seen = 0;
+    g_quiet_run = 0;
+}
+
+static void quiet_wait(CpuState* s, int by_length)
+{
+    quiet_forget();
+    if (deliver_and_reschedule(s)) {
+        clock_fixed_note_spin(0, by_length ? 3 : 1);
+        return;
+    }
+    clock_fixed_note_spin(0, by_length ? 4 : 2);
+    fixed_idle_skip(s);
+    clock_fixed_take_due();
+    deliver_and_reschedule(s);
+}
+
+/* Something came due: deliver it here. A back edge with interrupts enabled
+ * calls it, and so does the entry of every translated function (swap.c,
+ * through irq_quiet_entry), so that the first of those after a read or a
+ * write is where the handler runs: a native answer's entry is its
+ * translation's entry, and a delivery that falls before a call lands in the
+ * same place whichever of the two runs. */
+static void quiet_due(CpuState* s)
+{
+    clock_fixed_take_due();
+    clock_fixed_note_spin(g_quiet_run, 0);
+    quiet_forget();
+    deliver_and_reschedule(s);
+}
+
+void irq_quiet_entry(CpuState* s)
+{
+    if (!(s->msr & 0x8000u) || g_in_handler || !g_clock_due) return; /* interrupts off, or nested: later */
+    quiet_due(s);
+}
+
+static void quiet_poll(CpuState* s)
+{
+    QuietSlot* q;
+    if (g_clock_due) {
+        quiet_due(s);
+        return;
+    }
+    q = &g_quiet[(s->pc >> 2) & (QUIET_SLOTS - 1u)];
+    if (q->seen && q->pc == s->pc && q->stores == gx_pipe_bytes() && q->cr == s->cr && q->lr == s->lr && q->ctr == s->ctr && q->xer == s->xer &&
+        !memcmp(q->gpr, s->gpr, sizeof q->gpr)) {
+        if (q->seen == 2 && !memcmp(q->fpr, s->fpr, sizeof q->fpr)) {
+            quiet_wait(s, 0);
+            return;
+        }
+        q->seen = 2;
+        memcpy(q->fpr, s->fpr, sizeof q->fpr);
+    } else {
+        q->pc = s->pc, q->seen = 1, q->stores = gx_pipe_bytes();
+        q->cr = s->cr, q->lr = s->lr, q->ctr = s->ctr, q->xer = s->xer;
+        memcpy(q->gpr, s->gpr, sizeof q->gpr);
+    }
+    if (++g_quiet_run >= clock_fixed_spin()) quiet_wait(s, 1);
+}
+
 void irq_poll(CpuState* s)
 {
     static unsigned n;
     if (!(s->msr & 0x8000u) || g_in_handler) return; /* MSR[EE] clear, or nested */
+    if (g_clock_quiet) {
+        quiet_poll(s);
+        return;
+    }
     if (++n & 0xFu) return;
     if (clock_fixed()) clock_fixed_poll(); /* the guest's work is its clock's */
     deliver_and_reschedule(s);
@@ -705,6 +813,14 @@ void irq_report(void)
                         "%llu idle skips for %llu ticks\n",
                 (unsigned long long)clock_fixed_now(), (double)clock_fixed_now() / (double)TB_HZ, reads, polls, skips,
                 (unsigned long long)skipped);
+        if (g_clock_quiet) {
+            unsigned long long w[5] = {0}, longest = 0;
+            clock_fixed_spin_stats(w, &longest);
+            fprintf(stderr, "[clock] quiet: back edges cost no time; %llu waits found by a loop's repeated state "
+                            "(%llu went to the next deadline), %llu by %llu back edges with nothing due (%llu); the longest "
+                            "run of back edges that ended at something due was %llu\n",
+                    w[1] + w[2], w[2], w[3] + w[4], clock_fixed_spin(), w[4], longest);
+        }
     }
 }
 

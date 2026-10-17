@@ -37,20 +37,22 @@ typedef struct {
     void* user;
 } Pending;
 
-#define MAX_PENDING 64
-
 static PlatLock g_lock;
 static const SoaGame* g_game;  /* set once the table is known and the slots made */
 static Swap* g_swap;           /* one a function */
 static uint64_t *g_calls, *g_answered, *g_translated;
 static int g_counting;
-static Pending g_pending[MAX_PENDING];
-static unsigned g_npending;
+/* Requests made before the game library is loaded, kept until it is: as many
+ * as are made (a host may set hundreds of answers at start), grown as asked. */
+static Pending* g_pending;
+static unsigned g_npending, g_cap_pending;
 /* The one function whose next entry runs its translation, its index plus one
  * (swap_original): the guest is one thread at a time, and the entry that
  * reads it is the very next thing the call does. */
 static uint32_t g_skip;
 static SwapTraceFn g_trace; /* swap_trace's, with SWAP_TRACE in every byte while it is set */
+static void (*g_due_take)(CpuState* s); /* swap_due_handler's */
+static int g_due;                       /* SWAP_DUE is in every byte */
 
 static const SoaGame* table(void)
 {
@@ -136,7 +138,12 @@ int swap_set(uint32_t address, SwapHandler handler, SwapFn fn, void* user)
         ok = set_locked(g, address, handler, fn, user);
     } else if (!table()) { /* not loaded yet: kept, the last request an address wins */
         for (k = 0; k < g_npending && g_pending[k].address != address; k++) {}
-        if (k < MAX_PENDING) {
+        if (k == g_cap_pending) {
+            unsigned cap = g_cap_pending ? g_cap_pending * 2u : 256u;
+            Pending* grown = (Pending*)realloc(g_pending, cap * sizeof *grown);
+            if (grown) g_pending = grown, g_cap_pending = cap;
+        }
+        if (k < g_cap_pending) {
             g_pending[k].address = address;
             g_pending[k].handler = handler;
             g_pending[k].fn = fn;
@@ -161,6 +168,8 @@ void swap_attach(void)
                 fprintf(stderr, "[swap] %08X: not a function of the game's the runtime does not answer itself; not swapped\n",
                         g_pending[k].address);
     g_npending = 0;
+    free(g_pending);
+    g_pending = NULL, g_cap_pending = 0;
     plat_unlock(&g_lock);
 }
 
@@ -193,6 +202,32 @@ void swap_trace(SwapTraceFn fn)
         g_trace = fn;
         for (i = 0; i < g->count; i++)
             if (!g->kind[i]) g->swap[i] = (uint8_t)(fn ? g->swap[i] | SWAP_TRACE : g->swap[i] & ~SWAP_TRACE);
+    }
+    plat_unlock(&g_lock);
+}
+
+void swap_due_handler(void (*take)(CpuState* s))
+{
+    g_due_take = take;
+}
+
+/* Every byte at once, as the guard reads it: the native functions' bytes
+ * too (no guard reads them, and one loop is the cheapest). Called on each
+ * change of the clock's flag, a few hundred times a frame. */
+void swap_due(int on)
+{
+    const SoaGame* g;
+    uint32_t i, n;
+    uint8_t* b;
+    plat_lock(&g_lock);
+    g = ready_locked();
+    if (g && on != g_due) {
+        b = g->swap, n = g->count;
+        if (on)
+            for (i = 0; i < n; i++) b[i] = (uint8_t)(b[i] | SWAP_DUE);
+        else
+            for (i = 0; i < n; i++) b[i] = (uint8_t)(b[i] & ~SWAP_DUE);
+        g_due = on;
     }
     plat_unlock(&g_lock);
 }
@@ -281,6 +316,13 @@ int soa_swap_enter(CpuState* s, uint32_t i)
         return 0;
     }
     f = ((volatile uint8_t*)g->swap)[i];
+    if ((f & SWAP_DUE) && g_due_take) {
+        /* an entry is a delivery point under the quiet rule: before the
+         * skip, the count and the replacement, so it is the same place
+         * whether a replacement or the translation answers */
+        g_due_take(s);
+        f = ((volatile uint8_t*)g->swap)[i];
+    }
     if (g_skip == i + 1u) {
         g_skip = 0;
         if (f & SWAP_COUNT) g_translated[i]++;

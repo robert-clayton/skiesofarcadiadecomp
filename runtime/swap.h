@@ -30,6 +30,7 @@
 #define SWAP_HOOK 1u
 #define SWAP_COUNT 2u
 #define SWAP_TRACE 4u /* the entry is told to the trace function (swap_trace) */
+#define SWAP_DUE 8u   /* the fixed clock's quiet rule: something has come due, and the next entry delivers it */
 
 typedef void (*SwapFn)(void); /* the handler's own function, whatever its type: cast back by the handler */
 typedef int (*SwapHandler)(CpuState* s, uint32_t address, SwapFn fn, void* user, int after);
@@ -89,6 +90,13 @@ void swap_attach(void);
 /* SOA_COUNT_CALLS (main.c, at the start of a run): counting on, and a report
  * at the run's end. */
 void swap_env(void);
+
+/* The fixed clock's quiet rule (docs/CLOCK.md): on, every function's byte
+ * gets SWAP_DUE, so its next entry calls `take` (irq.c's irq_quiet_entry) to
+ * deliver what has come due; off, they lose it. hle.c installs swap_due as
+ * clock.c's g_clock_due_fn when the rule is on. */
+void swap_due(int on);
+void swap_due_handler(void (*take)(CpuState* s));
 
 int soa_swap_enter(CpuState* s, uint32_t index); /* the guard's slow path */
 

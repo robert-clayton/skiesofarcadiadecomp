@@ -40,4 +40,23 @@ uint32_t clock_fixed_rtc(void);               /* the RTC: the fixed start date p
 void clock_fixed_stats(unsigned long long* reads, unsigned long long* polls, unsigned long long* skips,
                        uint64_t* skipped_ticks);
 
+/* The quiet rule (poll ticks 0: the default of SOA_CLOCK=fixed; docs/CLOCK.md
+ * "Native answers and the clock"): no instruction costs guest time, and no
+ * count of back edges is a delivery point. g_clock_due is set whenever
+ * something may have come due -- the clock moved (a read, a skip), the guest
+ * wrote the hardware, a native event or line was added -- and the next back
+ * edge or translated function's entry with interrupts enabled delivers and
+ * clears it. A loop found waiting (irq.c: its state repeated, or `spin` back
+ * edges with nothing due) has what is pending delivered, and with nothing,
+ * guest time goes to the next deadline, as in the idle loop. */
+extern int g_clock_quiet;        /* 1: the quiet rule is on */
+extern volatile int g_clock_due; /* something may be due: the next delivery point delivers */
+void clock_fixed_set_spin(unsigned long long back_edges); /* SOA_CLOCK_SPIN */
+unsigned long long clock_fixed_spin(void);
+void clock_fixed_mark(void);     /* something may be due (the quiet rule only), from any thread */
+int clock_fixed_take_due(void);  /* the guest's thread: 1 if something was, and no longer */
+extern void (*g_clock_due_fn)(int on); /* told when g_clock_due changes (quiet.c: swap.c's entries look too) */
+void clock_fixed_note_spin(unsigned long long run, int how); /* irq.c: a run of back edges ended (clock.c says how) */
+void clock_fixed_spin_stats(unsigned long long waits[5], unsigned long long* longest); /* by clock_fixed_note_spin's how */
+
 #endif
