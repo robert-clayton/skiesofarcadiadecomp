@@ -75,6 +75,9 @@ double gxr_producer_span(void) { return 0.0; }
 void hle_dump(CpuState* s, uint32_t pc) { (void)s; (void)pc; }
 void threads_init(CpuState* s) { (void)s; }
 void swap_env(void) {}
+int swap_pipe_census_on(void) { return 0; }
+void swap_pipe_census_note(uint32_t pc, unsigned size) { (void)pc, (void)size; }
+void gx_set_pipe_census(void (*note)(uint32_t pc, unsigned size)) { (void)note; }
 void record_env(CpuState* s) { (void)s; }
 void dvd_init(const char* p) { (void)p; }
 int selftest(CpuState* s) { (void)s; return 0; }

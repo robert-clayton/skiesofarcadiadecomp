@@ -89,6 +89,8 @@ RECORDER = r"""
 #include <sys/mman.h>
 #include "functions.h"
 #include "record.h"
+#include "gx_state.h"
+#include <string.h>
 #include "soa_game.h"
 #include "swap.h"
 
@@ -115,6 +117,11 @@ void watch_hit(CpuState* s, uint32_t ea, unsigned size, uint64_t v) { (void)s, (
 uint32_t mmio_read32(CpuState* s, uint32_t ea) { (void)s, (void)ea; return 0; }
 void mmio_write32(CpuState* s, uint32_t ea, uint32_t v) { (void)s, (void)ea, (void)v; }
 void gx_pipe_write(CpuState* s, unsigned size, uint64_t v) { (void)s, (void)size, (void)v; }
+/* what record.c reads of gx.c: this program never draws */
+void (*g_record_pipe)(CpuState* s, unsigned size, uint64_t v);
+void gx_pipe_watch_changed(void) {}
+void gx_image(GxImage* out) { memset(out, 0, sizeof *out); }
+const uint8_t* gx_pipe_left(uint32_t* len) { static const uint8_t none[1]; *len = 0; return none; }
 int mod_call_guest(CpuState* s, uint32_t addr, const uint32_t* ints, uint32_t n_ints, const double* floats,
                    uint32_t n_floats, uint32_t* r3, double* f1, char* why, size_t cap)
 {

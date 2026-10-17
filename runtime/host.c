@@ -143,20 +143,150 @@ typedef struct {
 static PlatLock g_pad_lock;
 static HostPort g_ports[2];
 
+/* ---- strict mode (soa_host_set_strict; docs/CLOCK.md, "Deterministic runs
+ * under a host") ----
+ * A host's threads act at times of their own; strict mode makes each act land
+ * at a guest frame boundary instead. The guest waits at every frame end until
+ * the host lets that frame go, with no timeout. The pad the guest reads in
+ * frame F+1 is the one the host gave while frame F was held (or named for
+ * F+1 with soa_host_set_pad_at): latched at F's end, after the wait, and read
+ * from the latch, never live. Writes, events and raised lines from a host
+ * thread are taken only while the guest is held. So a run is a function of
+ * what the host did at each held frame, not of when. */
+typedef struct {
+    long frame; /* the first frame it is for; -1: given while the guest ran (strict mode) */
+    unsigned port;
+    int present;
+    SoaHostPad pad;
+} PadAt;
+#define MAX_PAD_AT 256u
+static PadAt g_pad_at[MAX_PAD_AT]; /* under g_pad_lock */
+static unsigned g_npad_at;
+static HostPort g_latched[2]; /* strict mode's pads: the guest's thread writes and reads them */
+static int g_strict;          /* set before the start, never after */
+static plat_a64 g_go;         /* the last frame a holding host has let go */
+static plat_a64 g_held = -1;  /* the frame the guest waits at, or -1 */
+static PLAT_THREAD_LOCAL int t_guest; /* this thread is the guest's */
+static SoaHostStrictStats g_strict_stats;
+static PlatLock g_stats_lock;
+
+static void strict_count(uint64_t* field)
+{
+    plat_lock(&g_stats_lock);
+    (*field)++;
+    plat_unlock(&g_stats_lock);
+}
+
+/* A host thread's act in strict mode: taken only while the guest is held
+ * (or from the guest's own thread: a replacement, an event). */
+static int strict_refuses(void)
+{
+    if (!g_strict || t_guest || plat_load64(&g_held) >= 0) return 0;
+    strict_count(&g_strict_stats.refused);
+    return 1;
+}
+
+static int pad_queue(long frame, unsigned port, const SoaHostPad* pad)
+{
+    int queued = 0;
+    plat_lock(&g_pad_lock);
+    if (g_npad_at < MAX_PAD_AT) {
+        PadAt* e = &g_pad_at[g_npad_at++];
+        e->frame = frame;
+        e->port = port;
+        e->present = pad != NULL;
+        if (pad) e->pad = *pad;
+        else memset(&e->pad, 0, sizeof e->pad);
+        queued = 1;
+    }
+    plat_unlock(&g_pad_lock);
+    return queued;
+}
+
 void soa_host_set_pad(unsigned port, const SoaHostPad* pad)
 {
     if (port < 1 || port > 2) return;
+    if (g_strict) { /* for the next frame, if the guest is held; else for whenever it next ends one (late) */
+        long held = (long)plat_load64(&g_held);
+        if (!pad_queue(held >= 0 ? held + 1 : -1, port, pad)) strict_count(&g_strict_stats.refused);
+        return;
+    }
     plat_lock(&g_pad_lock);
     g_ports[port - 1].present = pad != NULL;
     if (pad) g_ports[port - 1].pad = *pad;
     plat_unlock(&g_pad_lock);
 }
 
+int soa_host_set_pad_at(long frame, unsigned port, const SoaHostPad* pad)
+{
+    if (port < 1 || port > 2 || frame < 0) return 0;
+    return pad_queue(frame, port, pad);
+}
+
+/* At the end of frame `frame`, on the guest's thread: every pad named for
+ * the frame about to begin, or before it, into the ports (strict: the latch). */
+static void pads_latch(long frame)
+{
+    unsigned k, kept = 0;
+    uint64_t late = 0, latched = 0;
+    plat_lock(&g_pad_lock);
+    for (k = 0; k < g_npad_at; k++) {
+        PadAt* e = &g_pad_at[k];
+        if (e->frame >= 0 && e->frame > frame + 1) {
+            g_pad_at[kept++] = *e;
+            continue;
+        }
+        if (e->frame < frame + 1) late++; /* given while the guest ran, or for a frame already begun */
+        latched++;
+        {
+            HostPort* p = g_strict ? &g_latched[e->port - 1] : &g_ports[e->port - 1];
+            p->present = e->present;
+            if (e->present) p->pad = e->pad;
+        }
+    }
+    g_npad_at = kept;
+    plat_unlock(&g_pad_lock);
+    if (g_strict && (late || latched)) {
+        plat_lock(&g_stats_lock);
+        g_strict_stats.pads += latched;
+        g_strict_stats.late += late;
+        plat_unlock(&g_stats_lock);
+    }
+}
+
+int soa_host_set_strict(unsigned flags)
+{
+    static const SoaHostPad neutral = {0, {128, 128}, {128, 128}, {0, 0}};
+    if (plat_load32(&g_state) != SOA_HOST_IDLE || (flags & ~(SOA_HOST_STRICT_ON | SOA_HOST_STRICT_COUNT_CALLS))) return 0;
+    g_strict = (flags & SOA_HOST_STRICT_ON) != 0;
+    if (!g_strict) return 1;
+    soa_host_set_clock(SOA_HOST_CLOCK_FIXED);
+    plat_xchg64(&g_go, -1); /* frame 0 is held too: no frame has been let go */
+    soa_host_hold(1);
+    g_latched[0].present = 1; /* port 1 there, neutral, from the start: never a time of the host's */
+    g_latched[0].pad = neutral;
+    if ((flags & SOA_HOST_STRICT_COUNT_CALLS) && !getenv("SOA_COUNT_CALLS")) plat_setenv("SOA_COUNT_CALLS", "1");
+    return 1;
+}
+
+long soa_host_held(void)
+{
+    return (long)plat_load64(&g_held);
+}
+
+void soa_host_strict_stats(SoaHostStrictStats* out)
+{
+    if (!out) return;
+    plat_lock(&g_stats_lock);
+    *out = g_strict_stats;
+    plat_unlock(&g_stats_lock);
+}
+
 static int read_port(unsigned i, uint16_t* buttons, uint8_t stick[2], uint8_t cstick[2], uint8_t trig[2])
 {
     HostPort p;
     plat_lock(&g_pad_lock);
-    p = g_ports[i];
+    p = g_strict ? g_latched[i] : g_ports[i];
     plat_unlock(&g_pad_lock);
     if (!p.present) return 0;
     *buttons = p.pad.buttons;
@@ -475,13 +605,13 @@ static unsigned g_nwatch, g_watch_gen; /* under g_mf_lock; the generation climbs
 
 typedef struct {
     uint32_t address, bytes;
+    long frame; /* strict mode: the frame held when it was queued */
     uint8_t data[MAX_WRITE_BYTES];
 } HostWrite;
 static HostWrite g_writes[MAX_WRITES];
 static unsigned g_nwrites;
 static PlatLock g_write_lock;
 static volatile int g_hold;
-static plat_a64 g_go; /* the last frame a holding host has let go */
 
 void soa_host_watch_memory(const SoaHostRange* ranges, unsigned n)
 {
@@ -526,11 +656,13 @@ int soa_host_write(uint32_t address, const void* data, unsigned bytes)
     uint32_t off = address & 0x01FFFFFFu;
     int queued = 0;
     if (!data || !bytes || bytes > MAX_WRITE_BYTES || address < 0x80000000u || address >= 0x81800000u || off + (uint64_t)bytes > MEM1_SIZE) return 0;
+    if (strict_refuses()) return 0;
     plat_lock(&g_write_lock);
     if (g_nwrites < MAX_WRITES) {
         HostWrite* w = &g_writes[g_nwrites++];
         w->address = address;
         w->bytes = bytes;
+        w->frame = (long)plat_load64(&g_held);
         memcpy(w->data, data, bytes);
         queued = 1;
     }
@@ -576,6 +708,7 @@ static int host_swap(CpuState* s, uint32_t address, SwapFn fnp, void* user, int 
     SoaHostCall c;
     unsigned r;
     int how;
+    t_guest = 1;
     c.address = address;
     c.after = after ? 1u : 0u;
     c.mem = s->mem;
@@ -622,6 +755,7 @@ static void host_event(CpuState* s, void* user, void (*extra)(void), uint64_t du
     SoaHostEvent fn = (SoaHostEvent)extra;
     SoaHostCall c;
     unsigned r;
+    t_guest = 1;
     memset(&c, 0, sizeof c);
     c.mem = s->mem;
     c.mem_bytes = MEM1_SIZE;
@@ -640,17 +774,18 @@ static void host_event(CpuState* s, void* user, void (*extra)(void), uint64_t du
 
 int soa_host_schedule(uint64_t at, uint64_t period, SoaHostEvent fn, void* user)
 {
-    return fn ? irq_event_add(at, period, host_event, user, (void (*)(void))fn) : 0;
+    if (!fn || strict_refuses()) return 0;
+    return irq_event_add(at, period, host_event, user, (void (*)(void))fn);
 }
 
 int soa_host_cancel(int id)
 {
-    return irq_event_cancel(id);
+    return strict_refuses() ? 0 : irq_event_cancel(id);
 }
 
 int soa_host_raise(unsigned number)
 {
-    return irq_raise(number);
+    return strict_refuses() ? 0 : irq_raise(number);
 }
 
 int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user)
@@ -679,11 +814,13 @@ unsigned soa_host_call_counts(SoaHostCallCount* out, unsigned max)
 void soa_host_hold(int on)
 {
     g_hold = on ? 1 : 0;
+    if (!on) plat_wake_all64(&g_go);
 }
 
 void soa_host_go(long frame)
 {
     plat_xchg64(&g_go, (int64_t)frame);
+    plat_wake_all64(&g_go);
 }
 
 /* The watched ranges, into the frame about to be published. The list is the
@@ -706,12 +843,13 @@ static void watch_copy(ModelFrame* b)
     b->watch_gen = gen;
 }
 
-static void writes_apply(void)
+static void writes_apply(long frame)
 {
     uint8_t* mem = g_mem;
     unsigned k;
     plat_lock(&g_write_lock);
     for (k = 0; mem && k < g_nwrites; k++) {
+        if (g_strict && g_writes[k].frame >= 0 && g_writes[k].frame < frame) strict_count(&g_strict_stats.late);
         gxr_hook_hazard(g_writes[k].address, g_writes[k].bytes); /* the frame may still be copying there */
         memcpy(mem + (g_writes[k].address & 0x01FFFFFFu), g_writes[k].data, g_writes[k].bytes);
     }
@@ -722,6 +860,7 @@ static void writes_apply(void)
 void host_frame_end(CpuState* s, unsigned frame)
 {
     ModelFrame* b = &g_mf[g_build];
+    t_guest = 1;
     if (s) g_mem = s->mem;
     plat_xchg64(&g_ended, (int64_t)frame);
     /* a frame with nothing in it leaves the last one standing */
@@ -737,7 +876,7 @@ void host_frame_end(CpuState* s, unsigned frame)
          * this frame's memory and queues what the next is to begin with.
          * The wait is no time of the game's: its clock leaves the span out,
          * or a run at many times real speed would pass seconds a frame */
-        if (g_hold) {
+        if (g_hold && !g_strict) {
             unsigned waited = 0;
             uint64_t from = clock_host_ns();
             while (g_hold && plat_load64(&g_go) < (int64_t)frame && waited < 500u) {
@@ -747,7 +886,18 @@ void host_frame_end(CpuState* s, unsigned frame)
             if (waited) clock_exclude_at(from, clock_host_ns());
         }
     }
-    writes_apply();
+    /* strict: every frame's end is held, shown or not, with no timeout */
+    if (g_strict && g_hold) {
+        int64_t go;
+        uint64_t from = clock_host_ns();
+        strict_count(&g_strict_stats.held);
+        plat_xchg64(&g_held, (int64_t)frame);
+        while (g_hold && (go = plat_load64(&g_go)) < (int64_t)frame) plat_wait64(&g_go, go, 50);
+        plat_xchg64(&g_held, -1);
+        clock_exclude_at(from, clock_host_ns());
+    }
+    pads_latch((long)frame);
+    writes_apply((long)frame);
 }
 
 static void feed_model(CpuState* s, const NinjaVisit* v)

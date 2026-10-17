@@ -32,7 +32,10 @@ extern "C" {
 /* Bumped when anything below changes meaning; the host checks soa_host_abi()
  * against the number it was built with before calling anything else. ABI 24
  * added functions only (the clock and native events, at the end); no layout
- * moved. */
+ * moved. Strict mode (the last section) was added within ABI 24, functions
+ * and a struct only, nothing before it changed: a host that wants it looks its
+ * functions up by name (soa_host_set_strict) and does without when they are
+ * not there. */
 #define SOA_HOST_ABI 24u
 
 /* One controller in the game's own terms, as si.c reads it.
@@ -777,6 +780,54 @@ SOA_HOST_API uint64_t soa_host_guest_ticks(void);
 SOA_HOST_API int soa_host_schedule(uint64_t at, uint64_t period, SoaHostEvent fn, void* user);
 SOA_HOST_API int soa_host_cancel(int id);
 SOA_HOST_API int soa_host_raise(unsigned number);
+
+/* ---- Strict mode: a run that repeats under a host (within ABI 24; docs/CLOCK.md) ----
+ *
+ * The fixed clock makes the guest repeat; what a host does from its own
+ * threads at its own times does not, since it lands wherever the guest
+ * happens to be. soa_host_set_strict(SOA_HOST_STRICT_ON), before
+ * soa_host_start, ties every act of the host to a guest frame boundary:
+ *
+ *   - the clock is fixed (soa_host_set_clock(SOA_HOST_CLOCK_FIXED));
+ *   - the guest waits at the end of every frame, from the first, shown or
+ *     not, until soa_host_go names that frame or a later one: no timeout.
+ *     soa_host_held says which frame it waits at (-1 while it runs).
+ *     soa_host_hold(0) ends the waiting, and with it the guarantee;
+ *   - the pad: what the guest reads in frame F+1 is what was given while it
+ *     was held at F's end -- soa_host_set_pad then means "from the next
+ *     frame" -- or what soa_host_set_pad_at named for F+1 or before. It is
+ *     latched at F's end, after the wait, and the guest reads the latch.
+ *     Port 1 is there, neutral, from the start. A pad given while the guest
+ *     ran is latched at the next frame end and counted late;
+ *   - soa_host_write, soa_host_schedule, soa_host_cancel and soa_host_raise
+ *     from a host thread are taken only while the guest is held (they return
+ *     0 otherwise, counted as refused); from the guest's own thread -- inside
+ *     a replacement or an event -- always. A write is made at the end of the
+ *     frame held, after the pads are latched, as before.
+ *
+ * So a run is a function of what the host did at each held frame, the card,
+ * the disc and the build, not of when it did it. SOA_HOST_STRICT_COUNT_CALLS
+ * also counts every call from the start (as SOA_COUNT_CALLS=1), for
+ * soa_host_call_counts at a held frame. soa_host_set_strict returns 1, or 0
+ * once the run has started (or for an unknown flag). soa_host_strict_stats
+ * says how many frame ends were held, pads latched, pads late and acts
+ * refused: a host that never sees a late pad or a refusal ran repeatably.
+ *
+ * soa_host_set_pad_at works without strict mode too: the pad is put in the
+ * port at the end of the frame before `frame`, for the game's next read. */
+#define SOA_HOST_STRICT_ON 1u
+#define SOA_HOST_STRICT_COUNT_CALLS 2u
+typedef struct {
+    uint64_t held;    /* frame ends the guest waited at */
+    uint64_t pads;    /* pads latched */
+    uint64_t late;    /* pads given while the guest ran or for a frame already begun, and writes queued too late
+                         for the frame held: each took effect a frame end later than asked */
+    uint64_t refused; /* writes, schedules, cancels and raises from a host thread while the guest ran */
+} SoaHostStrictStats;
+SOA_HOST_API int soa_host_set_strict(unsigned flags);
+SOA_HOST_API long soa_host_held(void);
+SOA_HOST_API int soa_host_set_pad_at(long frame, unsigned port, const SoaHostPad* pad);
+SOA_HOST_API void soa_host_strict_stats(SoaHostStrictStats* out);
 
 #ifdef __cplusplus
 }

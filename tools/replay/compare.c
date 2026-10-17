@@ -20,7 +20,9 @@
  * answers part of a function; the stretches are listed), --no-hardware (the
  * candidate is a native replacement and must touch no hardware, even where
  * the game's call did; the hardware the game's calls touched is listed as
- * retired, for the candidate to reproduce some other way). Exit 0 when every
+ * retired, for the candidate to reproduce some other way), --no-pipe (the
+ * candidate is a native drawer and must write nothing to GX's pipe; what the
+ * game's calls drew is listed as retired). Exit 0 when every
  * call replayed agreed, 1 when one did not, 2 for a usage or a read error.
  */
 #include "replay.h"
@@ -31,7 +33,7 @@
 static int usage(void)
 {
     fprintf(stderr, "usage: soa-compare REC [--original] [--candidate NAME]... [--info] [--game PATH] [--only 0xADDR] "
-                    "[--show N] [--stack BYTES] [--with-flagged] [--partial] [--no-hardware] [--calls N]\n       soa-compare --list\n");
+                    "[--show N] [--stack BYTES] [--with-flagged] [--partial] [--no-hardware] [--no-pipe] [--calls N]\n       soa-compare --list\n");
     return 2;
 }
 
@@ -56,6 +58,9 @@ static int one(SoaReplayRun* run, const char* label)
                (unsigned long long)t.games);
     printf("  held %llu bytes and %llu registers in %.3f s (%.0f calls a second)\n", (unsigned long long)t.bytes_held,
            (unsigned long long)t.regs_held, t.seconds, t.seconds > 0 ? (double)t.calls / t.seconds : 0.0);
+    if (t.drew)
+        printf("  %llu of the calls wrote GX's pipe: %llu bytes held byte for byte, and the GX state they left\n",
+               (unsigned long long)t.drew, (unsigned long long)t.pipe_bytes);
     fflush(stdout);
     return t.mismatched || t.unreplayable ? 1 : 0; /* (calls agreeing but for what they left undone are not a failure
                                                       under --partial, which asked for them) */
@@ -82,6 +87,7 @@ int main(int argc, char** argv)
         else if (!strcmp(a, "--with-flagged")) run.with_flagged = 1;
         else if (!strcmp(a, "--partial")) run.partial = 1;
         else if (!strcmp(a, "--no-hardware")) run.no_hardware = 1;
+        else if (!strcmp(a, "--no-pipe")) run.no_pipe = 1;
         else if (!strcmp(a, "--calls") && v) calls_of = strtoll(v, NULL, 0), info = 1, k++;
         else if (!strcmp(a, "--candidate") && v && nnames < 64) names[nnames++] = v, k++;
         else if (!strcmp(a, "--game") && v) run.game = v, k++;

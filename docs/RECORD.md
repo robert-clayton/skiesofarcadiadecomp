@@ -57,7 +57,10 @@ the RAM and hands that guard every other fault.
 - every function the call entered, in order, with r1. The swap's new
   `SWAP_TRACE` bit (`swap_trace`) sends every guard to the recorder while
   the call runs. This list is for a person reading the call and for the
-  self check's strictest test.
+  self check's strictest test;
+- every byte the call wrote to GX's write-gather pipe, in order, and GX's
+  state as `gx.c` keeps it, as the call found it and as it left it (below,
+  "The GX pipe"). Only for a call that wrote the pipe or changed that state.
 
 **What a recording run changes.** Interrupts are held until the recorded
 call returns, unless it polls 4096 times, which means it is waiting for one.
@@ -71,7 +74,8 @@ interface is dropped. A disc read goes into guest memory through the
 kernel's `read`, and a protected page would make that read fail. So from
 that store on, the recorder opens every page and does not keep the call.
 
-**The file** (`runtime/record.h` has the layout). Each page's pre-image is
+**The file** (`runtime/record.h` has the layout; version 2 since the GX
+part, and the replay still reads version 1). Each page's pre-image is
 encoded against that page's last image in the file, and its post image
 against its pre-image. The encoding is runs of bytes the same as the base
 and runs of XOR'd literals. A page that did not change since the file last
@@ -103,6 +107,8 @@ DIR/soa-compare --list                                               the candida
                      "left undone": counted and listed by stretch, not held
     --no-hardware    the candidate is a native replacement of the platform: it must
                      touch no hardware, even where the game's call did (below)
+    --no-pipe        the candidate is a native drawer: it must write nothing to GX's pipe,
+                     and what the game's calls drew is listed as retired (below)
 ```
 
 The exit code is 0 when every replayed call agreed, 1 when one did not, and
@@ -121,8 +127,9 @@ side of the seam (`config/seam.txt`) as a replay needs:
 | a timebase read, a hardware read | the recording's value, in order; anything else ends the call (*not replayable*) |
 | a store to the hardware | held to the recording's stores, in order |
 | `VIGetRetraceCount` | the word in memory the runtime's own reads (the frame's start ends the call) |
+| the GX pipe | every byte kept, and walked as `gx.c` walks it from the GX state the call began with; the bytes and the state they leave are held (below) |
 | the cache calls, `OSReport`, the game's debug print, trace and watch points, the Ninja model notes | nothing, since none of them changes memory |
-| the GX pipe, the decrementer, a trap, a thread's context saved or switched, the scheduler's idle, the audio system's start | the call ends: not replayable |
+| the decrementer, a trap, a thread's context saved or switched, the scheduler's idle, the audio system's start | the call ends: not replayable |
 
 **Memory** has the runtime's shape: the RAM, then the mask's slack. Every
 page is inaccessible except those of the call being replayed. A touch of any
@@ -146,7 +153,9 @@ recordings fast to replay.
   r1+4 (where a callee keeps its return address, in the caller's frame);
 - nothing written to a page the game's call never touched, and no load from
   one;
-- the stores to the hardware the game's call made, in order.
+- the stores to the hardware the game's call made, in order;
+- the bytes the game's call wrote to the GX pipe, byte for byte, and GX's
+  state after them; no pipe byte at all where the game's call wrote none.
 
 The self check holds every register, both halves of every FPR, every byte
 including the stack, and the list of functions called with their r1. Any
@@ -219,6 +228,125 @@ callees' recorded effects instead was rejected. Their writes are mixed into
 the caller's in the page diff and cannot be separated from them. Replaying
 them would also hold a candidate to calling exactly the same callees with
 exactly the same arguments, which is the thing a rewrite is free to change.
+
+## The GX pipe
+
+A call that draws writes GX's commands to the write-gather pipe at
+`0xCC008000`. Before version 2 of the recording such a call was not
+replayable; now the pipe is part of what a call does, as memory is.
+
+**What is kept.** `gx.c` hands the recorder every store to the pipe while a
+recorded call runs (`g_record_pipe`, one more pointer test on the pipe's
+path, and only while a call is being recorded). The call's record keeps the
+bytes in order, and two images of GX's state (`runtime/gx_state.h`'s
+`GxImage`): the CP registers, XF's registers and matrix memory, the BP
+registers, the PI FIFO's three registers, whether the CPU FIFO is the
+display-list one, and how many bytes of a command not yet whole the pipe was
+holding -- as the call found them and as it left them. The waiting bytes
+themselves are kept too, since the call's first bytes may finish a command
+its caller began. The images are encoded as the pages are, against the last
+image in the file, so a call that changed one matrix costs a few dozen
+bytes.
+
+**How the replay holds it.** `replay.c`'s `gx_pipe_write` keeps every byte
+the replayed call writes, and walks them as `gx.c`'s parse does, from the
+image the call began with: CP, XF (direct and indexed, reading memory as
+the game's would) and BP loads, display-list calls followed into memory,
+draws stepped over by the vertex size the CP registers give
+(`gx_vertex_size`, shared with `gx.c`). While the CPU FIFO is the
+display-list one, the bytes go into memory at the PI write pointer instead,
+as `gx.c` puts them, and the PI FIFO's stores move it. So a call that records
+a display list leaves the list in memory and is held there like any other
+store. After the call:
+
+- the bytes are held to the game's, byte for byte;
+- the state the walk left is held to the image `gx.c` left, register by
+  register.
+
+The self check holds the replay's walk to `gx.c` on every recorded call that
+drew, which is what keeps the two the same. A difference names the first
+byte, the command it falls in, and the registers left wrong:
+
+```
+    GX pipe: 11 bytes, the game's 11; the first difference at byte 4, in BP 41 = 000222, the command at byte 0: 23085000001002, the game's 22085000001002
+    GX BP 41: 00000223, the game's 00000222
+```
+
+What the walk does not do is draw: there is no renderer in the replay, so
+an EFB copy into memory (a copy to a texture) is not made again. Record
+drawing functions with `SOA_RENDER=0`, as measured below: no renderer, no
+copies. With the renderer on, its threads' touches of memory while a call is
+recorded are flagged (another thread's touch), and such a call is skipped
+unless `--with-flagged`. The PE's interrupts a
+draw-done or token raises are not modelled: they are held until the call
+returns, as every interrupt is.
+
+**`--no-pipe`** is for a native drawer (soa-ue5's Layer 2): a replacement
+that hands its draws on some other way and writes nothing to the pipe. For a
+candidate under it, a byte to the pipe is a difference ("wrote 11 bytes to
+GX's pipe, where a native drawer must write none"), the game's bytes and GX
+state are not held, and what the game's calls drew is listed as retired:
+
+```
+  --no-pipe: what the game's 12 drawing calls sent down the pipe, retired; the candidate is expected to hand it
+  on some other way: 132 bytes, 0 draws (0 vertices), 12 BP, 12 CP, 0 XF and 0 indexed XF loads,
+  0 display-list calls, 0 other commands
+```
+
+Memory, results and kept registers are held as ever.
+
+**Measured** (2026-10-17, `gen/linux-split`'s game library, a runtime from
+this tree, the opening's pad script, `SOA_CLOCK=fixed SOA_RENDER=0`):
+
+| functions | calls | self check | pipe bytes held |
+|---|---:|---|---:|
+| the strip emitters `802A49F4`, `802A2F84`; GX's `8024E568`, `8024F838`, `8025030C`, `8024DA00` (one call in 37 over 4,000 frames) | 1,800 | 1,800 agree, GX state included | 1,348,713 |
+| GXBeginDisplayList `80251D80`, GXEndDisplayList `80251E48`, the text drawer `801E203C`, the strip emitter `802A52C4` (one in 3) | 800 | 800 agree | 434,509 |
+
+A recorded drawing call took 0.25 to 0.28 ms; the self check ran 60,000 to
+76,000 calls a second. `test_record_pipe.py` holds a synthetic drawer and
+display-list recorder to their recordings, catches a candidate one BP value
+off on one call, and fails the self check of a recording with one pipe byte
+changed.
+
+## Who writes the pipe: `SOA_PIPE_CENSUS`
+
+```
+SOA_PIPE_CENSUS=census.tsv   every translated function's own stores to the pipe, and its calls
+```
+
+Each store to the pipe is told to `swap.c` with the block that made it
+(`s->pc`), which names the function whose entry is the nearest at or below
+it: the bytes are the function's own, not its callees'. Calls are counted
+from the start, as `SOA_COUNT_CALLS` counts them. At the end, the file has a
+line a function that wrote anything, busiest first:
+
+```
+address	pipe_bytes	pipe_stores	calls	translated	bytes_per_call
+```
+
+and stderr the twelve busiest (`[census]`). The total is the `[gx]` line's
+pipe bytes to the byte (821,038,156 of 821,038,156 over the first 4,000
+frames of the opening): no store is missed or counted twice.
+
+**Measured** (2026-10-17; fixed clock, `SOA_RENDER=0`; three runs on card
+copies: the opening to the first battle, blank card, 14,000 frames; walking,
+the `final-boss` save, 12,000 frames; flying, the `secrets` save, 12,000
+frames): 86 functions write the pipe themselves, 84, 81 and 83 in the three
+runs, 16.2 GB between them.
+
+| where | functions | share of the bytes |
+|---|---:|---:|
+| the GX library (`8024B000`-`80256000`) | 70 | 40.7% |
+| Ninja (`80290000`-`802B8000`): the strip emitters `802A49F4` (37.0%), `802A52C4` (19.2%), `802A2F84` (1.0%), the shadow `802AC5E8`, and `80290ED4`, `80291064`, `80299758`, `802A4FC8`, `802AA2F0` | 9 | 58.4% |
+| elsewhere: the text drawer `801E203C`, `80231360`, `80235574`, `8025A1A4`, `8028A0F4`, `8028A418`, `8028A8C0` | 7 | 0.9% |
+
+The busiest of GX's are `8024E568` (6.8%, 218 bytes a call), `8024DA00`
+(4.0%, 12 a call), `80252100`, `8025030C`, `802521D8` and `80252150` (2.3 to
+3.4% each). Three writers ran only in the opening (`8028A0F4`, `8028A418`,
+`802AA2F0`) and two only in flight (`80231360`, `802A4FC8`). The ranges are
+by address, not by library: which of the seven "elsewhere" are SDK code is
+for the reader of each.
 
 ## The candidate interface
 
@@ -344,9 +472,10 @@ replay into one `soa-compare` (g++ -O2) without one Unreal header or shim.
   a run for its calls, not for its frames.
 - **A store to the disc's interface drops the call.** Calls that start disc
   reads are not recorded.
-- **The GX pipe, the decrementer, thread switches** end a replayed call as
-  not replayable. A function that draws, or that sleeps, cannot be replayed
-  yet.
+- **The decrementer, thread switches** end a replayed call as not
+  replayable. A function that sleeps cannot be replayed yet. A function that
+  draws can (above), but an EFB copy it makes is not made again, and the
+  PE's interrupts are not modelled.
 - **The heap in the replay is the recorded call's.** A candidate that
   allocates through the game's own allocator gets the same blocks only if
   it allocates what the game's call allocated.

@@ -396,9 +396,121 @@ static void swap_report(void)
 
 void hle_on_report(void (*fn)(void)); /* hle.c */
 
+/* SOA_PIPE_CENSUS=<path>: every translated function that stores to the
+ * write-gather pipe itself, with the bytes and stores it made there (its own
+ * blocks', not its callees'), and its calls; at the run's end, into the file,
+ * a line each, busiest first, and the busiest on stderr. gx.c tells each
+ * store with the block's address (s->pc), which names the function whose
+ * entry is the nearest at or below it. Counting is on from the start, as
+ * SOA_COUNT_CALLS's. */
+static uint64_t *g_pipe_bytes, *g_pipe_stores;
+static uint64_t g_pipe_outside; /* bytes from a block below the first function */
+static const char* g_census_path;
+static uint32_t g_census_lo, g_census_hi, g_census_at; /* the last function found: [lo, hi) is index at */
+
+int swap_pipe_census_on(void)
+{
+    return g_pipe_bytes != NULL;
+}
+
+void swap_pipe_census_note(uint32_t pc, unsigned size)
+{
+    const SoaGame* g = g_game;
+    uint32_t lo, hi;
+    if (!g || !g_pipe_bytes) return;
+    if (!(pc >= g_census_lo && pc < g_census_hi)) {
+        lo = 0, hi = g->count;
+        while (lo < hi) { /* the last entry at or below pc */
+            uint32_t mid = lo + (hi - lo) / 2;
+            if (g->address[mid] <= pc) lo = mid + 1;
+            else hi = mid;
+        }
+        if (!lo) {
+            g_pipe_outside += size;
+            return;
+        }
+        g_census_at = lo - 1;
+        g_census_lo = g->address[g_census_at];
+        g_census_hi = lo < g->count ? g->address[lo] : 0xFFFFFFFFu;
+    }
+    g_pipe_bytes[g_census_at] += size;
+    g_pipe_stores[g_census_at]++;
+}
+
+typedef struct {
+    uint32_t i;
+    uint64_t bytes;
+} CensusRow;
+
+static int census_cmp(const void* a, const void* b)
+{
+    uint64_t x = ((const CensusRow*)a)->bytes, y = ((const CensusRow*)b)->bytes;
+    if (x != y) return x < y ? 1 : -1;
+    return ((const CensusRow*)a)->i < ((const CensusRow*)b)->i ? -1 : 1;
+}
+
+static void census_report(void)
+{
+    const SoaGame* g = g_game;
+    CensusRow* rows;
+    unsigned n = 0, k, i;
+    uint64_t total = 0, stores = 0;
+    FILE* f;
+    if (!g || !g_pipe_bytes) return;
+    rows = (CensusRow*)malloc(g->count * sizeof *rows);
+    if (!rows) return;
+    for (i = 0; i < g->count; i++)
+        if (g_pipe_bytes[i]) {
+            rows[n].i = i, rows[n].bytes = g_pipe_bytes[i], n++;
+            total += g_pipe_bytes[i], stores += g_pipe_stores[i];
+        }
+    qsort(rows, n, sizeof *rows, census_cmp);
+    f = fopen(g_census_path, "w");
+    if (!f) fprintf(stderr, "[census] cannot write %s\n", g_census_path);
+    else {
+        fprintf(f, "address\tpipe_bytes\tpipe_stores\tcalls\ttranslated\tbytes_per_call\n");
+        for (k = 0; k < n; k++) {
+            i = rows[k].i;
+            fprintf(f, "%08X\t%llu\t%llu\t%llu\t%llu\t%.1f\n", g->address[i], (unsigned long long)g_pipe_bytes[i],
+                    (unsigned long long)g_pipe_stores[i], (unsigned long long)g_calls[i],
+                    (unsigned long long)g_translated[i], g_calls[i] ? (double)g_pipe_bytes[i] / (double)g_calls[i] : 0.0);
+        }
+        fclose(f);
+    }
+    fprintf(stderr, "[census] %u functions wrote %llu bytes in %llu stores to the gather pipe themselves%s%s; the busiest:\n", n,
+            (unsigned long long)total, (unsigned long long)stores, f ? "; every one in " : "", f ? g_census_path : "");
+    for (k = 0; k < n && k < 12; k++) {
+        i = rows[k].i;
+        fprintf(stderr, "[census]   %08X  %llu bytes (%.1f%%) in %llu stores, %llu calls\n", g->address[i],
+                (unsigned long long)g_pipe_bytes[i], total ? 100.0 * (double)g_pipe_bytes[i] / (double)total : 0.0,
+                (unsigned long long)g_pipe_stores[i], (unsigned long long)g_calls[i]);
+    }
+    if (g_pipe_outside)
+        fprintf(stderr, "[census] and %llu bytes from code below the first function\n", (unsigned long long)g_pipe_outside);
+    free(rows);
+}
+
 void swap_env(void)
 {
     const char* e = getenv("SOA_COUNT_CALLS");
+    const char* census = getenv("SOA_PIPE_CENSUS");
+    if (census && *census && strcmp(census, "0") != 0) {
+        const SoaGame* g;
+        swap_count(1);
+        plat_lock(&g_lock);
+        g = ready_locked();
+        plat_unlock(&g_lock);
+        if (!g) fprintf(stderr, "[census] SOA_PIPE_CENSUS: this build has no swap table; nothing is counted\n");
+        else {
+            g_pipe_stores = (uint64_t*)calloc(g->count, sizeof *g_pipe_stores);
+            g_pipe_bytes = g_pipe_stores ? (uint64_t*)calloc(g->count, sizeof *g_pipe_bytes) : NULL;
+            if (g_pipe_bytes) {
+                g_census_path = census;
+                hle_on_report(census_report);
+                fprintf(stderr, "[census] the gather pipe's writers, by function, into %s (SOA_PIPE_CENSUS)\n", census);
+            }
+        }
+    }
     if (!e || !*e || !strcmp(e, "0")) return;
     g_count_path = e;
     swap_count(1);

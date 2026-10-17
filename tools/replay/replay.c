@@ -15,10 +15,14 @@
  *   stores are counted: either is a difference; the recording's timebase
  *   reads are given in their own order, the hardware's skipped)
  *   VIGetRetraceCount                the word in memory the runtime's reads
+ *   the GX pipe                      kept, byte for byte, and walked as gx.c
+ *                                    walks it from the GX state the call
+ *                                    began with (gx_state.h): the bytes and
+ *                                    the state it leaves are held
  *   the cache calls, OSReport, the game's debug print, the trace and watch
  *   points, the Ninja model notes    nothing, as they do nothing to memory
- *   the GX pipe, the decrementer, a trap, a thread's context saved or
- *   switched, the scheduler's idle, the audio system's start
+ *   the decrementer, a trap, a thread's context saved or switched, the
+ *   scheduler's idle, the audio system's start
  *                                    the call is ended there: unreplayable
  *
  * Memory is the runtime's shape (the RAM, then the mask's slack), all of it
@@ -30,6 +34,7 @@
 #include "replay.h"
 #include "cpu.h"
 #include "record.h"
+#include "gx_state.h"
 #include "soa_game.h"
 #include "swap.h"
 #include <dlfcn.h>
@@ -100,6 +105,19 @@ static uint32_t g_hw_reads, g_hw_stores, g_hw_ea; /* what this call's candidate 
 static uint64_t g_hw_v;
 static int g_hw_read_stop;    /* a hardware read ended the call (no_hardware) */
 
+/* GX, as gx.c keeps it, for a call whose recording has the GX part: the
+ * image it began with, the bytes of a command waiting, walked on as the call
+ * writes the pipe. g_rp is every byte the call wrote, held to the game's. */
+static int g_gx_on;
+static int g_pipe_kept = 1; /* 0: a version 1 recording, which kept no pipe bytes */
+static int g_no_pipe; /* run->no_pipe, for a candidate */
+static GxImage g_gm;
+static uint8_t g_gm_pipe[GX_PIPE_CAP];
+static size_t g_gm_len;
+static uint64_t g_gm_unknown;
+static uint8_t* g_rp;
+static size_t g_rp_n, g_rp_cap;
+
 static int g_trace;           /* the entries told, into g_called */
 static RecCallee* g_called;
 static uint32_t g_ncalled, g_called_cap;
@@ -125,6 +143,11 @@ static void stop(const char* why, uint32_t pc)
     siglongjmp(g_jmp, 1);
 }
 
+static uint32_t be32_of(const uint8_t* p)
+{
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
 /* ---- the runtime's side of the seam ---- */
 
 EXPORT uint32_t g_watch_addr, g_watch_len;
@@ -139,16 +162,18 @@ static jmp_buf g_savepoint;
 EXPORT jmp_buf* guest_savepoint(CpuState* s) { (void)s; return &g_savepoint; }
 EXPORT void guest_resumed(CpuState* s) { stop("a thread resumed", s->pc); }
 
+static void gm_pi_store(CpuState* s, uint32_t ea, uint64_t v);
+
 /* A store to the hardware: the next of the recording's accesses, or a difference. */
 static void store(CpuState* s, uint32_t kind, uint32_t ea, uint64_t v)
 {
     const RecInput* in = g_input_at < g_ninputs ? &g_inputs[g_input_at] : NULL;
-    (void)s, (void)kind;
     if (g_nohw) { /* a native replacement stores to no hardware: counted, and dropped */
         if (!g_hw_reads && !g_hw_stores) g_hw_ea = ea, g_hw_v = v;
         g_hw_stores++;
         return;
     }
+    if (kind >> 8 == 4) gm_pi_store(s, ea, v);
     if (in && in->kind == kind && in->ea == ea) {
         g_input_at++;
         if (in->value == v) return;
@@ -189,7 +214,92 @@ MMIO(8, uint8_t)
 MMIO(16, uint16_t)
 MMIO(32, uint32_t)
 MMIO(64, uint64_t)
-EXPORT void gx_pipe_write(CpuState* s, unsigned size, uint64_t v) { (void)size, (void)v; stop("the GX pipe written", s->pc); }
+/* ---- GX: the pipe's bytes walked as gx.c's parse walks them ----
+ * What the parse does to the state the image holds, and nothing else: no
+ * drawing, no interrupt, no capture. gx_command_bytes (gx_state.h) is the
+ * length rule both share; the effects below are gx.c's parse's, and the self
+ * check, which holds the image the walk leaves to the one gx.c left, is what
+ * keeps the two the same. */
+static size_t gm_parse(CpuState* s, const uint8_t* p, size_t len, int in_list)
+{
+    size_t off = 0;
+    while (off < len) {
+        uint8_t op = p[off];
+        size_t need = gx_command_bytes(p + off, len - off, g_gm.cp);
+        if (!need) break; /* not whole yet */
+        if (op == 0x08) g_gm.cp[p[off + 1]] = be32_of(p + off + 2);
+        else if (op == 0x10) {
+            uint32_t count = ((uint32_t)p[off + 1] << 8 | p[off + 2]) + 1u, addr = (uint32_t)p[off + 3] << 8 | p[off + 4], i;
+            for (i = 0; i < count; i++)
+                if (addr + i < 0x1100) g_gm.xf[addr + i] = be32_of(p + off + 5 + 4 * i);
+        } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) {
+            uint32_t index = (uint32_t)p[off + 1] << 8 | p[off + 2], v = (uint32_t)p[off + 3] << 8 | p[off + 4];
+            uint32_t count = (v >> 12) + 1, addr = v & 0xFFF, array = 12 + ((op - 0x20u) >> 3), i;
+            uint32_t src = (g_gm.cp[0xA0 + array] & 0x1FFFFFFFu) + index * (g_gm.cp[0xB0 + array] & 0xFFu);
+            if (count <= MEM1_SIZE / 4 && (src & MEM_MASK) <= MEM1_SIZE - 4 * count)
+                for (i = 0; i < count; i++)
+                    if (addr + i < 0x1100) g_gm.xf[addr + i] = mem_r32(s, (src | 0x80000000u) + 4 * i);
+        } else if (op == 0x40) {
+            uint32_t addr = be32_of(p + off + 1), size = be32_of(p + off + 5);
+            if (!in_list && size <= MEM1_SIZE && (addr & MEM_MASK) <= MEM1_SIZE - size)
+                gm_parse(s, mem_ptr(s, addr), size, 1);
+        } else if (op == 0x61) {
+            uint32_t v = be32_of(p + off + 1);
+            g_gm.bp[v >> 24] = v & 0xFFFFFFu;
+        } else if (!(op == 0x00 || op == 0x48 || (op >= 0x80 && op < 0xC0)))
+            g_gm_unknown++;
+        off += need;
+    }
+    return off;
+}
+
+EXPORT void gx_pipe_write(CpuState* s, unsigned size, uint64_t v)
+{
+    unsigned i;
+    if (!g_pipe_kept) stop("the GX pipe written (a version 1 recording keeps no pipe bytes)", s->pc);
+    if (g_rp_n + size > g_rp_cap) {
+        size_t cap = g_rp_cap ? g_rp_cap * 2 : 1u << 16;
+        uint8_t* b;
+        while (cap < g_rp_n + size) cap *= 2;
+        b = (uint8_t*)realloc(g_rp, cap);
+        if (!b) stop("out of memory for the pipe's bytes", s->pc);
+        g_rp = b;
+        g_rp_cap = cap;
+    }
+    for (i = 0; i < size; i++) g_rp[g_rp_n++] = (uint8_t)(v >> (8 * (size - 1 - i)));
+    if (!g_gx_on) return;
+    if (g_gm.dl_rec) { /* gx.c's dl_record: into guest memory at the PI write pointer */
+        uint32_t base = g_gm.pi[0] & 0x03FFFFFFu, end = (g_gm.pi[1] & 0x03FFFFFFu) + 4u;
+        for (i = 0; i < size; i++) {
+            uint32_t w = g_gm.pi[2] & 0x03FFFFFFu;
+            if (w >= end) {
+                g_gm.pi[2] |= GX_PI_WRAP;
+                w = base;
+            }
+            if (w < MEM1_SIZE) *mem_ptr(s, 0x80000000u | w) = (uint8_t)(v >> (8 * (size - 1 - i)));
+            g_gm.pi[2] = (g_gm.pi[2] & GX_PI_WRAP) | (w + 1u);
+        }
+        return;
+    }
+    if (g_gm_len + size > GX_PIPE_CAP) g_gm_len = 0; /* gx.c: a command that is not parsing */
+    for (i = 0; i < size; i++) g_gm_pipe[g_gm_len++] = (uint8_t)(v >> (8 * (size - 1 - i)));
+    {
+        size_t done = gm_parse(s, g_gm_pipe, g_gm_len, 0);
+        if (done) {
+            memmove(g_gm_pipe, g_gm_pipe + done, g_gm_len - done);
+            g_gm_len -= done;
+        }
+    }
+}
+
+/* gx.c's gx_write of the PI FIFO's registers, and its dl_bracket */
+static void gm_pi_store(CpuState* s, uint32_t ea, uint64_t v)
+{
+    if (!g_gx_on || ea < GX_PI_FIFO_BASE || ea > GX_PI_FIFO_WPTR || (ea & 3)) return;
+    g_gm.pi[(ea - GX_PI_FIFO_BASE) >> 2] = (uint32_t)v & 0x1FFFFFFFu;
+    if (ea == GX_PI_FIFO_BASE)
+        g_gm.dl_rec = s->gpr[13] && mem_r32(s, s->gpr[13] + (uint32_t)GX_CPU_FIFO_SDA) == GX_DL_FIFO;
+}
 
 /* config/hle.txt's bindings in a split build */
 EXPORT void fn_80232B90(CpuState* s) { stop("__OSInitAudioSystem", s->pc); }
@@ -428,6 +538,7 @@ typedef struct {
     RecFileHead head;
     uint8_t* shadow; /* each page's last image, as the file's decoding needs it */
     uint8_t* zero;
+    GxImage gx_shadow; /* the last GX image in the file */
 } Rec;
 
 static int rec_open(Rec* r, const char* path)
@@ -451,7 +562,7 @@ static int rec_open(Rec* r, const char* path)
     fclose(f);
     r->size = (size_t)n;
     memcpy(&r->head, r->data, sizeof r->head);
-    if (memcmp(r->head.magic, REC_MAGIC, 8) || r->head.version != REC_VERSION || r->head.mem_bytes != MEM1_SIZE ||
+    if (memcmp(r->head.magic, REC_MAGIC, 8) || r->head.version < 1u || r->head.version > REC_VERSION || r->head.mem_bytes != MEM1_SIZE ||
         !r->head.page_size || MEM1_SIZE % r->head.page_size) {
         fprintf(stderr, "[replay] %s: not a recording this replay reads (version %u)\n", path, r->head.version);
         return 0;
@@ -477,6 +588,9 @@ typedef struct {
     uint8_t* buf;
     const RecInput* inputs;
     const RecCallee* callees;
+    const uint8_t* pipe; /* the GX part (head.gx): the bytes the call wrote to the pipe */
+    const uint8_t* left; /* the bytes of a command waiting at its entry */
+    GxImage gx_pre, gx_post;
     uint32_t cap;
 } Call;
 
@@ -485,8 +599,10 @@ static int rec_next(Rec* r, size_t* at, Call* c)
     const uint8_t* p;
     uint32_t k, ps = r->head.page_size;
     size_t o;
-    if (*at + sizeof c->head > r->size) return 0;
-    memcpy(&c->head, r->data + *at, sizeof c->head);
+    size_t head = r->head.version >= 2u ? sizeof c->head : REC_CALL_HEAD_V1;
+    if (*at + head > r->size) return 0;
+    memset(&c->head, 0, sizeof c->head);
+    memcpy(&c->head, r->data + *at, head);
     if (c->head.magic != REC_CALL_MAGIC || *at + c->head.bytes > r->size) return 0;
     if (c->cap < c->head.pages) {
         c->cap = c->head.pages + 64;
@@ -500,7 +616,7 @@ static int rec_next(Rec* r, size_t* at, Call* c)
         c->buf = (uint8_t*)malloc((size_t)c->cap * ps);
         if (!c->page || !c->flags || !c->post_n || !c->here || !c->pre || !c->post || !c->buf) return 0;
     }
-    o = *at + sizeof c->head;
+    o = *at + head;
     for (k = 0; k < c->head.pages; k++) {
         RecPage pg;
         uint8_t *buf = c->buf + (size_t)k * ps, *shadow;
@@ -530,6 +646,22 @@ static int rec_next(Rec* r, size_t* at, Call* c)
     o += c->head.inputs * sizeof(RecInput);
     c->callees = (const RecCallee*)(r->data + o);
     o += c->head.callees * sizeof(RecCallee);
+    c->pipe = c->left = NULL;
+    if (c->head.gx) {
+        const uint32_t img = (uint32_t)sizeof(GxImage);
+        if (o + (size_t)c->head.pipe_bytes + c->head.pipe_left + c->head.gx_pre_bytes + c->head.gx_post_bytes > *at + c->head.bytes ||
+            c->head.pipe_left > GX_PIPE_CAP)
+            return 0;
+        c->pipe = r->data + o;
+        o += c->head.pipe_bytes;
+        c->left = r->data + o;
+        o += c->head.pipe_left;
+        if (!rec_decode((uint8_t*)&c->gx_pre, (const uint8_t*)&r->gx_shadow, img, r->data + o, c->head.gx_pre_bytes)) return 0;
+        o += c->head.gx_pre_bytes;
+        if (!rec_decode((uint8_t*)&c->gx_post, (const uint8_t*)&c->gx_pre, img, r->data + o, c->head.gx_post_bytes)) return 0;
+        o += c->head.gx_post_bytes;
+        r->gx_shadow = c->gx_post;
+    }
     if (o != *at + c->head.bytes) return 0;
     *at = o;
     return 1;
@@ -595,7 +727,7 @@ static int setup(const char* game, uint32_t page)
 
 typedef struct {
     int show, shown, lines, partial, undone;
-    uint64_t bytes, regs, undone_bytes;
+    uint64_t bytes, regs, undone_bytes, pipe_bytes;
 } Hold;
 
 /* Where what candidates left undone is, by 32-byte block: an open table. */
@@ -735,6 +867,105 @@ static void tell_retired(uint64_t calls)
 }
 
 #define LINES_A_CALL 24
+
+/* ---- GX: what a pipe's bytes say, for the reader and for --no-pipe ---- */
+
+/* The command at byte `at` of the call's bytes (the waiting bytes before
+ * them), told in out. CP loads are followed for the draws' sizes. */
+static void describe(const Call* c, size_t at, char* out, size_t cap)
+{
+    size_t total = (size_t)c->head.pipe_left + c->head.pipe_bytes, pos = 0, target = c->head.pipe_left + at;
+    uint32_t cp[0x100];
+    uint8_t* b = (uint8_t*)malloc(total ? total : 1);
+    snprintf(out, cap, "past the game's last command");
+    if (!b) return;
+    memcpy(b, c->left, c->head.pipe_left);
+    memcpy(b + c->head.pipe_left, c->pipe, c->head.pipe_bytes);
+    memcpy(cp, c->gx_pre.cp, sizeof cp);
+    while (pos < total) {
+        const uint8_t* p = b + pos;
+        size_t need = gx_command_bytes(p, total - pos, cp);
+        long from = (long)pos - (long)c->head.pipe_left;
+        if (!need) {
+            snprintf(out, cap, "in a command %02X begun at byte %ld and not whole when the call returned", p[0], from);
+            break;
+        }
+        if (pos + need > target) {
+            uint8_t op = p[0];
+            if (op == 0x61) snprintf(out, cap, "in BP %02X = %06X, the command at byte %ld", p[1], be32_of(p + 1) & 0xFFFFFFu, from);
+            else if (op == 0x08) snprintf(out, cap, "in CP %02X = %08X, the command at byte %ld", p[1], be32_of(p + 2), from);
+            else if (op == 0x10)
+                snprintf(out, cap, "in XF %04X (%u words), the command at byte %ld", (unsigned)p[3] << 8 | p[4],
+                         ((unsigned)p[1] << 8 | p[2]) + 1u, from);
+            else if (op >= 0x80 && op < 0xC0)
+                snprintf(out, cap, "in a draw (primitive %02X, format %u, %u vertices of %u bytes), the command at byte %ld", op & 0xF8u,
+                         op & 7u, (unsigned)p[1] << 8 | p[2], gx_vertex_size(cp, op & 7), from);
+            else if (op == 0x40) snprintf(out, cap, "in a display-list call (%08X, %u bytes), the command at byte %ld", be32_of(p + 1), be32_of(p + 5), from);
+            else if (op >= 0x20 && op <= 0x38) snprintf(out, cap, "in an indexed XF load (%02X), the command at byte %ld", op, from);
+            else snprintf(out, cap, "in command %02X at byte %ld", op, from);
+            break;
+        }
+        if (p[0] == 0x08) cp[p[1]] = be32_of(p + 2);
+        pos += need;
+    }
+    free(b);
+}
+
+/* What the game's calls sent down the pipe, for a native drawer to hand on
+ * some other way (--no-pipe): counted by command, CP loads followed. */
+static struct {
+    uint64_t calls, bytes, draws, vertices, bp, cp, xf, xf_indexed, lists, other;
+} g_drawn;
+
+static void drawn_note(const Call* c)
+{
+    size_t total = (size_t)c->head.pipe_left + c->head.pipe_bytes, pos;
+    uint32_t cp[0x100];
+    uint8_t* b;
+    if (!c->head.pipe_bytes) return;
+    b = (uint8_t*)malloc(total);
+    if (!b) return;
+    memcpy(b, c->left, c->head.pipe_left);
+    memcpy(b + c->head.pipe_left, c->pipe, c->head.pipe_bytes);
+    memcpy(cp, c->gx_pre.cp, sizeof cp);
+    g_drawn.calls++;
+    g_drawn.bytes += c->head.pipe_bytes;
+    /* from the call's first whole command: what was waiting is the caller's */
+    pos = 0;
+    while (pos < total) {
+        const uint8_t* p = b + pos;
+        size_t need = gx_command_bytes(p, total - pos, cp);
+        if (!need) break;
+        if (pos + need > c->head.pipe_left) {
+            uint8_t op = p[0];
+            if (op == 0x61) g_drawn.bp++;
+            else if (op == 0x08) g_drawn.cp++, cp[p[1]] = be32_of(p + 2);
+            else if (op == 0x10) g_drawn.xf++;
+            else if (op >= 0x20 && op <= 0x38 && !(op & 7)) g_drawn.xf_indexed++;
+            else if (op == 0x40) g_drawn.lists++;
+            else if (op >= 0x80 && op < 0xC0) g_drawn.draws++, g_drawn.vertices += (unsigned)p[1] << 8 | p[2];
+            else if (op != 0x00 && op != 0x48) g_drawn.other++;
+        } else if (p[0] == 0x08)
+            cp[p[1]] = be32_of(p + 2);
+        pos += need;
+    }
+    free(b);
+}
+
+static void tell_drawn(void)
+{
+    if (!g_drawn.calls) {
+        printf("  --no-pipe: the game's calls wrote nothing to the pipe; nothing is retired\n");
+        return;
+    }
+    printf("  --no-pipe: what the game's %llu drawing calls sent down the pipe, retired; the candidate is expected to hand it\n"
+           "  on some other way: %llu bytes, %llu draws (%llu vertices), %llu BP, %llu CP, %llu XF and %llu indexed XF loads,\n"
+           "  %llu display-list calls, %llu other commands\n",
+           (unsigned long long)g_drawn.calls, (unsigned long long)g_drawn.bytes, (unsigned long long)g_drawn.draws,
+           (unsigned long long)g_drawn.vertices, (unsigned long long)g_drawn.bp, (unsigned long long)g_drawn.cp,
+           (unsigned long long)g_drawn.xf, (unsigned long long)g_drawn.xf_indexed, (unsigned long long)g_drawn.lists,
+           (unsigned long long)g_drawn.other);
+}
 
 static int bits_eq(double a, double b)
 {
@@ -902,6 +1133,56 @@ static int held(Hold* h, const Call* c, int original, uint32_t results, uint32_t
              g_outside_storing == 1 ? "a store to" : g_outside_storing == 0 ? "a load from" : "a touch of",
              0x80000000u + g_outside_at, g_outside_n);
     }
+    /* GX: the bytes the call wrote to the pipe, and the state they leave */
+    if (g_no_pipe) {
+        if (g_rp_n) {
+            off++;
+            tell(h, &said, c, "wrote %zu bytes to GX's pipe, where a native drawer must write none", g_rp_n);
+        }
+    } else if (!c->head.gx) {
+        if (g_rp_n) {
+            off++;
+            tell(h, &said, c, "wrote %zu bytes to GX's pipe, where the game's call wrote none", g_rp_n);
+        }
+    } else {
+        size_t i, n = g_rp_n < c->head.pipe_bytes ? g_rp_n : c->head.pipe_bytes;
+        for (i = 0; i < n && g_rp[i] == c->pipe[i]; i++) {}
+        h->pipe_bytes += c->head.pipe_bytes;
+        if (i < n || g_rp_n != c->head.pipe_bytes) {
+            char what[160], a[40], b[40];
+            uint32_t q, m = 0;
+            off++;
+            describe(c, i, what, sizeof what);
+            for (q = 0; q < 12 && i + q < g_rp_n; q++) sprintf(a + 2 * q, "%02X", g_rp[i + q]), m = q + 1;
+            a[2 * m] = 0;
+            for (m = 0, q = 0; q < 12 && i + q < c->head.pipe_bytes; q++) sprintf(b + 2 * q, "%02X", c->pipe[i + q]), m = q + 1;
+            b[2 * m] = 0;
+            tell(h, &said, c, "GX pipe: %zu bytes, the game's %u; the first difference at byte %zu, %s: %s, the game's %s",
+                 g_rp_n, c->head.pipe_bytes, i, what, a[0] ? a : "(nothing)", b[0] ? b : "(nothing)");
+        }
+        {
+            static const struct { const char* name; size_t at, n; } part[] = {
+                {"CP", offsetof(GxImage, cp), 0x100}, {"XF", offsetof(GxImage, xf), 0x1100}, {"BP", offsetof(GxImage, bp), 0x100},
+                {"PI FIFO", offsetof(GxImage, pi), 3}, {"display-list recording", offsetof(GxImage, dl_rec), 1},
+                {"bytes waiting", offsetof(GxImage, pipe_len), 1},
+            };
+            GxImage now = g_gm;
+            unsigned k2, told = 0;
+            now.pipe_len = (uint32_t)g_gm_len;
+            memset(now.reserved, 0, sizeof now.reserved);
+            for (k2 = 0; k2 < sizeof part / sizeof part[0]; k2++) {
+                const uint32_t* x = (const uint32_t*)((const uint8_t*)&now + part[k2].at);
+                const uint32_t* y = (const uint32_t*)((const uint8_t*)&c->gx_post + part[k2].at);
+                size_t r;
+                for (r = 0; r < part[k2].n; r++)
+                    if (x[r] != y[r]) {
+                        off++;
+                        if (told++ < 8) tell(h, &said, c, "GX %s %zX: %08X, the game's %08X", part[k2].name, r, x[r], y[r]);
+                    }
+            }
+            if (told > 8) tell(h, &said, c, "GX: %u registers differ in all", told);
+        }
+    }
     /* the translation calls what the game's did, in order */
     if (original) {
         int same = g_ncalled == c->head.callees;
@@ -1003,6 +1284,7 @@ EXPORT int soa_replay(const SoaReplayRun* run, SoaReplayTotals* t)
     g_nundone = 0;
     if (!rec_open(&r, run->recording)) return 0;
     if (!setup(run->game, r.head.page_size)) return 0;
+    g_pipe_kept = r.head.version >= 2u;
     memset(g_valid, 0, RESERVE / g_page + 1); /* a replay before this one left memory as its own last call did */
     if (r.head.functions != g_game->count || strncmp(r.head.game, g_game->record ? g_game->record : "", sizeof r.head.game - 1))
         fprintf(stderr, "[replay] the recording was made by another build (%u functions, \"%s\"); this game library has %u (\"%s\")\n",
@@ -1010,6 +1292,8 @@ EXPORT int soa_replay(const SoaReplayRun* run, SoaReplayTotals* t)
     g_cand = run->candidate;
     g_cand_index = g_cand ? index_of(g_cand->address) : -1;
     g_nohw = run->no_hardware && !run->original && g_cand;
+    g_no_pipe = run->no_pipe && !run->original && g_cand;
+    memset(&g_drawn, 0, sizeof g_drawn);
     g_nretired = g_retired_lost = 0;
     g_retired_call = 0;
     if (g_cand && g_cand_index < 0) {
@@ -1054,6 +1338,16 @@ EXPORT int soa_replay(const SoaReplayRun* run, SoaReplayTotals* t)
         }
         g_seen = c.head.seen;
         g_frame = c.head.frame;
+        g_rp_n = 0;
+        g_gx_on = c.head.gx && !g_no_pipe;
+        if (g_gx_on) {
+            g_gm = c.gx_pre;
+            memcpy(g_gm_pipe, c.left, c.head.pipe_left);
+            g_gm_len = c.head.pipe_left;
+            g_gm_unknown = 0;
+        }
+        if (g_no_pipe && c.head.gx) drawn_note(&c);
+        if (c.head.pipe_bytes) t->drew++;
         g_ncalled = 0;
         g_trace = 1;
         g_root = 1;
@@ -1102,9 +1396,13 @@ EXPORT int soa_replay(const SoaReplayRun* run, SoaReplayTotals* t)
     t->answered = g_answered, t->games = g_games, t->both = g_both, t->live = g_live;
     t->bytes_held = h.bytes, t->regs_held = h.regs;
     t->undone_bytes = h.undone_bytes;
+    t->pipe_bytes = h.pipe_bytes;
     if (h.partial) tell_undone();
     if (g_nohw) tell_retired(t->calls);
+    if (g_no_pipe) tell_drawn();
     g_nohw = 0;
+    g_no_pipe = 0;
+    g_gx_on = 0;
     for (k = 0; k < nreasons; k++)
         printf("  not replayable: %llu calls met %s\n", (unsigned long long)reason_n[k], reasons[k]);
     free(c.page), free(c.flags), free(c.post_n), free(c.here), free((void*)c.pre), free((void*)c.post), free(c.buf);
@@ -1121,6 +1419,7 @@ EXPORT int soa_replay_info(const char* recording, uint32_t only, int64_t seen)
         uint32_t address;
         uint64_t calls, flagged, pages, written, inputs, callees, bytes;
         uint64_t irq, slept, foreign, many;
+        uint64_t drew, pipe;
     } fn[64];
     unsigned nfn = 0, k;
     memset(&c, 0, sizeof c);
@@ -1155,6 +1454,8 @@ EXPORT int soa_replay_info(const char* recording, uint32_t only, int64_t seen)
         fn[k].inputs += c.head.inputs;
         fn[k].callees += c.head.callees;
         fn[k].bytes += at - was;
+        fn[k].drew += c.head.pipe_bytes != 0;
+        fn[k].pipe += c.head.pipe_bytes;
     }
     if (at != r.size) printf("  the file ends part-way into a call at byte %zu (a run cut short): the calls before it are read\n", at);
     for (k = 0; k < nfn; k++)
@@ -1166,6 +1467,10 @@ EXPORT int soa_replay_info(const char* recording, uint32_t only, int64_t seen)
                (unsigned long long)fn[k].many,
                (double)fn[k].pages / fn[k].calls, (double)fn[k].written / fn[k].calls, (double)fn[k].inputs / fn[k].calls,
                (double)fn[k].callees / fn[k].calls, (double)fn[k].bytes / fn[k].calls);
+    for (k = 0; k < nfn; k++)
+        if (fn[k].drew)
+            printf("  %08X: %llu calls wrote GX's pipe, %.1f bytes a call (of those that did)\n", fn[k].address,
+                   (unsigned long long)fn[k].drew, (double)fn[k].pipe / (double)fn[k].drew);
     free(c.page), free(c.flags), free(c.post_n), free(c.here), free((void*)c.pre), free((void*)c.post), free(c.buf);
     free(r.data), free(r.shadow), free(r.zero);
     return 1;

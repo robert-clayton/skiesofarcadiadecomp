@@ -104,6 +104,10 @@ typedef struct {
                                   even where the game's call did (its reads end the call, its stores are
                                   counted; either is a difference); the hardware the game's calls touched is
                                   listed as retired, for the candidate to have reproduced some other way */
+    int no_pipe;               /* 1: the candidate is a native drawer, held to writing nothing to GX's pipe; the
+                                  game's pipe bytes and GX state are not held, and what they drew is listed as
+                                  retired (draws, vertices, register loads), for the candidate to have handed
+                                  on some other way */
     int show;                  /* mismatching calls told in full; the rest counted */
     int quiet;
 } SoaReplayRun;
@@ -114,6 +118,7 @@ typedef struct {
     uint64_t hw_touched;            /* with run->no_hardware: calls in which the candidate touched the hardware */
     uint64_t answered, games, both, live; /* a candidate's answers */
     uint64_t bytes_held, regs_held;
+    uint64_t drew, pipe_bytes;      /* replayed calls the recording has pipe bytes for, and those bytes */
     double seconds;
 } SoaReplayTotals;
 

@@ -15,7 +15,12 @@
  *   that are not after as they were (its output);
  *   the timebase and hardware reads it made, in order, with the values
  *   they read;
- *   the entry of every function it called, in order, with r1 (SWAP_TRACE).
+ *   the entry of every function it called, in order, with r1 (SWAP_TRACE);
+ *   the bytes it wrote to GX's write-gather pipe, in order, and GX's state
+ *   (gx_state.h's image: CP, XF, BP, the PI FIFO, the bytes of a command
+ *   not yet whole) as it found it and as it left it -- for a call that
+ *   wrote the pipe or changed that state; a replay walks the bytes from the
+ *   image it began with and holds the image it leaves.
  *
  * A call that met what a replay cannot give back is kept with a flag that
  * says so: an interrupt delivered inside it, another guest thread run inside
@@ -45,7 +50,13 @@
  *   RecFileHead
  *   RecCallHead, then its `pages` RecPage, each followed by its pre bytes and
  *   then its post bytes; then `inputs` RecInput, then `callees` RecCallee;
- *   and so on to the end of the file.
+ *   then, when gx is 1 (version 2), the GX part: pipe_bytes bytes the call
+ *   wrote to the pipe, pipe_left bytes of a command the pipe held at its
+ *   entry, the GX image it found (gx_pre_bytes, encoded against the last GX
+ *   image in the file, all zero before the first) and the one it left
+ *   (gx_post_bytes, against the first; 0: as it found it); and so on to the
+ *   end of the file. A version 1 file has no GX part and a head without the
+ *   fields from gx on.
  *
  * A page's bytes are encoded against a base: the pre-image against the
  * page's last image in the file (all zero before its first), the post image
@@ -58,10 +69,11 @@
 #ifndef SOA_RECORD_H
 #define SOA_RECORD_H
 #include "cpu.h"
+#include <stddef.h>
 #include <stdint.h>
 
 #define REC_MAGIC "SOAREC\0\1"
-#define REC_VERSION 1u
+#define REC_VERSION 2u /* 2: the GX part (pipe bytes and GX state); 1 still read */
 #define REC_CALL_MAGIC 0x31435253u /* "SRC1" */
 
 /* A call's flags. */
@@ -114,7 +126,17 @@ typedef struct {
     uint32_t pages, inputs, callees;
     uint32_t named; /* of the pages, how many SOA_RECORD_WITH named (kept whether touched or not) */
     RecRegs in, out;
+    /* version 2 */
+    uint32_t gx;            /* 1: the GX part follows the callees */
+    uint32_t pipe_bytes;    /* the bytes the call wrote to the write-gather pipe */
+    uint32_t pipe_left;     /* the bytes of a command not yet whole that the pipe held at the call's entry */
+    uint32_t gx_pre_bytes;  /* the GX image at entry, encoded */
+    uint32_t gx_post_bytes; /* the GX image at return, encoded against the entry's; 0: the same */
+    uint32_t gx_reserved;
 } RecCallHead;
+
+/* A version 1 call's head: everything before gx. */
+#define REC_CALL_HEAD_V1 offsetof(RecCallHead, gx)
 
 typedef struct {
     uint32_t page;      /* its number: the offset in RAM over page_size */

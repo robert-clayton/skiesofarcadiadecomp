@@ -103,9 +103,10 @@ on their own; `SOA_SEED` still pins them to chosen values.
 **What it does not cover.** Anything a host does from its own thread at its
 own time: pads set by `soa_host_set_pad` from a UI thread, a write with
 `soa_host_write`, an event scheduled from another thread. Those land where
-the guest happens to be. A host that wants repeatable runs does them on the
-guest's thread: at the held frame end (`soa_host_hold`), in a replacement,
-or in an event.
+the guest happens to be. A host that wants repeatable runs turns on strict
+mode (below, "Deterministic runs under a host"), which ties each of them to
+a frame end, or does them on the guest's thread: in a replacement or an
+event.
 
 ## Work at a guest time
 
@@ -305,7 +306,7 @@ call can repeat its state on a different pass. Leaving the volatile
 registers out of the state was tried and is wrong: work in a leaf loop
 keeps its count there, and the opening went to 932 retraces a frame.
 
-## Deterministic runs in Unreal (design only)
+## Deterministic runs under a host (strict mode)
 
 Under `SOA_CLOCK=fixed` the runtime repeats; a run in the editor does not
 (docs/layer1-disc.md in soa-ue5, "Stage 2 in Unreal": 0.13 to 0.52/255 off
@@ -336,27 +337,119 @@ lands wherever the guest happens to be:
   harmless to the picture, but counts compare only from the start
   (`GCountCallsAtStart`).
 
-A deterministic Unreal mode (`soa.Deterministic`, set before the start,
-with `soa_host_set_clock(SOA_HOST_CLOCK_FIXED)`) would need:
+**Strict mode** (`runtime/host.c`, `soa_host.h`'s last section; within host
+ABI 24, functions only) is the runtime's half.
+`soa_host_set_strict(SOA_HOST_STRICT_ON)` before `soa_host_start`:
 
-1. **Lockstep at the frame end:** hold on from before the start, and no
-   timeout (a strict hold in the runtime: `soa_host_hold(2)`, or a timeout of
-   0 meaning none), so guest frame N+1 never starts before Unreal has let
-   frame N go.
-2. **Input at guest frame boundaries:** the pad the guest reads in frame N+1
-   is the one the host set while frame N was held -- latched by the runtime
-   at the frame end (as writes are) rather than read live from the host's
-   slot; `soa_host_set_pad` called only while held, or a new
-   `soa_host_set_pad_at(frame, pad)`. The port present (neutral) from the
-   start, or absent throughout for scripted runs. The live input recorded
-   by guest frame (`SOA_PAD_RECORD`'s format) replays the run.
-3. **Writes, schedules and raised lines only while held** (or from inside
-   replacements and events), so they land at a known frame end.
-4. **Answers that depend only on guest memory** in this mode: none that
-   reads Unreal's camera or time.
-5. Counting from the start, and the checks this file's runs use: frame
-   hashes from `soa_host_frame`'s count, and `soa_host_call_counts` at a
-   held frame.
+1. **Lockstep at every frame end.** The clock is fixed, and the guest waits
+   at the end of every frame from the first -- shown or not, which the old
+   hold skipped -- until `soa_host_go` names that frame or a later one, with
+   no timeout (a futex wait; `soa_host_go` wakes it). `soa_host_held()`
+   gives the frame waited at, or -1 while the guest runs. `soa_host_hold(0)`
+   ends the waiting and the guarantee with it.
+2. **The pad at frame boundaries.** The pad the guest reads in frame F+1 is
+   the one the host gave while F was held (`soa_host_set_pad` then means
+   "from the next frame"), or what `soa_host_set_pad_at(frame, port, pad)`
+   named for F+1 or earlier. It is latched at F's end, after the wait and
+   before the queued writes, and si.c reads the latch, never the host's
+   slot. Port 1 is present and neutral from the start (the same reads as a
+   port absent under a script, so `SOA_PAD` scripts mean what they did).
+   `soa_host_set_pad_at` also works without strict mode.
+3. **Writes, events and lines only while held.** From a host thread,
+   `soa_host_write`, `soa_host_schedule`, `soa_host_cancel` and
+   `soa_host_raise` are taken only while the guest is held; otherwise they
+   return 0 and count as refused. From the guest's own thread (a
+   replacement, an event) they are always taken. A write is made at the held
+   frame's end, as before.
+4. **Counting from the start**: `SOA_HOST_STRICT_COUNT_CALLS` counts every
+   call from the first (`SOA_COUNT_CALLS=1`), for `soa_host_call_counts` at
+   a held frame.
+5. **A host can tell it held up its end**: `soa_host_strict_stats` counts
+   the frame ends held, the pads latched, the pads late (given while the
+   guest ran, or for a frame already begun) and writes made a frame end
+   late, and the acts refused. None late and none refused: the run was a
+   function of what the host did at each held frame alone.
 
-With those, a run in Unreal is a function of the pad record, the card and
-the build, as a headless one is.
+**Measured** (2026-10-17, `tools/strict_host.c` against a host runtime built
+from this tree and `gen/linux-split`'s game library; muted, `SOA_RENDER=1
+SOA_HASH=1`, a fresh copy of the blank card, 4,000 frames of the opening).
+The proof host drives the runtime as the editor does, from threads of its
+own: a tick thread waits for the held frame, sleeps a random while, hashes a
+megabyte of the game's globals (and every 100th frame all of MEM1), and asks
+an input thread for the next frame's pad -- the opening's script, with the
+stick and a trigger swung besides -- which sleeps a random while and calls
+`soa_host_set_pad`; the tick thread sleeps again and lets the frame go. At
+frame 2,000 it schedules a 5 ms event while the guest is held.
+
+| run | host delays | rasterizer threads | wall s |
+|---|---|---|---:|
+| A, strict | up to 0.3 ms each, seed 1 | default | 104 |
+| B, strict | up to 3 ms each, seed 2 | 4 | 114 |
+| C, the same host without strict mode (the old 500 ms hold; the pad set whenever the input thread gets to it) | up to 3 ms, seed 3 | 4 | 79 |
+
+A and B agree on every one of the 4,000 frame hashes (2,888 distinct
+pictures), every per-frame hash of the globals and all 40 of MEM1, every
+call count (1,823 functions), the `[si]` log of every pad change the guest
+read (540), and the 13,397 runs of the event, tick for tick. Both report
+4,000 frame ends held, 3,999 pads latched, none late, none refused. C parts
+from them at frame 2,937, and 1,060 of its 4,000 frames differ from A's.
+The load average was 18 to 33 over the three runs.
+
+To run it: build a host runtime (`recompile.py --cc gcc --split --host`),
+then `gcc -Iruntime tools/strict_host.c -L<out> -l:libsoa_runtime.so
+-Wl,-rpath,<out> -pthread`, and `SOA_FRAMES=4000 SOA_HASH=1 strict_host
+<out>/libsoa_game.so <disc> <root> SEED MAXDELAY_US strict OUT`.
+`test_host_strict.py` checks the same in the suite with the real `host.c`
+and a stand-in guest: every read in frame F+1 sees the pad given while F
+was held, a write made at F is there from F+1, a pad named with
+`soa_host_set_pad_at` comes in on its frame, acts before the start are
+counted late and refused, and two runs with different delays print the same.
+
+### What the plugin must change to use it
+
+All in soa-ue5's `Plugins/SoAHost`; nothing there has changed yet.
+
+1. **`FSoAHostRuntime`**: resolve `soa_host_set_strict`, `soa_host_held`,
+   `soa_host_set_pad_at` and `soa_host_strict_stats` by name
+   (`Export(...)`), as optional: the ABI stays 24 and the check against
+   `SOA_HOST_ABI` is unchanged. A runtime without them has no strict mode.
+2. **A switch read before the start**: `soa.Deterministic` (and
+   `-SoADeterministic`), in `FSoAHostRuntime::Start` before `StartFn`:
+   `soa_host_set_strict(SOA_HOST_STRICT_ON | (GCountCallsAtStart ?
+   SOA_HOST_STRICT_COUNT_CALLS : 0))`; then no `CountCallsFn(1)` after the
+   start (the flag counts from the first call) and no `Hold` calls at all.
+3. **`USoAHostSubsystem::Tick` in that mode**: `F = soa_host_held()`. While F
+   is -1 the guest is between frame ends: show the newest picture and do
+   nothing that reaches the game (no `SendPad`, no `Game.Write`, no
+   schedule). When F >= 0: `Mirror->Update()` (its reads of frame F and its
+   tasks' writes), then `SendPad()` (both `soa_host_set_pad` and the native
+   pad's `SetLive`), then `soa_host_go(F)`, last. Today `SendPad` runs after
+   `Mirror->Update` has let the frame go, which in strict mode would make
+   every pad late. A tick may take more than one held frame (loop while
+   `soa_host_held()` moves on, within a time budget) to keep the game at
+   speed.
+4. **`ASoAMirror::Update` in that mode**: leave `soa.HostHold` alone (no
+   `Hold(bHold)`) and drop its `ON_SCOPE_EXIT` `Go(HeldFrame)`. The
+   subsystem lets the frame go; the frame held may have nothing to show,
+   and the mirror's `HeldFrame` (the last published frame) would never name
+   it.
+5. **The native pad** (`SoAPadHost`'s `SetLive`): called only from step 3,
+   while the guest is held, so its `Read` on the guest's thread in frame F+1
+   sees the pad given at F. No other change.
+6. **Writes from tasks** (`SoACameraBeside`'s `Game.Write(CameraStateAt)`
+   under `soa.CameraBeside 2`, and any other `soa_host_write`): only from
+   inside the held tick. A write at any other time now returns 0 and is
+   counted refused, where before it landed at whichever frame end came
+   next.
+7. **Native answers read guest memory only.** The camera, party, ship and
+   scan rules already do; `soa.CameraLag` changes Unreal's camera, not the
+   game's. Anything that would hand the game Unreal's camera or time stays
+   off in this mode.
+8. **The check**: at the run's end (or any held frame) log
+   `soa_host_strict_stats`; `late` and `refused` must be 0. Frame hashes:
+   `SOA_HASH=1` in the editor's environment, or the subsystem's own hash of
+   `soa_host_frame`'s picture at each held frame. `SOA_PAD_RECORD` writes
+   down the pad the guest read, by guest frame, so a run in the editor can
+   be replayed headless with `SOA_PAD_FILE`, the same card and the same
+   build. Pause, the asset stall and the heartbeat's `soa_host_pause` stay
+   as they are: under the fixed clock they cost no guest time.

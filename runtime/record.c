@@ -13,6 +13,7 @@
  * plat.c's guard on the memory above the RAM and hands it everything else.
  */
 #include "record.h"
+#include "gx_state.h"
 #include "plat.h"
 #include "soa_game.h"
 #include "swap.h"
@@ -34,12 +35,15 @@ uint64_t irq_delivered_count(unsigned number);                /* irq.c */
 uint64_t threads_switch_count(void);                          /* threads.c */
 unsigned gx_frame_count(void);                                /* gx.c */
 void hle_on_report(void (*fn)(void));                         /* hle.c */
+extern void (*g_record_pipe)(CpuState* s, unsigned size, uint64_t v); /* gx.c */
+void gx_pipe_watch_changed(void);                             /* gx.c */
 
 #define MAX_FUNCTIONS 64
 
 typedef struct {
     uint32_t address;
     uint64_t seen, recorded, flagged, dropped;
+    uint64_t drew, pipe_bytes; /* recorded calls that wrote the gather pipe, and the bytes */
     uint32_t drop_ea, drop_pc; /* the first hardware access that dropped a call, and the block it was in */
 } Fn;
 
@@ -75,6 +79,16 @@ static uint64_t g_irq0, g_switch0;
 static struct sigaction g_prev;
 static double g_t0, g_spent, g_most; /* seconds a recorded call took, from its entry to its record written */
 static uint8_t* g_buf; /* a call's encoded pages, before they are written */
+
+/* The GX part (record.h): the pipe's bytes the call wrote, and GX's state as
+ * it found and left it. */
+#define PIPE_MAX (64u << 20) /* the bytes one call may write to the pipe and be kept */
+static GxImage g_gx_pre, g_gx_post, g_gx_shadow; /* the shadow: the last image in the file */
+static uint8_t* g_pipe_log;
+static size_t g_pipe_n, g_pipe_cap;
+static uint8_t g_wait[GX_PIPE_CAP]; /* the bytes of a command not yet whole, at the call's entry */
+static uint32_t g_nwait;
+static int g_gx_part;
 
 static double now_s(void)
 {
@@ -171,6 +185,26 @@ static void on_entry(CpuState* s, uint32_t address)
         g_flags |= REC_MANY_CALLEES;
 }
 
+static void on_pipe(CpuState* s, unsigned size, uint64_t v)
+{
+    unsigned i;
+    (void)s;
+    if (!g_active || g_dropped) return;
+    if (g_pipe_n + size > g_pipe_cap) {
+        size_t cap = g_pipe_cap ? g_pipe_cap * 2 : 1u << 16;
+        uint8_t* b;
+        while (cap < g_pipe_n + size) cap *= 2;
+        b = g_pipe_n + size <= PIPE_MAX ? (uint8_t*)realloc(g_pipe_log, cap) : NULL;
+        if (!b) { /* more than is kept: the call is not */
+            g_dropped = 3;
+            return;
+        }
+        g_pipe_log = b;
+        g_pipe_cap = cap;
+    }
+    for (i = 0; i < size; i++) g_pipe_log[g_pipe_n++] = (uint8_t)(v >> (8 * (size - 1 - i)));
+}
+
 static void begin(CpuState* s, Fn* f, uint64_t seen)
 {
     g_t0 = now_s();
@@ -187,6 +221,15 @@ static void begin(CpuState* s, Fn* f, uint64_t seen)
     g_dropped = 0;
     g_owner = pthread_self();
     g_active = f;
+    {
+        const uint8_t* wait = gx_pipe_left(&g_nwait);
+        gx_image(&g_gx_pre);
+        if (g_nwait > sizeof g_wait) g_nwait = sizeof g_wait;
+        memcpy(g_wait, wait, g_nwait);
+        g_pipe_n = 0;
+        g_record_pipe = on_pipe;
+        gx_pipe_watch_changed();
+    }
     swap_trace(on_entry);
     g_record_note = on_note;
     g_record_polls = 0;
@@ -301,6 +344,22 @@ static int write_call(void)
     n += g_nin * sizeof(RecInput);
     memcpy(g_buf + n, g_callee, g_ncallee * sizeof(RecCallee));
     n += g_ncallee * sizeof(RecCallee);
+    g_head.gx = (uint32_t)g_gx_part;
+    if (g_gx_part) {
+        const uint32_t img = (uint32_t)sizeof(GxImage);
+        if (!grow(n + g_pipe_n + g_nwait + 4u * img + 16u)) return 0;
+        memcpy(g_buf + n, g_pipe_log, g_pipe_n);
+        n += g_pipe_n;
+        memcpy(g_buf + n, g_wait, g_nwait);
+        n += g_nwait;
+        g_head.pipe_bytes = (uint32_t)g_pipe_n;
+        g_head.pipe_left = g_nwait;
+        g_head.gx_pre_bytes = rec_encode((const uint8_t*)&g_gx_pre, (const uint8_t*)&g_gx_shadow, img, g_buf + n);
+        n += g_head.gx_pre_bytes;
+        g_head.gx_post_bytes = rec_encode((const uint8_t*)&g_gx_post, (const uint8_t*)&g_gx_pre, img, g_buf + n);
+        n += g_head.gx_post_bytes;
+        g_gx_shadow = g_gx_post;
+    }
     g_head.pages = g_ntouched;
     g_head.inputs = g_nin;
     g_head.callees = g_ncallee;
@@ -317,6 +376,10 @@ static void end(CpuState* s, Fn* f)
     open_all();
     g_record_armed = 0;
     g_active = NULL;
+    g_record_pipe = NULL;
+    gx_pipe_watch_changed();
+    gx_image(&g_gx_post);
+    g_gx_part = g_pipe_n || memcmp(&g_gx_pre, &g_gx_post, sizeof g_gx_post) != 0;
     swap_trace(NULL);
     rec_regs_from(&g_head.out, s);
     if (irq_total() != g_irq0) g_flags |= REC_IRQ;
@@ -329,6 +392,8 @@ static void end(CpuState* s, Fn* f)
     } else {
         f->recorded++;
         f->flagged += g_flags != 0;
+        f->drew += g_pipe_n != 0;
+        f->pipe_bytes += g_pipe_n;
     }
     for (k = 0; k < g_ntouched; k++) g_state[g_touched[k]] = 0;
     {
@@ -366,9 +431,13 @@ static void report(void)
     unsigned k;
     if (g_out) fflush(g_out);
     for (k = 0; k < g_nfn; k++)
-        fprintf(stderr, "[record] %08X: %llu calls seen, %llu recorded (%llu with a flag), %llu dropped (a store to the disc's interface, or more than %u pages)\n",
+        fprintf(stderr, "[record] %08X: %llu calls seen, %llu recorded (%llu with a flag), %llu dropped (a store to the disc's interface, more than %u pages, or more than 64 MB to the pipe)\n",
                 g_fn[k].address, (unsigned long long)g_fn[k].seen, (unsigned long long)g_fn[k].recorded,
                 (unsigned long long)g_fn[k].flagged, (unsigned long long)g_fn[k].dropped, g_max_pages);
+    for (k = 0; k < g_nfn; k++)
+        if (g_fn[k].drew)
+            fprintf(stderr, "[record] %08X: %llu of the recorded calls wrote the gather pipe, %llu bytes in all, kept with them\n",
+                    g_fn[k].address, (unsigned long long)g_fn[k].drew, (unsigned long long)g_fn[k].pipe_bytes);
     for (k = 0; k < g_nfn; k++)
         if (g_fn[k].drop_ea)
             fprintf(stderr, "[record] %08X: the first call dropped stored to the disc's interface at %08X, from block %08X\n",

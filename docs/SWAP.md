@@ -148,6 +148,12 @@ the start of a run. The end-of-run report then gets a `[swap]` line, and a
 TSV with one line per function if a path was given. Combined with
 `SOA_PAD_FILE`, this counts over a recorded play.
 
+`SOA_PIPE_CENSUS=file.tsv` counts, beside the calls, the bytes and stores
+each translated function writes to GX's write-gather pipe itself, from its
+own blocks and not its callees': every function that talks to GX directly,
+the list a native draw (soa-ue5's Layer 2) has to cover. docs/RECORD.md, "Who
+writes the pipe", has the format and a measured census.
+
 ## A swap on against off
 
 The check for any swap that does not change timing semantics: the same pad
@@ -210,6 +216,17 @@ The checks:
   guest. The byte guard is portable C.
 
 ## What changed (and what to rebuild)
+
+- **Within host ABI 24** (2026-10-17): strict mode, functions and one struct
+  added after the rest of the header (`soa_host_set_strict`,
+  `soa_host_held`, `soa_host_set_pad_at`, `soa_host_strict_stats`;
+  docs/CLOCK.md, "Deterministic runs under a host"). Nothing before them
+  changed, so the ABI number did not: a plugin built against 24 runs on this
+  runtime unchanged and looks the new functions up by name to use them.
+  `soa_host_go` and `soa_host_hold(0)` wake a strict wait at once (a
+  futex), where the old hold polls every millisecond. The recording format went to version 2
+  (`runtime/record.h`, the GX part); `soa-compare` reads 1 and 2. A
+  runtime-only change: `--link`.
 
 - **Host ABI 23 → 24** (2026-10-17, `runtime/soa_host.h`): new entry points
   only, at the end of the header: `soa_host_set_clock`,

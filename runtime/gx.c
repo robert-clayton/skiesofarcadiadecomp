@@ -20,6 +20,7 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include "cpu.h"
+#include "gx_state.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,7 +46,7 @@ static uint16_t g_pe_mmio[8];
 static uint32_t g_pi_fifo[3];
 
 /* The write-gather pipe's bytes not yet parsed (a command not yet whole). */
-#define PIPE_CAP 65536
+#define PIPE_CAP GX_PIPE_CAP
 static uint8_t g_pipe[PIPE_CAP];
 static size_t g_pipe_len;
 
@@ -62,9 +63,9 @@ static size_t g_pipe_len;
  * 385 and never calls, for one -- is parsed at once, as before (FINDINGS
  * "Recorded display lists (C5a)"). Before this, every list was drawn when it
  * was recorded and called empty. */
-#define GX_CPU_FIFO_SDA (-27520) /* r13-relative: GXSetCPUFifo's current CPU FIFO object */
-#define GX_DL_FIFO 0x80318B18u   /* DisplayListFifo (GXBeginDisplayList, 0x80251D94) */
-#define PI_WRAP 0x04000000u      /* PI_FIFO_WPTR's wrap bit; GXEndDisplayList reads it as overflow */
+/* GX_CPU_FIFO_SDA (GXSetCPUFifo's current CPU FIFO object, r13-relative) and
+ * GX_DL_FIFO (DisplayListFifo) are gx_state.h's, which the replay shares. */
+#define PI_WRAP GX_PI_WRAP
 /* A capture-only record: a display-list call with the list's bytes inline,
  * as they were at the call (opcode, address, size, then size bytes). A
  * capture's RAM is the frame's end, and a list recorded again after its call
@@ -384,58 +385,9 @@ static void frame_end(CpuState* s)
 
 /* ---- vertex size from the current VCD/VAT --------------------------- */
 
-static unsigned comp_size(unsigned fmt)
-{
-    return fmt == 4 ? 4 : (fmt >= 2 ? 2 : 1); /* u8 s8 u16 s16 f32 */
-}
-
-static unsigned color_size(unsigned comp)
-{
-    static const unsigned t[8] = {2, 3, 4, 2, 3, 4, 4, 4}; /* 565 888 888x 4444 6666 8888 */
-    return t[comp & 7];
-}
-
-static unsigned attr_size(unsigned vcd, unsigned direct_size)
-{
-    switch (vcd & 3) {
-    case 0: return 0;            /* not present */
-    case 1: return direct_size;  /* inline */
-    case 2: return 1;            /* 8-bit index */
-    default: return 2;           /* 16-bit index */
-    }
-}
-
 static unsigned vertex_size(unsigned vat)
 {
-    uint32_t lo = g_cp[0x50], hi = g_cp[0x60];
-    uint32_t a = g_cp[0x70 + vat], b = g_cp[0x80 + vat], c = g_cp[0x90 + vat];
-    unsigned size = 0, i;
-    unsigned tc[8][2] = {
-        {(a >> 21) & 1, (a >> 22) & 7}, {(b >> 0) & 1, (b >> 1) & 7},
-        {(b >> 9) & 1, (b >> 10) & 7},  {(b >> 18) & 1, (b >> 19) & 7},
-        {(b >> 27) & 1, (b >> 28) & 7}, {(c >> 5) & 1, (c >> 6) & 7},
-        {(c >> 14) & 1, (c >> 15) & 7}, {(c >> 23) & 1, (c >> 24) & 7},
-    };
-
-    size += lo & 1; /* position matrix index */
-    for (i = 0; i < 8; i++) size += (lo >> (1 + i)) & 1; /* texture matrix indices */
-
-    size += attr_size((lo >> 9) & 3, ((a & 1) ? 3 : 2) * comp_size((a >> 1) & 7));
-
-    {
-        unsigned vcd = (lo >> 11) & 3, elems = (a >> 9) & 1, fmt = (a >> 10) & 7;
-        if (vcd >= 2 && elems && ((a >> 31) & 1))
-            size += 3 * (vcd == 2 ? 1 : 2); /* NBT with three separate indices */
-        else
-            size += attr_size(vcd, (elems ? 9 : 3) * comp_size(fmt));
-    }
-
-    size += attr_size((lo >> 13) & 3, color_size((a >> 14) & 7));
-    size += attr_size((lo >> 15) & 3, color_size((a >> 18) & 7));
-
-    for (i = 0; i < 8; i++)
-        size += attr_size((hi >> (2 * i)) & 3, (tc[i][0] ? 2 : 1) * comp_size(tc[i][1]));
-    return size;
+    return gx_vertex_size(g_cp, vat); /* gx_state.h: the replay sizes a draw by the same rule */
 }
 
 /* ---- command stream --------------------------------------------------- */
@@ -722,14 +674,61 @@ static void writer_note(const CpuState* s, unsigned size)
     }
 }
 
+/* Who else watches the pipe's bytes: the census (SOA_PIPE_CENSUS, swap.c's:
+ * the bytes each translated function writes itself; main.c hands it over
+ * with gx_set_pipe_census) and the recorder (record.c sets g_record_pipe for
+ * the length of a recorded call, so the bytes the call writes are kept with
+ * it). One test of g_pipe_watch on the way in when none of them is on. */
+void (*g_record_pipe)(CpuState* s, unsigned size, uint64_t v);
+static void (*g_census_note)(uint32_t pc, unsigned size);
+static int g_pipe_watch = -1; /* writers, census or the recorder: -1 until first asked */
+
+void gx_pipe_watch_changed(void) { g_pipe_watch = -1; } /* record.c, as it sets or clears g_record_pipe */
+
+void gx_set_pipe_census(void (*note)(uint32_t pc, unsigned size))
+{
+    g_census_note = note;
+    g_pipe_watch = -1;
+}
+
+static void pipe_watch(CpuState* s, unsigned size, uint64_t v)
+{
+    void (*rec)(CpuState*, unsigned, uint64_t);
+    if (g_pipe_watch < 0) {
+        if (g_writers_on < 0) {
+            const char* e = getenv("SOA_GX_WRITERS");
+            g_writers_on = e && atoi(e);
+        }
+        g_pipe_watch = g_writers_on || g_census_note || g_record_pipe;
+        if (!g_pipe_watch) return;
+    }
+    if (g_writers_on) writer_note(s, size);
+    if (g_census_note) g_census_note(s->pc, size);
+    rec = g_record_pipe;
+    if (rec) rec(s, size, v);
+}
+
+void gx_image(GxImage* out)
+{
+    memcpy(out->cp, g_cp, sizeof out->cp);
+    memcpy(out->xf, g_xf, sizeof out->xf);
+    memcpy(out->bp, g_bp, sizeof out->bp);
+    memcpy(out->pi, g_pi_fifo, sizeof out->pi);
+    out->dl_rec = (uint32_t)g_dl_rec;
+    out->pipe_len = (uint32_t)g_pipe_len;
+    memset(out->reserved, 0, sizeof out->reserved);
+}
+
+const uint8_t* gx_pipe_left(uint32_t* len)
+{
+    *len = (uint32_t)g_pipe_len;
+    return g_pipe;
+}
+
 void gx_pipe_write(CpuState* s, unsigned size, uint64_t v)
 {
     unsigned i;
-    if (g_writers_on < 0) {
-        const char* e = getenv("SOA_GX_WRITERS");
-        g_writers_on = e && atoi(e);
-    }
-    if (g_writers_on) writer_note(s, size);
+    if (g_pipe_watch) pipe_watch(s, size, v);
     if (g_dl_rec) {
         dl_record(s, size, v);
         return;

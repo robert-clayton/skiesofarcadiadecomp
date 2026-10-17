@@ -53,6 +53,9 @@ void gxr_export_install(void);
 void window_start(void);
 void gx_set_frame_limit(unsigned frames);
 void gx_set_frame_hook(void (*fn)(CpuState*, unsigned)); /* SOA_POKE; see gx.c */
+void gx_set_pipe_census(void (*note)(uint32_t pc, unsigned size)); /* gx.c, for SOA_PIPE_CENSUS */
+int swap_pipe_census_on(void);                                  /* swap.c */
+void swap_pipe_census_note(uint32_t pc, unsigned size);
 unsigned gx_frame_count(void);
 void gxr_draw_every_frame(void);
 int irq_in_handler(void);
@@ -1498,7 +1501,8 @@ int main(int argc, char** argv)
 #endif
     threads_init(&s);
     if (getenv("SOA_SELFTEST")) return selftest(&s) ? 7 : 0;
-    swap_env(); /* SOA_COUNT_CALLS */
+    swap_env(); /* SOA_COUNT_CALLS, SOA_PIPE_CENSUS */
+    if (swap_pipe_census_on()) gx_set_pipe_census(swap_pipe_census_note);
     record_env(&s); /* SOA_RECORD (docs/RECORD.md) */
     if (argc > 2 && strcmp(argv[1], "--replay") == 0) {
         /* Render one captured frame (see gx.c frame capture) to <base>.png,

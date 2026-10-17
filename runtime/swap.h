@@ -91,6 +91,12 @@ void swap_attach(void);
  * at the run's end. */
 void swap_env(void);
 
+/* SOA_PIPE_CENSUS (swap_env reads it): on, and the note gx.c is to call
+ * with each gather-pipe store's block address and size (main.c passes it to
+ * gx_set_pipe_census). */
+int swap_pipe_census_on(void);
+void swap_pipe_census_note(uint32_t pc, unsigned size);
+
 /* The fixed clock's quiet rule (docs/CLOCK.md): on, every function's byte
  * gets SWAP_DUE, so its next entry calls `take` (irq.c's irq_quiet_entry) to
  * deliver what has come due; off, they lose it. hle.c installs swap_due as
