@@ -305,12 +305,21 @@ static uint32_t interrupt_handler(CpuState* s, uint32_t irq)
 
 static int g_pace = -1;
 
+/* runtime/record.c (SOA_RECORD): while a recorded call runs, interrupts wait
+ * for it to return -- its recording slows it a thousandfold, and with the
+ * guest's clock the host's, one would land inside nearly every call -- unless
+ * it polls 4096 times, which is a call waiting on one. hle.c's. */
+extern volatile int g_record_armed;
+extern unsigned g_record_polls;
+
 static void deliver_pending(CpuState* s)
 {
-    uint64_t now = tb_now(s);
+    uint64_t now;
     uint32_t handler;
 
     if (g_in_handler) return; /* a handler that idles must not nest deliveries */
+    if (g_record_armed && g_record_polls++ < 4096u) return;
+    now = tb_now(s);
     if (g_pace < 0) {
         const char* env = getenv("SOA_PACE");
         g_pace = env && atoi(env) ? 1 : 0;

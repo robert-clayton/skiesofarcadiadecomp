@@ -29,6 +29,7 @@
 /* The guard's byte: a replacement is set; the call is counted. */
 #define SWAP_HOOK 1u
 #define SWAP_COUNT 2u
+#define SWAP_TRACE 4u /* the entry is told to the trace function (swap_trace) */
 
 typedef void (*SwapFn)(void); /* the handler's own function, whatever its type: cast back by the handler */
 typedef int (*SwapHandler)(CpuState* s, uint32_t address, SwapFn fn, void* user, int after);
@@ -60,6 +61,15 @@ unsigned swap_counts(SwapCount* out, unsigned max);
 /* How many functions the table has; in *native, how many of them the runtime
  * answers itself. */
 unsigned swap_functions(unsigned* native);
+
+/* Every translated function's entry told to fn, with its address, until
+ * swap_trace(NULL): for runtime/record.c, which wants the calls a recorded
+ * call makes. An entry that runs a translation for swap_original or for
+ * SWAP_BOTH is not told (it is the function already being run). Setting it
+ * sets a bit in every guard's byte, so every call pays the slow path while
+ * it is on. */
+typedef void (*SwapTraceFn)(CpuState* s, uint32_t address);
+void swap_trace(SwapTraceFn fn);
 
 /* Runs the translation at address on the live state, in place, bypassing its
  * replacement for this one call (its own calls, and any recursion, meet the

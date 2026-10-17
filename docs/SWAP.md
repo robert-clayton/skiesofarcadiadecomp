@@ -75,6 +75,12 @@ like any other function. The host's semantics are unchanged:
 | `SOA_HOST_BOTH` (2) | the translation runs, then the host is called with `after` = 1 |
 | `SOA_HOST_ANSWERED_LIVE` (3, new) | the translation is skipped; the host has left the results in the live registers itself |
 
+**A trace** (`swap_trace`, bit 2, `SWAP_TRACE`): every guard calls a
+function with the entry's address, until it is cleared. The recorder
+(docs/RECORD.md) uses it to list the calls a recorded call makes. Like
+counting, it sets every byte, so every call pays the slow path while it is
+on.
+
 **Thread safety.** The host can set or clear a replacement from any thread
 at any time. Writes to the bytes and slots are serialised by a lock. A
 slot's handler and user word are written together, before the byte is set,

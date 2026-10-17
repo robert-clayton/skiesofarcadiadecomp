@@ -50,6 +50,7 @@ static unsigned g_npending;
  * (swap_original): the guest is one thread at a time, and the entry that
  * reads it is the very next thing the call does. */
 static uint32_t g_skip;
+static SwapTraceFn g_trace; /* swap_trace's, with SWAP_TRACE in every byte while it is set */
 
 static const SoaGame* table(void)
 {
@@ -182,6 +183,20 @@ void swap_count(int on)
     plat_unlock(&g_lock);
 }
 
+void swap_trace(SwapTraceFn fn)
+{
+    const SoaGame* g;
+    uint32_t i;
+    plat_lock(&g_lock);
+    g = ready_locked();
+    if (g) {
+        g_trace = fn;
+        for (i = 0; i < g->count; i++)
+            if (!g->kind[i]) g->swap[i] = (uint8_t)(fn ? g->swap[i] | SWAP_TRACE : g->swap[i] & ~SWAP_TRACE);
+    }
+    plat_unlock(&g_lock);
+}
+
 unsigned swap_counts(SwapCount* out, unsigned max)
 {
     const SoaGame* g;
@@ -272,6 +287,10 @@ int soa_swap_enter(CpuState* s, uint32_t i)
         return 0;
     }
     if (f & SWAP_COUNT) g_calls[i]++;
+    if (f & SWAP_TRACE) {
+        SwapTraceFn t = g_trace;
+        if (t) t(s, g->address[i]);
+    }
     if (f & SWAP_HOOK) {
         plat_lock(&g_lock);
         w = g_swap[i];

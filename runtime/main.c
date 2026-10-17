@@ -43,6 +43,7 @@ void hle_dump(CpuState* s, uint32_t pc);
 void threads_init(CpuState* s);
 int selftest(CpuState* s);
 void swap_env(void); /* swap.c */
+void record_env(CpuState* s); /* record.c */
 int gx_replay(CpuState* s, const char* base);
 int gx_replay_pair(CpuState* s, const char* a, const char* b); /* H10: A, B and B.mid.png */
 void gxr_enable(int on);
@@ -1492,6 +1493,7 @@ int main(int argc, char** argv)
     threads_init(&s);
     if (getenv("SOA_SELFTEST")) return selftest(&s) ? 7 : 0;
     swap_env(); /* SOA_COUNT_CALLS */
+    record_env(&s); /* SOA_RECORD (docs/RECORD.md) */
     if (argc > 2 && strcmp(argv[1], "--replay") == 0) {
         /* Render one captured frame (see gx.c frame capture) to <base>.png,
          * or a consecutive pair and the image between them (H10). */

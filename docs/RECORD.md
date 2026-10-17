@@ -1,0 +1,311 @@
+# Record and compare
+
+A native replacement for one of the game's functions (docs/SWAP.md) is
+checked here against thousands of the game's own calls of that function, in
+seconds and outside Unreal. A normal headless run records real calls of
+chosen functions (`SOA_RECORD`). Then `soa-compare` replays each call on its
+own: it restores the memory and registers the call began with, runs the
+replacement (a *candidate*), and holds what the candidate left to what the
+game's call left. The same replay of the game's own translation is a self
+check, and it must agree on every call.
+
+A recording is the game's memory, and so it is game data. It stays on the
+machine that made it, like a memory card, and never goes into this
+repository. The default path, `build/record.soarec`, is ignored.
+
+## Recording
+
+```
+SOA_RECORD=0x80096DA4,0x8011660C;3000;2   functions; at most 3000 calls of each; one call in 2
+SOA_RECORD_FILE=path                      where (default build/record.soarec)
+SOA_RECORD_WITH=all | lo-hi,lo+bytes,...  more memory kept at every recorded call (below)
+SOA_RECORD_PAGES=4096                     the most pages one call may touch (default 4096)
+```
+
+It works in any build with the swap table (game table ABI 2) on a POSIX
+system: the single-file build or the split build. On Windows the variable is
+refused with a line in the log.
+
+**How a call is caught.** `runtime/record.c` sets a `SWAP_BOTH` replacement
+(docs/SWAP.md) on each function. The guard calls it at the function's entry,
+the translation runs, and then the guard calls it again. Nothing costs
+anything when `SOA_RECORD` is unset, because the guards are the swap's own.
+The only other cost is one test of `g_record_armed` in `hle.c`'s MMIO and
+timebase entry points and in `irq.c`'s delivery. When the limit is reached
+for every function, the replacements are cleared, so the rest of the run
+costs nothing either.
+
+**What the call touched.** While a recorded call runs, the 24 MB of RAM
+are made inaccessible (`mprotect`). The call's first touch of a page faults.
+The fault handler copies the page as it is (its *pre-image*) and makes it
+readable. The first store to that page faults again, and the handler makes
+it writable. So the pages the call touched are known exactly, including
+those of every function it calls and anything the runtime's native code
+does to memory for it (a device model's copy, an HLE `memcpy`). Each page's
+bytes from before the call are kept, and so is which pages the call may
+have written. When the call returns, every page is opened again, and the
+bytes of each written page that differ from its pre-image are the call's
+output. The handler sits in front of `plat.c`'s guard on the memory past
+the RAM and hands that guard every other fault.
+
+**The rest of the call.** These are also kept:
+
+- the registers before and after: r0–r31, f0–f31 (both halves), CR, XER,
+  LR, CTR, FPSCR, MSR, the GQRs;
+- every timebase read (`mftb`), every hardware read (MMIO) with the value
+  it read, and every store to the hardware, in order;
+- every function the call entered, in order, with r1. The swap's new
+  `SWAP_TRACE` bit (`swap_trace`) sends every guard to the recorder while
+  the call runs. This list is for a person reading the call and for the
+  self check's strictest test.
+
+**What a recording run changes.** Interrupts are held until the recorded
+call returns, unless it polls 4096 times, which means it is waiting for one.
+The reason: recording makes a call take 0.2 to 10 ms, and the guest's clock
+is the host's, so an interrupt would otherwise land inside nearly every
+recorded call. With them held, none of the 31,760 calls recorded for the
+measurements below had one. A call that still had an interrupt inside, or
+let another guest thread run, or had a page touched by another host thread,
+is kept with a flag, and the replay skips it unless told otherwise. A call that stored to the disc's
+interface is dropped. A disc read goes into guest memory through the
+kernel's `read`, and a protected page would make that read fail. So from
+that store on, the recorder opens every page and does not keep the call.
+
+**The file** (`runtime/record.h` has the layout). Each page's pre-image is
+encoded against that page's last image in the file, and its post image
+against its pre-image. The encoding is runs of bytes the same as the base
+and runs of XOR'd literals. A page that did not change since the file last
+had it costs a 16-byte record and no bytes.
+
+**`SOA_RECORD_WITH`.** A candidate may read memory the game's function did
+not read. For example, the plugin's camera task reads the whole list of
+bodies and the place's number every call, and the game's task does not. The
+replay cannot give back a page the recording does not have; it reports any
+touch of such a page. `SOA_RECORD_WITH` keeps more memory at every recorded
+call, touched or not. It takes ranges, or `all` for every page of the RAM.
+With `all`, the whole RAM is copied at the call's entry and made read-only,
+and only stores fault.
+
+## Comparing
+
+```
+python tools/replay.py [--out DIR] [-I DIR] [CANDIDATE.c|.cpp ...]   build DIR/soa-compare (default build/replay)
+DIR/soa-compare REC --game gen/linux-split/libsoa_game.so            the self check, then every candidate
+DIR/soa-compare REC --original                                       the self check alone
+DIR/soa-compare REC --candidate NAME [--candidate NAME ...]
+DIR/soa-compare REC --info                                           what the recording holds
+DIR/soa-compare REC --calls N --only 0xADDR                          the calls the game's call N made
+DIR/soa-compare --list                                               the candidates built in
+    --show N         mismatching calls told in full (default 5)
+    --stack BYTES    stack under r1 a candidate may use as scratch (default 65536)
+    --with-flagged   replay the calls the recording flagged too
+    --partial        a byte the game's call wrote and the candidate left as it was is
+                     "left undone": counted and listed by stretch, not held
+```
+
+The exit code is 0 when every replayed call agreed, 1 when one did not, and
+2 for a usage or read error.
+
+**The replay is the game library and a stand-in runtime.**
+`tools/replay/replay.c` is built as a `libsoa_runtime.so` of its own.
+`soa-compare` links against it, and then `dlopen`s the game library of the
+build that recorded (`libsoa_game.so` from a split build). That library
+needs a library of that name, and this one has it. It answers the runtime's
+side of the seam (`config/seam.txt`) as a replay needs:
+
+| the call meets | the replay gives |
+|---|---|
+| a swap guard | the candidate at its function's entry; every entry is traced |
+| a timebase read, a hardware read | the recording's value, in order; anything else ends the call (*not replayable*) |
+| a store to the hardware | held to the recording's stores, in order |
+| `VIGetRetraceCount` | the word in memory the runtime's own reads (the frame's start ends the call) |
+| the cache calls, `OSReport`, the game's debug print, trace and watch points, the Ninja model notes | nothing, since none of them changes memory |
+| the GX pipe, the decrementer, a trap, a thread's context saved or switched, the scheduler's idle, the audio system's start | the call ends: not replayable |
+
+**Memory** has the runtime's shape: the RAM, then the mask's slack. Every
+page is inaccessible except those of the call being replayed. A touch of any
+other page faults. The page is handed over zeroed and noted, unless it is in
+the stack under the call (scratch). A call's pages are made read-only, so
+the replay knows which of them were written. Pages stay mapped from one call
+to the next. A page that neither the last replay nor the game changed is not
+written again and not compared again, which is what makes `SOA_RECORD_WITH=all`
+recordings fast to replay.
+
+**A call is held** to its recording on:
+
+- the registers the calling convention keeps: r1, r2, r13–r31, f14–f31
+  (ps0 only, because the game saves those with `stfd` and its paired-single
+  code changes ps1 as it pleases), and CR fields 2–4;
+- the results the candidate declares (`SOA_REPLAY_R3`, `_R4`, `_F1`). A
+  function that returns nothing leaves r3 and f1 as garbage, and the
+  candidate is not held to them;
+- every byte of every page the game's call touched, except the stack under
+  r1 (`--stack`, the frames of the call and its callees) and the word at
+  r1+4 (where a callee keeps its return address, in the caller's frame);
+- nothing written to a page the game's call never touched, and no load from
+  one;
+- the stores to the hardware the game's call made, in order.
+
+The self check holds every register, both halves of every FPR, every byte
+including the stack, and the list of functions called with their r1. Any
+difference is one line: the address, what the replay left, and the game's
+value.
+
+**`--partial`** is for a rule that answers part of a function. The plugin's
+rules write the record they model and leave alone what nothing reads
+afterwards, such as a body test's own record. Under `--partial`, a byte
+the game's call wrote and the candidate left as it found it counts as *left
+undone*. It is not held, and the undone bytes are listed by stretch with how
+many calls left them. Everything else is still held: every byte the
+candidate wrote, every result and kept register, nothing written or read
+outside the recording. A wrong value is still a difference. A call that
+agrees except for undone bytes is counted apart from one that agrees in
+full.
+
+**What a candidate's calls into the game do.** They run the game's own
+translation against the restored memory. A candidate that calls a maker of
+the game's (the camera's bodies are blocks of the game's heap) gets the
+game's own maker and the game's own heap. As long as it calls what the game's
+call called, everything those calls read is in the recording. If it calls
+something else, a touch outside the recording says so. Replaying the
+callees' recorded effects instead was rejected. Their writes are mixed into
+the caller's in the page diff and cannot be separated from them. Replaying
+them would also hold a candidate to calling exactly the same callees with
+exactly the same arguments, which is the thing a rewrite is free to change.
+
+## The candidate interface
+
+A candidate is the host's own answer type, `SoaHostAnswer` from
+`runtime/soa_host.h` (ABI 23). `replay.c` calls it the way `runtime/host.c`
+calls a host's replacement. So the code tested here is the code a host
+passes to `soa_host_replace`, and `SOA_HOST_GAMES`, `_ANSWERED`, `_BOTH`
+and `_ANSWERED_LIVE` mean what they mean there. `game`, `game_original`
+and `original` work as there. The candidate reads and writes `mem` and
+`r`/`f`. `tools/replay/replay.h`:
+
+```c
+static int answer(void* user, SoaHostCall* call) { ... return SOA_HOST_ANSWERED; }
+SOA_REPLAY_CANDIDATE(my_rule, "my-rule", 0x80096DA4u, answer, NULL, SOA_REPLAY_NONE)
+```
+
+A file of candidates can be C or C++ and is linked into `soa-compare` by
+`tools/replay.py`. `soa_replay_seen()` and `soa_replay_frame()` say which
+of the game's calls is being replayed. The report counts how many calls the
+candidate answered and how many it left to the game. A candidate that
+returns `SOA_HOST_GAMES` agrees by construction, so the coverage line is
+part of the result.
+
+## Measured (2026-10-17, this machine, gcc 16)
+
+The proof is the 10 functions soa-ue5's plugin answers natively. Their rules
+(`SoACameraRule.cpp`, `SoAPartyRule.cpp`, `SoAPartyRestRule.cpp`,
+`SoAWalkRule.cpp`, `SoAShipRule.cpp`) compile without Unreal headers and
+were built straight into `soa-compare`. The adapters are the plugin's
+"instead" paths (`SoACameraTask.cpp`, `SoAPartyTask.cpp`,
+`SoAShipTask.cpp`, mode 2) rewritten in plain C++. They are a scratch file
+and not in this repository. Runs were muted, headless, `SOA_SPEED=30`, on
+the split build (`gen/linux-split`'s game library and a runtime built with
+the recorder), with `SOA_RECORD_WITH=all`.
+
+### The ten functions
+
+Four recordings, all with `SOA_RECORD_WITH=all`:
+
+- **opening**: a blank card, the opening's pad script (`speed.scn`'s),
+  12,000 frames, every second call.
+- **walk**: soa-ue5's `final-boss` save loaded, then the stick walking
+  about the rooms below the save room with A pressed now and then; 9,600
+  frames, every second call.
+- **ship** and **ship2**: the `secrets` save on the world map, flying. The
+  first is a pad file with turns, both triggers and the C stick, until a
+  random battle at frame 4,290 ends the flight. The second flies ahead with
+  A pressed every 60 frames, so the battles are fought and the flight goes
+  on. Every call is recorded.
+
+| function | calls | self check | candidate, held in full | `--partial`: agree, all else left undone | wrong |
+|---|---|---|---|---|---|
+| camera task `80096DA4` (opening) | 3,000 | 3,000 | 2,999 | — | 1 |
+| camera task (walk) | 3,000 | 3,000 | 1,869 | 1,130 | 1 |
+| leader's frame start `801165C4` | 2,348 | 2,348 | 2,348 | — | 0 |
+| leader's pad step `8011660C` (f1 held) | 2,049 | 2,049 | 2,049 | — | 0 |
+| leader's floor and walls `8011753C` | 2,348 | 2,348 | 1 | 2,347 | 0 |
+| scan `80117BE4` (r3 held) | 2,230 | 2,230 | 2,228 | 2 | 0 |
+| ship's pad step `800CFDF0` | 2,757 | 2,757 | 1,815 | 942 | 0 |
+| ship, land and bodies `80115EAC` (r3) | 2,757 | 2,757 | 0 | 2,757 | 0 |
+| ship, out of the bodies `80117290` | 2,757 | 2,757 | 2,653 | 104 | 0 |
+| ship, may it be there `80114950` (r3) | 2,757 | 2,757 | 2,653 | 104 | 0 |
+| ship, floor under it `800D07F8` | 2,757 | 2,757 | 0 | 2,757 | 0 |
+
+- **The self check agreed on all 28,760 calls** of the four recordings,
+  with every register, both halves of every FPR, every byte including the
+  stack, and every call made. Every recorded call was replayable, and none
+  had a flag. The candidates answered every call themselves; none was left
+  to the game.
+- **The one wrong byte is real.** In the camera task's call 1,228 (frame
+  1,615, the title's intro, in both runs that pass it), the task ends
+  itself, and the rule writes 0 to the task's stage byte, 25 bytes into
+  the task's record. The game leaves `FF` there. Found with
+  `soa-compare --calls 1228 --only 0x80096DA4` (it frees the capsule with
+  `80222930`, then the ball with `801E17E0`, as the rule does) and the
+  record's address.
+- **What the rules leave undone**, every byte of it the plugin's own choice
+  or something its beside mode never looked at:
+  - the body test's own record, `8030E7E0`–`8030E81F`, which `SoAPartyTask`
+    already excludes;
+  - the 352 bytes after the camera's state, `803030E0`–`8030323F`, which
+    `SoACameraTask` excludes ("with the floor records after it");
+  - for floor and walls, the camera, and the ship's pad step and land:
+    short stretches in `80344DE0`–`80344E7F` and the same ones 0x5A0
+    further on (`80345380`–`803453FF`), and the heap at
+    `80D3B560`–`80D3B65F` (the camera also at `80ED25C0`–`80ED25FF`);
+  - for the ship's land and floor under it, the heap at
+    `80EB6080`–`80EB609F` and `80F1E6A0`–`80F1E6BF`, on every call of
+    the floor; and for the land, a word or so in `8030EA00`–`8030EA1F`.
+
+  The game's functions write all of these in most calls, and the rules
+  never do. Whether anything reads them afterwards is the next question for
+  those rules.
+- **The broken candidates are caught.** The camera task with its state's
+  first byte flipped one call in 7 fails on 429 of 3,000 calls in the
+  opening (428 planted, plus the real one). The ship's answer turned one
+  call in 5 fails on 216 of 1,082 and 335 of 1,675 calls: r3 against the
+  game's, at the call. A test of the tool itself (`test_record.py`)
+  changes one register of a recording, and the self check fails on that
+  call alone.
+
+### Speeds
+
+| | |
+|---|---|
+| recording, the pages a call touches | 0.20–0.24 ms a call. 3,000 camera calls over 6,000 frames of the opening: 39.8 and 40.1 s wall against 39.0 and 39.2 s without (+2–3%), 1.8 KB a call |
+| recording, `SOA_RECORD_WITH=all` | 8.7–9.9 ms a call; 242 KB a call (opening, a call every second frame), 199 KB (walk, five functions), 131–133 KB (ship, five functions every frame) |
+| `SOA_RECORD` unset | the swap's guards and nothing else: one more load in interrupt delivery and the MMIO and timebase entry points |
+| self check, touched pages | 207,000 calls a second (3,000 calls in 0.014 s) |
+| self check, `all` | 6,100–13,100 calls a second; the 2.4 GB walk recording (11,975 calls) in 2.6 s wall |
+| candidates, `all` | 2,900–10,200 calls a second, the rule's own time included |
+
+The candidates' adapters were built with the plugin's rule files and the
+replay into one `soa-compare` (g++ -O2) without one Unreal header or shim.
+
+## Limits
+
+- **POSIX only** (`mprotect` and `SIGSEGV`). Windows refuses `SOA_RECORD`.
+  The page size is the host's. A recording replays on a machine with the
+  same page size and the same game library.
+- **Interrupts are held** while a recorded call runs. The recorded run's
+  timing is therefore not the unrecorded run's, so record a run for its
+  calls, not for its frames.
+- **A store to the disc's interface drops the call.** Calls that start disc
+  reads are not recorded.
+- **The GX pipe, the decrementer, thread switches** end a replayed call as
+  not replayable. A function that draws, or that sleeps, cannot be replayed
+  yet.
+- **The heap in the replay is the recorded call's.** A candidate that
+  allocates through the game's own allocator gets the same blocks only if
+  it allocates what the game's call allocated.
+- **A candidate's reads beyond the game's** need `SOA_RECORD_WITH`. With
+  `all`, a call costs about 10 ms to record and its record about 250 KB,
+  most of it the pages that changed since the last recorded call.
+- **Stores with the same value as before** cannot be seen in a page diff.
+  A candidate that skips such a store agrees, which is what the game's
+  memory would show too.

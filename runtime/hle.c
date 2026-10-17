@@ -119,17 +119,31 @@ static void note(CpuState* s, const char* dir, uint32_t ea, unsigned size, uint6
 int device_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out);
 void device_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v);
 
+/* runtime/record.c (SOA_RECORD, docs/RECORD.md): while a recorded call is
+ * under way, what it asks of the hardware and the clock is told to it --
+ * an MMIO read with the value it read, an MMIO store before the device
+ * model runs (a device may move memory the recorder has made read-only, and
+ * the disc's reads do it through the kernel), each timebase read with its
+ * value. Kept here rather than in record.c so this file links on its own, as
+ * tests link it. The kinds are record.h's. */
+volatile int g_record_armed;
+unsigned g_record_polls; /* irq.c's deliveries held while a recorded call runs */
+void (*g_record_note)(CpuState* s, int kind, uint32_t ea, uint64_t v);
+#define RECORD_NOTE(s, kind, ea, v) do { if (g_record_armed && g_record_note) g_record_note((s), (kind), (ea), (v)); } while (0)
+
 #define MMIO_READ(T, N)                                        \
     T mmio_read##N(CpuState* s, uint32_t ea)                   \
     {                                                          \
         uint64_t v = 0;                                        \
         int handled = device_read(s, ea, sizeof(T), &v);       \
         note(s, handled ? "RD" : "rd", ea, sizeof(T), v);         \
+        RECORD_NOTE(s, 4 | (int)sizeof(T) << 8, ea, (T)v);     \
         return (T)v;                                           \
     }
 #define MMIO_WRITE(T, N)                                       \
     void mmio_write##N(CpuState* s, uint32_t ea, T v)          \
     {                                                          \
+        RECORD_NOTE(s, 1 | (int)sizeof(T) << 8, ea, v);        \
         note(s, "wr", ea, sizeof(T), v);                          \
         device_write(s, ea, sizeof(T), v);                     \
     }
@@ -478,6 +492,13 @@ uint32_t seed_pin(uint32_t lr, uint32_t tb);
 uint32_t guest_timebase_lo(CpuState* s)
 {
     uint32_t v = (uint32_t)timebase();
-    return g_seed_on && s->pc == 0x8023851Cu ? seed_pin(s->lr, v) : v;
+    v = g_seed_on && s->pc == 0x8023851Cu ? seed_pin(s->lr, v) : v;
+    RECORD_NOTE(s, 2, 0, v);
+    return v;
 }
-uint32_t guest_timebase_hi(CpuState* s) { (void)s; return (uint32_t)(timebase() >> 32); }
+uint32_t guest_timebase_hi(CpuState* s)
+{
+    uint32_t v = (uint32_t)(timebase() >> 32);
+    RECORD_NOTE(s, 3, 0, v);
+    return v;
+}

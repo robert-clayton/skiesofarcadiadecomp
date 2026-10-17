@@ -62,6 +62,13 @@ static void* g_main_fiber;
 static CpuState* g_s;
 static uint64_t g_saves, g_resumes, g_switches;
 
+/* How many fiber switches there have been: runtime/record.c tells a recorded
+ * call that slept (another thread ran inside it) by this moving. */
+uint64_t threads_switch_count(void)
+{
+    return g_switches;
+}
+
 /* Return addresses up a guest stack: EABI keeps the back chain at 0(r1)
  * and each frame's saved LR at 4(caller r1). Prints on one line. */
 void guest_backtrace(CpuState* s, uint32_t sp)
