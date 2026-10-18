@@ -245,24 +245,33 @@ int main(int argc, char** argv)
         snapshot_safe_point(&s); /* SOA_SNAPSHOT_AT=7:path */
         return 0;
     }
-    if (snapshot_resuming()) {
-        char why[600], mine[32];
-        long n = snapshot_host_get("mine", mine, sizeof mine);
+    {
+        char why[700], mine[32];
+        long n;
+        if (snapshot_resume_env(why, sizeof why)) { /* as main.c's start does */
+            fprintf(stderr, "[snapshot] %s\\n", why);
+            return 1;
+        }
+        if (!snapshot_resuming()) return 0;
+        n = snapshot_host_get("mine", mine, sizeof mine);
         if (snapshot_precheck(why, sizeof why)) {
             printf("refused: %s\\n", why);
             return 1;
         }
         printf("the host's section: %ld bytes, %s\\n", n, n > 0 ? mine : "-");
-        snapshot_resume_run(&s);
+        return snapshot_resume_run(&s);
     }
-    return 0;
 }
 """
 
 
 @pytest.fixture(scope="module")
 def driver(tmp_path_factory):
-    if os.name == "nt" or PROFILE.name not in ("gcc", "clang") or toolchain.compiler_path(PROFILE) is None:
+    if (
+        os.name == "nt"
+        or PROFILE.name not in ("gcc", "clang")
+        or toolchain.compiler_path(PROFILE) is None
+    ):
         pytest.skip("needs gcc or clang (SOA_CC) on an ELF system")
     d = tmp_path_factory.mktemp("snapshot")
     (d / "sections.c").write_text(SECTIONS, encoding="utf-8")
@@ -298,7 +307,10 @@ def test_a_snapshot_read_by_another_process_gives_everything_back(driver, tmp_pa
     run = resume(driver, snap)
     assert run.returncode == 0, run.stdout + run.stderr
     assert "the host's section: 17 bytes, kept by the host" in run.stdout
-    assert "entered 801DCB28 at 801DCB84; r5 77, mem AB; word 4242; heap 1000 bytes, 5A; data 00C0FFEE" in run.stdout
+    assert (
+        "entered 801DCB28 at 801DCB84; r5 77, mem AB; word 4242; heap 1000 bytes, 5A; data 00C0FFEE"
+        in run.stdout
+    )
     assert "the event ran" in run.stdout
     assert "resumed from" in run.stderr and "at frame 7, guest tick 123456789" in run.stderr
 
@@ -409,7 +421,7 @@ def test_a_resumed_function_runs_from_the_resume_point_with_the_registers_it_has
         f"void {fn}(CpuState* s);\n"
         "int main(void) {\n"
         "    static CpuState s;\n"
-        f"    {fn}(&s); printf(\"head %u\\n\", s.gpr[3]);\n"
+        f'    {fn}(&s); printf("head %u\\n", s.gpr[3]);\n'
         f"    s.gpr[3] = 5; s.spr[1000] = 0x{BASE + 4:08X}u; {fn}(&s);\n"
         '    printf("resumed %u spr %u\\n", s.gpr[3], s.spr[1000]);\n'
         "    return 0;\n}\n",

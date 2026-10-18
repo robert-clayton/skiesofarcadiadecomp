@@ -738,20 +738,24 @@ int snapshot_arm_resume(const char* path, char* why, size_t cap)
     return 0;
 }
 
+/* SOA_RESUME, read once: 0 (armed, or nothing asked), or 1 and why. */
+static int g_env_read, g_env_failed;
+static char g_env_why[600];
+
+int snapshot_resume_env(char* why, size_t cap)
+{
+    if (!g_env_read) {
+        const char* p = getenv("SOA_RESUME");
+        g_env_read = 1;
+        if (!g_resume_armed && p && *p && snapshot_arm_resume(p, g_env_why, sizeof g_env_why) != 0) g_env_failed = 1;
+    }
+    if (g_env_failed && why && cap) snprintf(why, cap, "SOA_RESUME: %s", g_env_why);
+    return g_env_failed;
+}
+
 int snapshot_resuming(void)
 {
-    static int env_read;
-    if (!env_read) {
-        const char* p = getenv("SOA_RESUME");
-        env_read = 1;
-        if (!g_resume_armed && p && *p) {
-            char why[600];
-            if (snapshot_arm_resume(p, why, sizeof why) != 0) {
-                fprintf(stderr, "[snapshot] SOA_RESUME: %s\n", why);
-                exit(1);
-            }
-        }
-    }
+    snapshot_resume_env(NULL, 0);
     return g_resume_armed;
 }
 
@@ -766,6 +770,7 @@ unsigned snapshot_resumed_frame(void)
 int snapshot_precheck(char* why, size_t cap)
 {
     const char* rec = game_record();
+    if (snapshot_resume_env(why, cap)) return 1;
     if (!snapshot_resuming()) return 0;
     if (*rec && !strstr(rec, "resume=801DCB84")) {
         snprintf(why, cap, "the game library was built without its resume point (config/resumepoints.txt): rebuild it");
@@ -776,21 +781,32 @@ int snapshot_precheck(char* why, size_t cap)
 
 void snapshot_after_load(CpuState* s); /* the fix-ups once every section is in */
 
-void snapshot_resume_run(CpuState* s)
+int snapshot_resume_run(CpuState* s)
 {
     char why[600];
     uint64_t t0 = plat_mono_ns();
     if (!g_loaded.file) {
         fprintf(stderr, "[snapshot] nothing to resume from\n");
-        exit(1);
+        return 1;
     }
+    /* A section that fails to load leaves the statics part the snapshot's and
+     * part not: the run does not start (the checks before it make this a
+     * matter of memory or of a file changed since it was checked). */
     if (snapshot_precheck(why, sizeof why) != 0 || !load_range(s, &g_loaded, 0, NSECTIONS, 0, why, sizeof why)) {
         fprintf(stderr, "[snapshot] cannot resume from %s: %s\n", g_loaded.path, why);
-        exit(1);
+        return 1;
     }
     snapshot_after_load(s);
     g_resumed = g_loaded.frame;
     g_skip_one = 1;
+    /* SOA_SNAPSHOT_AT means the frames of the run this one continues: one at
+     * or before the snapshot's frame was taken already (or is this one) */
+    if (g_nat < 0) at_parse();
+    {
+        int k;
+        for (k = 0; k < g_nat; k++)
+            if (g_at[k].frame <= g_loaded.frame) g_at[k].done = 1;
+    }
     fprintf(stderr, "[snapshot] resumed from %s at frame %u, guest tick %llu (%.0f ms)\n", g_loaded.path, g_loaded.frame,
             (unsigned long long)g_loaded.ticks, (double)(plat_mono_ns() - t0) / 1e6);
     /* main, entered at the top of its loop with every register as it was:
@@ -798,6 +814,7 @@ void snapshot_resume_run(CpuState* s)
     s->spr[RESUME_SPR] = RESUME_PC;
     dispatch(s, RESUME_FN);
     fprintf(stderr, "[snapshot] main returned after a resume\n");
+    return 0;
 }
 
 /* Once every section is in: what follows from the restored state rather than

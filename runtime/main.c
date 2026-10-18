@@ -33,12 +33,13 @@ void ENTRY_FN(CpuState* s);
  * elsewhere a thread of that size, which then owns the MEM1 guard (L7). */
 #define GUEST_STACK_BYTES ((size_t)32 << 20)
 int snapshot_resuming(void);              /* snapshot.c (docs/SNAPSHOT.md) */
-void snapshot_resume_run(CpuState* s);
+int snapshot_resume_run(CpuState* s);
+int snapshot_resume_env(char* why, size_t cap);
 static int run_guest(void* s)
 {
     plat_guard_owner();
-    if (snapshot_resuming()) snapshot_resume_run((CpuState*)s); /* SOA_RESUME: from a snapshot, not from the entry */
-    else ENTRY_FN((CpuState*)s);
+    if (snapshot_resuming()) return snapshot_resume_run((CpuState*)s); /* SOA_RESUME: from a snapshot, not the entry */
+    ENTRY_FN((CpuState*)s);
     return 0;
 }
 void hle_report(void);
@@ -1537,7 +1538,14 @@ int main(int argc, char** argv)
     swap_env(); /* SOA_COUNT_CALLS, SOA_PIPE_CENSUS */
     if (swap_pipe_census_on()) gx_set_pipe_census(swap_pipe_census_note);
     record_env(&s); /* SOA_RECORD (docs/RECORD.md) */
-    snapshot_resuming(); /* SOA_RESUME read and its file checked here, before the run (docs/SNAPSHOT.md) */
+    {
+        /* SOA_RESUME read and its file checked here, before the run (docs/SNAPSHOT.md) */
+        char why[700];
+        if (snapshot_resume_env(why, sizeof why)) {
+            fprintf(stderr, "[snapshot] %s\n", why);
+            return 1;
+        }
+    }
     if (argc > 2 && strcmp(argv[1], "--replay") == 0) {
         /* Render one captured frame (see gx.c frame capture) to <base>.png,
          * or a consecutive pair and the image between them (H10). */
@@ -1592,7 +1600,7 @@ int main(int argc, char** argv)
      * 0.3-1.1 s at the first ARAM DMA under load; here, before the game's
      * first instruction, it is not time the game's clock sees. */
     aram_census_prepare();
-    plat_run_on_big_stack(run_guest, &s, GUEST_STACK_BYTES);
+    if (plat_run_on_big_stack(run_guest, &s, GUEST_STACK_BYTES) != 0) return 1; /* a resume that could not start */
 
     fprintf(stderr, "[boot] entry point returned\n");
     hle_report();

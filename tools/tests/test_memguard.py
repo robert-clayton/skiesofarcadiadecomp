@@ -57,6 +57,10 @@ void si_set_config_extra(const char* x) { (void)x; }
 void si_set_pad_filter(void (*fn)(unsigned, void*)) { (void)fn; }
 void dispatch(CpuState* s, uint32_t a) { (void)s; (void)a; }
 int dispatch_known(uint32_t a) { (void)a; return 0; }
+int snapshot_resuming(void) { return 0; }
+int snapshot_resume_run(CpuState* s) { (void)s; return 0; }
+int snapshot_resume_env(char* why, size_t cap) { (void)why; (void)cap; return 0; }
+void snapshot_safe_point(CpuState* s) { (void)s; }
 void gxr_set_projection_filter(void (*fn)(float p[6], int o)) { (void)fn; }
 void gxr_set_texture_provider(int (*fn)(uint64_t, uint32_t, uint32_t, uint32_t, const uint8_t*, const uint8_t**, uint32_t*, uint32_t*)) { (void)fn; }
 /* The renderer's phase words and its clock. main.c reads them for the profile

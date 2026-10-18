@@ -96,7 +96,7 @@ int soa_host_start(const SoaHostStart* start, char* why, size_t cap)
     /* A resumed run (soa_host_resume, SOA_RESUME): the game library has the
      * resume point and the host has set the snapshot's replacements and given
      * its events back, or nothing starts (docs/SNAPSHOT.md). */
-    if (snapshot_resuming() && snapshot_precheck(why, cap) != 0) goto refused;
+    if (snapshot_precheck(why, cap) != 0) goto refused;
     /* The switches the run reads, set as soa.ini's are: only where the
      * environment has not set them already. */
     if (start->root && *start->root) {

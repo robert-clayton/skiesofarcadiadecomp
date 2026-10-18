@@ -584,6 +584,50 @@ register as it found it), the flight scene of its `script_swap_run.py
 The same as the plugin's own fix gave (13,100 of 13,100), with no help from
 the plugin. The 279 hashes cost nothing measurable there.
 
+## Save states and the clock (2026-10-18)
+
+A snapshot (docs/SNAPSHOT.md) is the run at the top of a frame, and a run
+resumed from it is that run: under the fixed clock it repeats from there as
+it would have from power-on. Everything the clock's rules decide with is in
+it, since a wait found a pass later moves time and every frame after it:
+
+- the fixed clock's tick count, its statistics, and "something is due"
+  (`g_clock_due`, and with it every swap guard's `SWAP_DUE` byte, set again
+  from it as the run resumes);
+- the quiet rule's two tables of loop states (`g_quiet`, `g_quiet_off`: each
+  slot's registers, floats, gather-pipe count, running sums, the answer
+  count and memory hash), their epochs and sums, the run of back edges, the
+  timebase steps of both tables, and the count of native answers they compare
+  (swap.c's `g_swap_answers`); the old rule's count of back edges;
+- the decrementer (its value, when it was set, armed) and the tick of its
+  last exception (the "second at one instant" rule), the retrace's last tick,
+  AI's sample-counter base, and every device's due tick: a disc read or an
+  ARAM DMA in flight, the AI block playing, a native event's.
+
+The clock's configuration -- SOA_CLOCK, SOA_CLOCK_POLL_TICKS,
+SOA_CLOCK_READ_TICKS, SOA_CLOCK_RTC, SOA_CLOCK_SPIN -- is read at the start
+of the resumed run as of any run, and must be the snapshot's: it is checked,
+and a resume under another is refused. (So is SOA_SEED.) The calendar
+follows: the RTC is SOA_CLOCK_RTC plus the restored ticks.
+
+**Under a strict host.** The held point is a frame's end, inside the XFB
+copy, with the frame-end spin and the next frame's top still to run; that
+is no place to resume, so `soa_host_snapshot` while frame F is held asks for
+the snapshot at the safe point that follows: of frame F+1, taken before the
+host is held at F+1. What the host gave at F is in it -- the pad latched at
+F's end for frame F+1 (`g_latched`), the writes made at F's end, pads named
+for later frames -- and its native events come back with their due ticks
+(an event's function and data as their module and offset). The time the
+guest waited at F is no guest time, so it is not in the snapshot either.
+A resumed strict run's first held frame is F+1, and from there it is the
+run that took the snapshot: docs/SNAPSHOT.md, "Proof", has the strict pair
+(frames 3,000 to 3,999 of the opening, the 5 ms event's 6,660 runs after the
+snapshot, the counts and the strict stats all the same).
+
+**Under the real clock** a snapshot resumes with its guest time, counted on
+from the host's time at the resume; such a run never repeated before the
+snapshot and does not after it.
+
 ## Deterministic runs under a host (strict mode)
 
 Under `SOA_CLOCK=fixed` the runtime repeats; a run in the editor does not

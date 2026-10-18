@@ -373,7 +373,7 @@ gxr  g_fence_after_near  scratch
 gxr  g_fence_sleepers  scratch
 gxr  g_flushes  report
 gxr  g_frame_gate  scratch
-gxr  g_frames_presented  saved  # through g_presented_base
+gxr  g_frames_presented  host  # the frames a host is told of, counted on from g_presented_base
 gxr  g_gxr_phase  report
 gxr  g_gxr_phase_last  report
 gxr  g_gxr_ticks  report
@@ -883,7 +883,9 @@ si  said  report
 
 snapshot  OPS  config
 snapshot  SECTIONS  config
-snapshot  env_read  config
+snapshot  g_env_failed  config  # SOA_RESUME, read once at the start
+snapshot  g_env_read  config
+snapshot  g_env_why  config
 snapshot  g_at  config  # SOA_SNAPSHOT_AT, read again: a resumed run takes the ones still ahead
 snapshot  g_host_hook  config
 snapshot  g_host_hook_user  config

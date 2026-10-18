@@ -85,7 +85,9 @@ void snapshot_safe_point(struct CpuState* s);
  * snapshot (SOA_RESUME, or soa_host_resume): then snapshot_resume_run runs
  * the guest from it in place of the entry point. */
 int snapshot_resuming(void);
-void snapshot_resume_run(struct CpuState* s);
+int snapshot_resume_run(struct CpuState* s); /* 0 when main returned, 1 when it could not start */
+/* SOA_RESUME read (once) and its file checked: 0, or 1 and why. */
+int snapshot_resume_env(char* why, size_t cap);
 /* The frame a resumed run began at (the snapshot's), or 0; and before it
  * has, the frame of the snapshot armed. */
 unsigned snapshot_resumed_frame(void);

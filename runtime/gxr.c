@@ -3505,8 +3505,5 @@ void gxr_snap(Snap* sn)
             g_ts[0].pixels = px[0], g_ts[0].rej_depth = px[1], g_ts[0].rej_alpha = px[2];
         }
     }
-    if (snap_loading(sn) && !snap_failed(sn)) {
-        g_presented_base = presented;
-        g_frames_presented = 0; /* no worker runs yet: the pool starts at the first draw */
-    }
+    if (snap_loading(sn) && !snap_failed(sn)) g_presented_base = presented - gxr_presented() + g_presented_base;
 }

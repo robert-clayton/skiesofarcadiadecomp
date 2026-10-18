@@ -694,7 +694,17 @@ def main() -> int:
             f"{len(savepoints)} savepoints"
         )
     em = Emitter(
-        dol, functions, tables, code, names, hle, hooks, savepoints, traces, swap=True, resumes=resumes
+        dol,
+        functions,
+        tables,
+        code,
+        names,
+        hle,
+        hooks,
+        savepoints,
+        traces,
+        swap=True,
+        resumes=resumes,
     )
     entries = sorted(functions)
     if args.limit:
