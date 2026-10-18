@@ -24,6 +24,7 @@
 #include "mod.h"
 #include "swap.h"
 #include "irq.h"
+#include "snapshot.h"
 #include <fenv.h>
 #include <math.h>
 #include <stdio.h>
@@ -92,6 +93,10 @@ int soa_host_start(const SoaHostStart* start, char* why, size_t cap)
     }
     if (soa_load_game(start->game, why, cap) != 0) goto refused;
     swap_attach(); /* what the host asked to swap before there was a game */
+    /* A resumed run (soa_host_resume, SOA_RESUME): the game library has the
+     * resume point and the host has set the snapshot's replacements and given
+     * its events back, or nothing starts (docs/SNAPSHOT.md). */
+    if (snapshot_resuming() && snapshot_precheck(why, cap) != 0) goto refused;
     /* The switches the run reads, set as soa.ini's are: only where the
      * environment has not set them already. */
     if (start->root && *start->root) {
@@ -2050,5 +2055,131 @@ int soa_host_read(uint32_t address, void* out, unsigned bytes)
     if (!mem || !out || address < 0x80000000u || address >= 0x81800000u || off + (uint64_t)bytes > MEM1_SIZE) return 0;
     memcpy(out, mem + off, bytes);
     return 1;
+}
+
+/* ---- save states (docs/SNAPSHOT.md) ---------------------------------------------
+ * soa_host_snapshot asks for one at the next frame's start (the main loop's
+ * top), on the guest's thread; soa_host_snapshot_status says when it is
+ * written. soa_host_resume, before the start, names the one the run begins
+ * from. A host's own state goes in with soa_host_snapshot_put (from the hook,
+ * on the guest's thread as the snapshot is taken) and comes back with
+ * soa_host_snapshot_get. */
+int soa_host_snapshot(const char* path)
+{
+    if (!path || !*path || plat_load32(&g_state) != SOA_HOST_RUNNING || strict_refuses()) return 0;
+    return snapshot_request(path);
+}
+
+int soa_host_snapshot_status(long* frame, char* why, size_t cap)
+{
+    return snapshot_status(frame, why, cap);
+}
+
+int soa_host_resume(const char* path, char* why, size_t cap)
+{
+    char none[8];
+    if (!why || !cap) why = none, cap = sizeof none;
+    if (plat_load32(&g_state) != SOA_HOST_IDLE) {
+        snprintf(why, cap, "the run has started: a resume is named before soa_host_start");
+        return 1;
+    }
+    if (snapshot_arm_resume(path, why, cap) != 0) return 1;
+    plat_setenv("SOA_RESUME", path && *path ? path : "");
+    return 0;
+}
+
+long soa_host_resumed_frame(void)
+{
+    if (plat_load32(&g_state) == SOA_HOST_IDLE) return snapshot_resuming() ? (long)snapshot_armed_frame() : -1;
+    return snapshot_resumed_frame() ? (long)snapshot_resumed_frame() : -1;
+}
+
+int irq_event_rebind(int id, IrqEventFn fn, void* user, void (*extra)(void)); /* irq.c */
+int soa_host_resume_event(int id, SoaHostEvent fn, void* user)
+{
+    if (plat_load32(&g_state) != SOA_HOST_IDLE || !fn) return 0;
+    return irq_event_rebind(id, host_event, user, (void (*)(void))fn);
+}
+
+int soa_host_snapshot_put(const char* name, const void* data, size_t bytes)
+{
+    return snapshot_host_put(name, data, bytes);
+}
+
+long soa_host_snapshot_get(const char* name, void* out, size_t max)
+{
+    return snapshot_host_get(name, out, max);
+}
+
+void soa_host_set_snapshot_hook(void (*fn)(void* user), void* user)
+{
+    snapshot_set_host_hook(fn, user);
+}
+
+/* host.c's part of a snapshot: strict mode's latched pads (frame F+1's,
+ * latched at F's end, before the snapshot point), the ports, pads named for
+ * later frames, writes not yet made, and the strict counts. */
+void host_snap(Snap* sn)
+{
+    int strict = g_strict;
+    unsigned k, npad, nwrites;
+    SNAP_CHECK(sn, strict, "strict mode (soa_host_set_strict)");
+    if (!snap_loading(sn)) {
+        plat_lock(&g_pad_lock);
+        npad = g_npad_at;
+        SNAP(sn, g_ports);
+        SNAP(sn, g_latched);
+        SNAP(sn, npad);
+        for (k = 0; k < npad; k++) SNAP(sn, g_pad_at[k]);
+        plat_unlock(&g_pad_lock);
+        plat_lock(&g_write_lock);
+        nwrites = g_nwrites;
+        SNAP(sn, nwrites);
+        for (k = 0; k < nwrites; k++) SNAP(sn, g_writes[k]);
+        plat_unlock(&g_write_lock);
+        plat_lock(&g_stats_lock);
+        SNAP(sn, g_strict_stats);
+        plat_unlock(&g_stats_lock);
+        return;
+    }
+    {
+        HostPort ports[2], latched[2];
+        PadAt pads[MAX_PAD_AT];
+        HostWrite* writes = (HostWrite*)malloc(sizeof(HostWrite) * MAX_WRITES);
+        SoaHostStrictStats st;
+        if (!writes) {
+            snap_fail(sn, "out of memory");
+            return;
+        }
+        SNAP(sn, ports);
+        SNAP(sn, latched);
+        SNAP(sn, npad);
+        for (k = 0; k < npad && k < MAX_PAD_AT; k++) SNAP(sn, pads[k]);
+        SNAP(sn, nwrites);
+        for (k = 0; k < nwrites && k < MAX_WRITES; k++) SNAP(sn, writes[k]);
+        SNAP(sn, st);
+        if (!snap_failed(sn) && (npad > MAX_PAD_AT || nwrites > MAX_WRITES)) snap_fail(sn, "the host's queues are too long");
+        if (!snap_failed(sn)) {
+            plat_lock(&g_pad_lock);
+            memcpy(g_ports, ports, sizeof g_ports);
+            memcpy(g_latched, latched, sizeof g_latched);
+            /* the snapshot's named pads first, then any the host named before this start */
+            for (k = 0; k < g_npad_at && npad < MAX_PAD_AT; k++) pads[npad++] = g_pad_at[k];
+            memcpy(g_pad_at, pads, npad * sizeof *pads);
+            g_npad_at = npad;
+            plat_unlock(&g_pad_lock);
+            plat_lock(&g_write_lock);
+            memcpy(g_writes, writes, nwrites * sizeof *writes);
+            g_nwrites = nwrites;
+            plat_unlock(&g_write_lock);
+            plat_lock(&g_stats_lock);
+            g_strict_stats.held += st.held;
+            g_strict_stats.pads += st.pads;
+            g_strict_stats.late += st.late;
+            g_strict_stats.refused += st.refused;
+            plat_unlock(&g_stats_lock);
+        }
+        free(writes);
+    }
 }
 #endif

@@ -558,3 +558,17 @@ void record_env(CpuState* s)
 }
 
 #endif
+
+/* A snapshot (snapshot.h; docs/SNAPSHOT.md): a recording's counts decide
+ * which calls it records, and a recorded call holds interrupts back, so a
+ * run being recorded is not one a snapshot can be taken of or resumed into. */
+#include "snapshot.h"
+int record_busy(void)
+{
+    return g_nfn != 0;
+}
+
+void record_snap(Snap* sn)
+{
+    if (g_nfn) snap_fail(sn, "SOA_RECORD is on: a recording's counts are part of the run, and it is not snapshotted");
+}

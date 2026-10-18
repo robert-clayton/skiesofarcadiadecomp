@@ -472,6 +472,8 @@ typedef struct { unsigned frame; uint64_t retrace; PadState st; } PadFrame;
 static PadFrame* g_play;
 static int g_play_n, g_play_cap, g_play_i = -1;
 static int g_play_tried, g_play_done;
+static unsigned g_play_end_frame; /* the frame the recording ran out at (pad_replay_end) */
+static void pad_replay_end(unsigned frame);
 static const char* g_play_path;
 static uint64_t g_play_late;                      /* states delivered a read later than the recording had them */
 static long long g_play_drift, g_play_drift_max;  /* retraces ahead of (+) or behind (-) the recording */
@@ -706,6 +708,7 @@ static void pad_replay_end(unsigned frame)
     unsigned limit = frames ? (unsigned)atoi(frames) : 0u;
     unsigned target = frame + grace;
     g_play_done = 1;
+    g_play_end_frame = frame;
     if (!grace) {
         fprintf(stderr, "[pad] the recording ran out at frame %u; SOA_PAD_STOP=0, so the run carries "
                         "on with the controller neutral\n", frame);
@@ -1169,5 +1172,46 @@ void si_report(void)
                             "because more than one was due at the same read\n",
                     (unsigned long long)g_play_late, g_play_late == 1 ? "" : "s",
                     g_play_late == 1 ? "it" : "them");
+    }
+}
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) ------------------------------
+ * The serial interface's registers and buffers; a SOA_PAD_FILE replay's
+ * cursor, which moves one line a read and is no function of the frame (the
+ * file itself is read again, and must be the snapshot's); and the host
+ * buttons' last state, so a chord held across the snapshot does not fire
+ * again. SOA_PAD scripts are a function of the frame alone. */
+#include "snapshot.h"
+void si_snap(Snap* sn)
+{
+    int n;
+    SNAP(sn, g_outbuf);
+    SNAP(sn, g_inbuf_hi);
+    SNAP(sn, g_inbuf_lo);
+    SNAP(sn, g_poll);
+    SNAP(sn, g_comcsr);
+    SNAP(sn, g_sr);
+    SNAP(sn, g_exilk);
+    SNAP(sn, g_iobuf);
+    SNAP(sn, g_present);
+    SNAP(sn, g_transfers);
+    SNAP(sn, g_polls);
+    SNAP(sn, g_reads);
+    if (!g_play_tried) pad_replay_load();
+    n = g_play_n;
+    SNAP_CHECK(sn, n, "the SOA_PAD_FILE recording's length");
+    SNAP(sn, g_play_i);
+    SNAP(sn, g_play_done);
+    SNAP(sn, g_play_end_frame);
+    SNAP(sn, g_play_late);
+    SNAP(sn, g_play_drift);
+    SNAP(sn, g_play_drift_max);
+    SNAP(sn, g_host);
+    SNAP(sn, g_host_prev);
+    SNAP(sn, g_host_frame);
+    SNAP(sn, g_host_valid);
+    if (snap_loading(sn) && !snap_failed(sn) && g_play_done && g_play_end_frame) {
+        g_play_done = 0;
+        pad_replay_end(g_play_end_frame); /* the stop it set, again */
     }
 }

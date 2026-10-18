@@ -30,6 +30,14 @@
  * OUT gets one line a frame: the frame, a hash of a megabyte of the game's
  * globals as the frame ended, every 100th frame a hash of all of MEM1, and at
  * the end the strict stats, the event's ticks and a hash of every call count.
+ * Each run of the event adds a line too: its due and its tick.
+ *
+ * Save states (docs/SNAPSHOT.md): STRICT_SNAPSHOT=F:path asks for one while
+ * frame F is held (it is of frame F+1); STRICT_RESUME=path starts the run
+ * from one. The event's count and running hash are this host's own state,
+ * so they go into the snapshot as a section of its own (the snapshot hook,
+ * soa_host_snapshot_put) and come back with soa_host_snapshot_get: a resumed
+ * run's last line is the whole run's.
  */
 #define _GNU_SOURCE
 #include "soa_host.h"
@@ -142,6 +150,18 @@ static void tick_event(void* user, SoaHostCall* call, uint64_t due, uint64_t now
     g_ev_n++;
     g_ev_hash = fnv(g_ev_hash, (const uint8_t*)&due, sizeof due);
     g_ev_hash = fnv(g_ev_hash, (const uint8_t*)&now, sizeof now);
+    fprintf(g_out, "event %llu due %llu now %llu\n", (unsigned long long)g_ev_n, (unsigned long long)due, (unsigned long long)now);
+}
+
+/* This host's state as a snapshot is taken: on the game's thread, at the
+ * frame's start the snapshot is of. */
+static void snapshot_hook(void* user)
+{
+    uint64_t mine[2];
+    (void)user;
+    mine[0] = g_ev_n;
+    mine[1] = g_ev_hash;
+    soa_host_snapshot_put("strict", mine, sizeof mine);
 }
 
 static uint8_t g_mem[MEM1];
@@ -182,7 +202,9 @@ int main(int argc, char** argv)
     SoaHostStart start;
     char why[256];
     pthread_t input;
-    long last = -1, frames;
+    long last = -1, frames, snap_at = -1;
+    const char* snap_path = NULL;
+    int snap_said = 0;
     const char* e = getenv("SOA_FRAMES");
     if (argc != 8) {
         fprintf(stderr, "usage: strict_host GAME DISC ROOT SEED MAXDELAY_US strict|loose OUT (SOA_FRAMES ends the run)\n");
@@ -206,6 +228,19 @@ int main(int argc, char** argv)
         soa_host_hold(1);
         setenv("SOA_COUNT_CALLS", "1", 0);
     }
+    {
+        const char* resume = getenv("STRICT_RESUME");
+        soa_host_set_snapshot_hook(snapshot_hook, NULL);
+        if (resume && *resume) {
+            uint64_t mine[2];
+            if (soa_host_resume(resume, why, sizeof why)) {
+                fprintf(stderr, "strict_host: %s\n", why);
+                return 1;
+            }
+            if (soa_host_snapshot_get("strict", mine, sizeof mine) == (long)sizeof mine) g_ev_n = mine[0], g_ev_hash = mine[1];
+            fprintf(g_out, "resumed at frame %ld\n", soa_host_resumed_frame());
+        }
+    }
     pthread_create(&input, NULL, input_main, NULL);
     start.abi = SOA_HOST_ABI;
     start.game = argv[1];
@@ -214,6 +249,14 @@ int main(int argc, char** argv)
     if (soa_host_start(&start, why, sizeof why)) {
         fprintf(stderr, "strict_host: %s\n", why);
         return 1;
+    }
+    {
+        const char* snap = getenv("STRICT_SNAPSHOT");
+        if (snap && *snap) {
+            char* colon;
+            snap_at = strtol(snap, &colon, 10);
+            if (*colon == ':') snap_path = colon + 1;
+        }
     }
     for (;;) {
         long f;
@@ -227,6 +270,15 @@ int main(int argc, char** argv)
             }
             delay();
             note_frame(f);
+            if (snap_path && f == snap_at && !soa_host_snapshot(snap_path)) fprintf(stderr, "strict_host: soa_host_snapshot refused\n");
+            if (snap_path && f > snap_at && !snap_said) {
+                long at = -1;
+                int st = soa_host_snapshot_status(&at, why, sizeof why);
+                if (st) {
+                    fprintf(g_out, "snapshot %s at frame %ld%s%s\n", st > 0 ? "written" : "failed", at, st < 0 ? ": " : "", st < 0 ? why : "");
+                    snap_said = 1;
+                }
+            }
             if (f == 2000) soa_host_schedule(soa_host_guest_ticks() + 1000, 202500, tick_event, NULL);
             ask_pad(f + 1, 1); /* the input thread sets it, at a time of its own, before this frame is let go */
             if (f >= frames - 1) note_end();

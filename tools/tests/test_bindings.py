@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from soa.hle import load_bindings  # noqa: E402
 
-BINDING_FILES = ("hle.txt", "hooks.txt", "savepoints.txt", "trace.txt")
+BINDING_FILES = ("hle.txt", "hooks.txt", "savepoints.txt", "trace.txt", "resumepoints.txt")
 
 
 def write(tmp_path: Path, body: str) -> Path:

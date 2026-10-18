@@ -643,3 +643,59 @@ void exi_report(void)
             (unsigned long long)g_imm, (unsigned long long)g_dma, (unsigned long long)g_card_reads,
             (unsigned long long)g_card_writes, (unsigned long long)g_card_ints);
 }
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) ------------------------------
+ * The three channels, the card's command state, SRAM and the RTC's latch, and
+ * the card's whole image as the game has written it so far. The card file is
+ * written through as the game saves, so the run that took the snapshot has
+ * moved its file on since: a resumed run writes the snapshot's image to its
+ * own card (SOA_CARD) at once, and goes on from there. */
+#include "snapshot.h"
+void exi_snap(Snap* sn)
+{
+    void* card = g_card;
+    size_t bytes = g_card ? (size_t)CARD_BYTES : 0u;
+    int dirty;
+    uint32_t lo, hi;
+    dirty = g_card_dirty, lo = g_card_dirty_lo, hi = g_card_dirty_hi;
+    SNAP(sn, g_ch);
+    SNAP(sn, g_card_addr);
+    SNAP(sn, g_card_cmd);
+    SNAP(sn, g_card_status);
+    SNAP(sn, g_card_int_en);
+    SNAP(sn, g_card_int_req);
+    SNAP(sn, dirty);
+    SNAP(sn, lo);
+    SNAP(sn, hi);
+    SNAP(sn, g_sram);
+    SNAP(sn, g_sram_init);
+    SNAP(sn, g_rtc_cmd);
+    SNAP(sn, g_rtc_latch);
+    SNAP(sn, g_imm);
+    SNAP(sn, g_dma);
+    SNAP(sn, g_card_reads);
+    SNAP(sn, g_card_writes);
+    SNAP(sn, g_card_ints);
+    if (snap_loading(sn)) card = NULL;
+    snap_buffer(sn, &card, &bytes);
+    if (!snap_loading(sn) || snap_failed(sn)) return;
+    if (bytes && bytes != (size_t)CARD_BYTES) {
+        free(card);
+        snap_fail(sn, "the card image is %zu bytes, not %u", bytes, (unsigned)CARD_BYTES);
+        return;
+    }
+    if (card) {
+        const char* env = getenv("SOA_CARD");
+        if (env && *env) g_card_path = env; /* as card_load names it */
+        free(g_card);
+        g_card = (uint8_t*)card;
+        if (g_card_file) {
+            fclose(g_card_file);
+            g_card_file = NULL;
+        }
+        g_card_dirty = 1, g_card_dirty_lo = 0, g_card_dirty_hi = CARD_BYTES;
+        card_flush();
+        fprintf(stderr, "[exi] memory card %s: the snapshot's image written to it\n", g_card_path);
+    }
+    g_card_dirty = dirty, g_card_dirty_lo = lo, g_card_dirty_hi = hi;
+}

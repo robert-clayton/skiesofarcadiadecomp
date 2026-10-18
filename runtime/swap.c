@@ -526,3 +526,112 @@ void swap_env(void)
         fprintf(stderr, "[swap] counting every call of the %u translated functions (SOA_COUNT_CALLS)\n", total - native);
     }
 }
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) ------------------------------
+ * The replacements are the host's, set again by the host of a resumed run
+ * before it starts: the "swaps" section is only the list they must match,
+ * each function's address and the module and offset of what answers it. The
+ * "swap" section is the count of answers the quiet rule keeps (irq.c compares
+ * it pass by pass) and, while counting, every function's counts, so a run
+ * resumed with counting on counts from the start of the run it continues. */
+#include "snapshot.h"
+
+void swap_list_snap(Snap* sn)
+{
+    const SoaGame* g;
+    uint32_t n, count, i, hooked = 0, missing = 0, extra = 0, first_missing = 0, first_extra = 0;
+    plat_lock(&g_lock);
+    g = ready_locked();
+    count = g ? g->count : 0u;
+    plat_unlock(&g_lock);
+    SNAP_CHECK(sn, count, "the game library's count of functions");
+    if (!g || snap_failed(sn)) return;
+    if (!snap_loading(sn)) {
+        for (i = 0; i < count; i++) hooked += (g->swap[i] & SWAP_HOOK) != 0;
+        SNAP(sn, hooked);
+        for (i = 0; i < count; i++) {
+            Swap w;
+            void *h, *f;
+            if (!(g->swap[i] & SWAP_HOOK)) continue;
+            plat_lock(&g_lock);
+            w = g_swap[i];
+            plat_unlock(&g_lock);
+            h = (void*)w.handler, f = (void*)w.fn;
+            SNAP(sn, i);
+            snap_pointer(sn, &h, NULL);
+            snap_pointer(sn, &f, NULL);
+        }
+        return;
+    }
+    SNAP(sn, n);
+    {
+        uint8_t* want = (uint8_t*)calloc(count ? count : 1, 1);
+        if (!want) {
+            snap_fail(sn, "out of memory");
+            return;
+        }
+        for (; n && !snap_failed(sn); n--) {
+            void *h = NULL, *f = NULL;
+            int ok_h = 1, ok_f = 1;
+            SNAP(sn, i);
+            snap_pointer(sn, &h, &ok_h);
+            snap_pointer(sn, &f, &ok_f);
+            if (snap_failed(sn)) break;
+            if (i >= count) {
+                snap_fail(sn, "a replacement of the snapshot's is past the game's functions");
+                break;
+            }
+            want[i] = 1;
+            if (g->swap[i] & SWAP_HOOK) {
+                Swap w;
+                plat_lock(&g_lock);
+                w = g_swap[i];
+                plat_unlock(&g_lock);
+                if (ok_h && ok_f && (h != (void*)w.handler || f != (void*)w.fn) && !snap_dry(sn))
+                    fprintf(stderr, "[snapshot] %08X is replaced by another function than when the snapshot was taken (a "
+                                    "rebuilt host?)\n", g->address[i]);
+            }
+        }
+        for (i = 0; i < count && !snap_failed(sn); i++) {
+            int have = (g->swap[i] & SWAP_HOOK) != 0;
+            if (want[i] && !have && !missing++) first_missing = g->address[i];
+            if (!want[i] && have && !extra++) first_extra = g->address[i];
+        }
+        free(want);
+    }
+    if (!snap_failed(sn) && (missing || extra))
+        snap_fail(sn, "the replacements are not the snapshot's: %u of its are not set (the first %08X), %u are set that it did "
+                      "not have (the first %08X); a resumed run's host sets the same ones before it starts",
+                  missing, first_missing, extra, first_extra);
+}
+
+void swap_snap(Snap* sn)
+{
+    uint64_t answers = g_swap_answers;
+    uint32_t counting = (uint32_t)g_counting, count = g_game ? g_game->count : 0u;
+    SNAP(sn, answers);
+    SNAP(sn, counting);
+    SNAP_CHECK(sn, count, "the game library's count of functions");
+    if (snap_failed(sn)) return;
+    if (counting && count) {
+        void *c = NULL, *a = NULL, *t = NULL;
+        size_t bytes = (size_t)count * sizeof(uint64_t), cb = bytes, ab = bytes, tb = bytes;
+        if (!snap_loading(sn)) c = g_calls, a = g_answered, t = g_translated;
+        snap_buffer(sn, &c, &cb);
+        snap_buffer(sn, &a, &ab);
+        snap_buffer(sn, &t, &tb);
+        if (snap_loading(sn)) {
+            if (!snap_failed(sn) && g_counting && cb == bytes && ab == bytes && tb == bytes) {
+                memcpy(g_calls, c, bytes); /* counted from the start of the run this one continues */
+                memcpy(g_answered, a, bytes);
+                memcpy(g_translated, t, bytes);
+            }
+            free(c), free(a), free(t);
+        }
+    }
+    if (snap_loading(sn) && !snap_failed(sn)) {
+        g_swap_answers = answers;
+        if (g_counting && !counting)
+            fprintf(stderr, "[snapshot] the snapshot was taken without counting calls: the counts start at the resume\n");
+    }
+}

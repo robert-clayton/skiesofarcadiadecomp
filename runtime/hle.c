@@ -609,3 +609,22 @@ int hle_clock_fixed(void)
 {
     return g_clock_fixed;
 }
+
+/* ---- a snapshot (snapshot.h) ----------------------------------------------
+ * The spin detector's run of reads is the future (a run that ends in [spin]
+ * ends there whether resumed or not); the register counts are the report's. */
+#include "snapshot.h"
+void hle_snap(Snap* sn)
+{
+    int started = g_tb_started;
+    SNAP(sn, g_hits);
+    SNAP(sn, g_syscalls);
+    SNAP(sn, g_spin_ea);
+    SNAP(sn, g_spin_same);
+    SNAP(sn, g_reads_since_write);
+    SNAP(sn, started);
+    if (snap_loading(sn) && started && !g_tb_started) {
+        timebase(); /* the clock set up as the first read sets it (the real clock's origin) */
+        g_tb_started = 1;
+    }
+}

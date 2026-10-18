@@ -395,6 +395,14 @@ int plat_run_on_big_stack(int (*fn)(void*), void* arg, size_t bytes);
 void* plat_dl_open(const char* path, char* err, size_t cap);
 void* plat_dl_sym(void* lib, const char* name);
 void plat_dl_close(void* lib);
+/* Where a pointer lies among the loaded modules (the program, its libraries):
+ * the module's file name, without its folder, and the offset from where the
+ * module is loaded; 0 for a pointer into none (the heap, a stack). And back:
+ * the address at that offset of the loaded module of that name, or NULL. For
+ * a snapshot's pointers (snapshot.h), which a fresh process finds again with
+ * its modules elsewhere. */
+int plat_addr_module(const void* p, char* name, size_t cap, uintptr_t* off);
+void* plat_module_addr(const char* name, uintptr_t off);
 /* One directory, not its parents: 1 when it is there afterwards, made now or
  * already (distribution R2: the pipeline cache under the port root). */
 int plat_mkdir(const char* path);

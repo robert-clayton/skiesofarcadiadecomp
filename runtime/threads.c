@@ -322,6 +322,41 @@ void fn_802335C4(CpuState* s)
 #endif
 }
 
+/* A snapshot (snapshot.h) at the main loop's top: no thread is parked in a
+ * SelectThread then -- the guest is running its one thread, and its savepoint
+ * jmp_buf is dead -- so each thread is its context, whether it has started
+ * and the registers of its last save (OSSaveContext's copy, which the next
+ * resume of it would put back). A thread on a fiber of its own (a second
+ * guest thread, Windows only) has a host stack no file can hold: refused. */
+#include "snapshot.h"
+void threads_snap(Snap* sn)
+{
+    int i;
+    uint32_t n = MAX_THREADS;
+    SNAP_CHECK(sn, n, "the table of guest threads");
+    if (!snap_loading(sn))
+        for (i = 0; i < MAX_THREADS; i++)
+            if (g_threads[i].ctx && g_threads[i].started && g_threads[i].fiber != current_fiber()) {
+                snap_fail(sn, "guest thread %08X runs on a fiber of its own; a snapshot holds one thread", g_threads[i].ctx);
+                return;
+            }
+    for (i = 0; i < MAX_THREADS; i++) {
+        GuestThread* t = &g_threads[i];
+        SNAP(sn, t->ctx);
+        SNAP(sn, t->started);
+        snap_bytes(sn, &t->saved, offsetof(CpuState, mem));
+        if (snap_loading(sn)) {
+            t->fiber = current_fiber();
+            memset(&t->jmp, 0, sizeof t->jmp);
+            t->saved.mem = g_s ? g_s->mem : NULL;
+            t->saved.user = g_s ? g_s->user : NULL;
+        }
+    }
+    SNAP(sn, g_saves);
+    SNAP(sn, g_resumes);
+    SNAP(sn, g_switches);
+}
+
 /* OSSwitchFiber(pc, sp) -- 0x802336A4. Call pc on a different stack. */
 void fn_802336A4(CpuState* s)
 {

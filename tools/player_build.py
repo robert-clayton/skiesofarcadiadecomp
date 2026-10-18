@@ -56,6 +56,7 @@ BAKED = (
     "config/hle.txt",
     "config/hooks.txt",
     "config/savepoints.txt",
+    "config/resumepoints.txt",
     "config/trace.txt",
     "config/functions.tsv",
     "runtime/decomp_swap.c",

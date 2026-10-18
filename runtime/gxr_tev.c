@@ -1467,3 +1467,94 @@ void tev_pixel(const TevSetup* T, const int ras[2][4], const float tex[8][4], ui
 
     *alpha_pass = alpha_passes(T, out[3]);
 }
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) ------------------------------
+ * TMEM (the palettes loaded into it), the combiner's colour and constant
+ * registers (built up a channel pair at a time, so not to be had from GX's
+ * register shadows), and the texture cache whole: its decodes, hashes and
+ * epochs. A cache started empty would decode afresh what this one keeps by
+ * design -- mip levels the hash does not cover, a texture rewritten within
+ * an epoch -- and the picture could differ. Taken after gxr_flush, so the
+ * graveyard is empty and no draw holds a pointer into the cache. */
+#include "snapshot.h"
+void tex_snap(Snap* sn)
+{
+    int i, l, n = TEX_CACHE, used = g_cache_used;
+    if (!snap_loading(sn) && (g_grave_n || g_building)) {
+        snap_fail(sn, "the texture cache is in use by a draw being built");
+        return;
+    }
+    SNAP_CHECK(sn, n, "the texture cache's size");
+    SNAP(sn, g_tmem);
+    SNAP(sn, g_tev_reg);
+    SNAP(sn, g_tev_konst);
+    SNAP(sn, used);
+    SNAP(sn, g_index);
+    SNAP(sn, g_stamp);
+    SNAP(sn, g_tex_epoch);
+    if (snap_failed(sn) || used < 0 || used > TEX_CACHE) {
+        if (!snap_failed(sn)) snap_fail(sn, "the texture cache's count is out of range");
+        return;
+    }
+    if (snap_loading(sn)) {
+        for (i = 0; i < g_cache_used; i++) free(g_cache[i].rgba);
+        memset(g_cache, 0, sizeof g_cache);
+        g_cache_used = used;
+    }
+    for (i = 0; i < used && !snap_failed(sn); i++) {
+        TexEntry* e = &g_cache[i];
+        void* rgba = e->rgba;
+        size_t bytes = 0;
+        if (!snap_loading(sn) && e->rgba)
+            for (l = 0; l < e->nlevels; l++) bytes += (size_t)e->lw[l] * (size_t)e->lh[l] * 4u;
+        SNAP(sn, e->addr);
+        SNAP(sn, e->fmt);
+        SNAP(sn, e->w);
+        SNAP(sn, e->h);
+        SNAP(sn, e->tlut_off);
+        SNAP(sn, e->tlut_fmt);
+        SNAP(sn, e->lw);
+        SNAP(sn, e->lh);
+        SNAP(sn, e->nlevels);
+        SNAP(sn, e->stamp);
+        SNAP(sn, e->hash);
+        SNAP(sn, e->hashed);
+        SNAP(sn, e->replaced);
+        SNAP(sn, e->from_copy);
+        SNAP(sn, e->copy_cmd);
+        SNAP(sn, e->gen);
+        if (snap_loading(sn)) rgba = NULL;
+        snap_buffer(sn, &rgba, &bytes);
+        if (!snap_loading(sn) || snap_failed(sn)) continue;
+        e->rgba = (uint8_t*)rgba;
+        if (e->nlevels < 0 || e->nlevels > MAX_MIPS) e->nlevels = 0;
+        {
+            uint8_t* at = e->rgba;
+            for (l = 0; l < MAX_MIPS; l++) {
+                e->level[l] = at && l < e->nlevels ? at : NULL;
+                if (at && l < e->nlevels) at += (size_t)e->lw[l] * (size_t)e->lh[l] * 4u;
+            }
+        }
+        /* a copy's image was made by a command of the other process: never
+         * the newest queued here, so the next lookup reads memory (as the
+         * other process's would, its queue drained) */
+        if (e->from_copy) e->copy_cmd = -2;
+    }
+    SNAP(sn, g_lookups);
+    SNAP(sn, g_hashes);
+    SNAP(sn, g_hash_bytes);
+    SNAP(sn, g_decodes);
+    SNAP(sn, g_missed);
+    SNAP(sn, g_dec_new);
+    SNAP(sn, g_dec_rewritten);
+    SNAP(sn, g_dec_levels);
+    SNAP(sn, g_dec_dropped);
+    SNAP(sn, g_dec_same);
+    SNAP(sn, g_tlut_loads);
+    SNAP(sn, g_tlut_marked);
+    SNAP(sn, g_img_made);
+    SNAP(sn, g_img_used);
+    SNAP(sn, g_img_retired);
+    SNAP(sn, g_img_overwritten);
+    SNAP(sn, g_evicted);
+}

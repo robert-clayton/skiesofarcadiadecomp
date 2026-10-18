@@ -218,6 +218,10 @@ int soa_swap_enter(CpuState* s, uint32_t index); /* runtime/swap.c */
         if (SOA_SWAP_RARE(((volatile uint8_t*)soa_swap_flags)[i]) && soa_swap_enter(s, (i))) return; \\
     } while (0)"""
 
+# The register a snapshot's resume names its entry in (runtime/snapshot.c):
+# an SPR number the Gekko has none at and the game never moves to or from.
+RESUME_SPR = 1000
+
 _PSQ = frozenset(
     ["psq_l", "psq_lu", "psq_lx", "psq_lux", "psq_st", "psq_stu", "psq_stx", "psq_stux"]
 )
@@ -236,6 +240,7 @@ class Emitter:
         savepoints: dict[int, str] | None = None,
         traces: dict[int, str] | None = None,
         swap: bool = False,
+        resumes: dict[int, str] | None = None,
     ):
         self.dol = dol
         self.functions = functions
@@ -246,6 +251,12 @@ class Emitter:
         self.hooks = hooks or {}  # addresses where the runtime is called first
         self.savepoints = savepoints or {}  # call sites wrapped in setjmp (thread parking)
         self.traces = traces or {}  # addresses that report themselves when SOA_TRACE is set
+        # Where a snapshot resumes (config/resumepoints.txt, docs/SNAPSHOT.md):
+        # the function holding one is entered there, not at its head, when
+        # s->spr[RESUME_SPR] names it -- a statically translated function has no
+        # other way in to the middle of itself.
+        self.resumes = resumes or {}
+        self.resumed: set[int] = set()  # the resume points a function_c has given a way in
         # swap: every translated function's entry is guarded by SOA_SWAP(index)
         # (runtime/swap.c, docs/SWAP.md), the index its place in address order,
         # which is also the swap table's (seam.swap_table_c). Off by default,
@@ -270,6 +281,8 @@ class Emitter:
                 labels.update(t for t in self.tables[a].targets if t in addr_set)
 
         self._hooked = any(a in self.hooks for a in addrs)
+        resumes = sorted(a for a in self.resumes if a in addr_set)
+        labels.update(resumes)
         pretty = self.names.get(fn.entry)
         name = c_name(fn.entry)
         head = f"/* {pretty} */\n" if pretty and pretty != name else ""
@@ -279,6 +292,20 @@ class Emitter:
             head = f"/* {self.hle[fn.entry]} -- bound to HLE; recompiled body kept */\n"
             name = "recomp_" + name
         out = [f"{head}void {name}(CpuState* s)", "{"]
+        if resumes:
+            self.resumed.update(resumes)
+            # Before the guard: a resume is not a call, and nothing is
+            # delivered or counted on the way in (runtime/snapshot.c).
+            spr = f"s->spr[{RESUME_SPR}]"
+            out.append(f"    if ({spr} != 0u) {{ /* a snapshot resumes here */")
+            out.append(f"        switch ({spr}) {{")
+            for a in resumes:
+                out.append(
+                    f"        case {u32(a)}: {spr} = 0u; goto {label(a)}; /* {self.resumes[a]} */"
+                )
+            out.append("        default: break;")
+            out.append("        }")
+            out.append("    }")
         if self.swap and fn.entry not in self.hle:
             # First, before the entry's own label: a loop back to the entry
             # is not a second call.

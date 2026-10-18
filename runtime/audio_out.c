@@ -286,3 +286,10 @@ void audio_report(void)
         fprintf(stderr, "[audio] wrote %u bytes of samples to the WAV file\n", g_wav_bytes);
     }
 }
+
+/* The WAV's data bytes so far (snapshot.c's line: where a resumed run's WAV
+ * begins in this one's). */
+unsigned long long audio_wav_bytes(void)
+{
+    return g_wav_bytes;
+}

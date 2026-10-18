@@ -2983,10 +2983,12 @@ void gxr_hook_hazard(uint32_t addr, uint32_t bytes)
     g_pending_n = n;
 }
 
+static long g_presented_base; /* frames presented before a resume (gxr_snap) */
+
 long gxr_presented(void)
 {
     long n = plat_load32(&g_frames_presented);
-    return g_workers > 0 ? n / g_workers : n;
+    return g_presented_base + (g_workers > 0 ? n / g_workers : n);
 }
 
 const uint8_t* gxr_screen(int* w, int* h)
@@ -3456,4 +3458,55 @@ void gxr_report(void)
     }
     tex_report();
     hostprof_report();
+}
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) ------------------------------
+ * Taken after gxr_flush: no command queued, every copy in memory, the
+ * graveyard empty. What carries from frame to frame is the embedded frame
+ * buffer (colour and depth: a copy clears only its rectangle, and rows 480 up
+ * and the alpha byte are read again), the screen the window and a host show,
+ * and the draw count SOA_GXR_DRAWS counts. A GPU backend keeps the frame
+ * buffer on the GPU: refused. */
+#include "snapshot.h"
+void gxr_snap(Snap* sn)
+{
+    long presented = gxr_presented();
+    if (!snap_loading(sn) && g_backend) {
+        snap_fail(sn, "a GPU backend draws the frames (SOA_GPU, SOA_GXR_BACKEND); snapshots want the CPU renderer");
+        return;
+    }
+    if (!snap_loading(sn) && g_queue && (g_pending_n || g_arena_used)) {
+        snap_fail(sn, "the renderer's queue is not empty");
+        return;
+    }
+    SNAP(sn, g_efb);
+    SNAP(sn, g_efb_z);
+    SNAP(sn, g_screen);
+    SNAP(sn, g_screen_w);
+    SNAP(sn, g_screen_h);
+    SNAP(sn, presented);
+    SNAP(sn, g_draw_no);
+    SNAP(sn, g_tris);
+    SNAP(sn, g_lines);
+    SNAP(sn, g_points);
+    SNAP(sn, g_clipped);
+    SNAP(sn, g_verts_bad);
+    SNAP(sn, g_copies_tex);
+    SNAP(sn, g_copies_xfb);
+    SNAP(sn, g_rej_bary);
+    {
+        /* the threads' pixel counts, summed: a resumed run counts on in thread 0's */
+        uint64_t px[3] = {0, 0, 0};
+        int i;
+        for (i = 0; i <= MAX_THREADS; i++) px[0] += g_ts[i].pixels, px[1] += g_ts[i].rej_depth, px[2] += g_ts[i].rej_alpha;
+        SNAP(sn, px);
+        if (snap_loading(sn) && !snap_failed(sn)) {
+            for (i = 0; i <= MAX_THREADS; i++) g_ts[i].pixels = g_ts[i].rej_depth = g_ts[i].rej_alpha = 0;
+            g_ts[0].pixels = px[0], g_ts[0].rej_depth = px[1], g_ts[0].rej_alpha = px[2];
+        }
+    }
+    if (snap_loading(sn) && !snap_failed(sn)) {
+        g_presented_base = presented;
+        g_frames_presented = 0; /* no worker runs yet: the pool starts at the first draw */
+    }
 }

@@ -72,14 +72,25 @@ def baked_digest(inputs: Mapping[str, str]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def record(no_decomp: bool, baked: str, dol_sha1: str = "", profile: str = "") -> str:
+def record(
+    no_decomp: bool,
+    baked: str,
+    dol_sha1: str = "",
+    profile: str = "",
+    resume: Iterable[int] = (),
+) -> str:
     """A build record: what elfcheck compares (abi, mode, baked), and what
-    only says where a library came from (dol, profile)."""
+    only says where a library came from (dol, profile) or what it can do
+    (resume: the addresses a snapshot can resume at, config/resumepoints.txt;
+    runtime/snapshot.c looks for its own before resuming)."""
     parts = [f"abi={ABI}", f"mode={'no-decomp' if no_decomp else 'decomp'}", f"baked={baked}"]
     if dol_sha1:
         parts.append(f"dol={dol_sha1}")
     if profile:
         parts.append(f"profile={profile}")
+    points = sorted(resume)
+    if points:
+        parts.append("resume=" + ",".join(f"{a:08X}" for a in points))
     return " ".join(parts)
 
 

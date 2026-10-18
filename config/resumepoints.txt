@@ -1,0 +1,9 @@
+# Where a snapshot resumes (runtime/snapshot.c, docs/SNAPSHOT.md). A statically
+# translated function can only be entered at its head, so the recompiler gives
+# the function holding each address here a second way in: when s->spr[1000]
+# names the address on entry, it is cleared and control goes straight to it.
+# Each must be a block the function already labels (a branch target), and the
+# guest's whole state there must be in CpuState and memory -- true of every
+# translated function, which keeps nothing in C locals across a block.
+
+0x801DCB84  MainLoop.frame_top   # the game's main loop, at its call of VIGetRetraceCount (tick.c's safe point)

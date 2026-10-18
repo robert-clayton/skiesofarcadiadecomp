@@ -270,6 +270,90 @@ void plat_dl_close(void* lib)
 }
 #endif
 
+/* plat_addr_module and plat_module_addr. Windows: the module that holds the
+ * address, its file name, and the offset from its base (the HMODULE). ELF:
+ * the object whose loaded segments hold it (dl_iterate_phdr), its file name
+ * ("<program>" for the executable itself, which the loader names ""), and
+ * the offset from its load bias -- the same bias the way back adds. */
+static const char* base_name(const char* path)
+{
+    const char* a = strrchr(path, '/');
+    const char* b = strrchr(path, '\\');
+    if (b && (!a || b > a)) a = b;
+    return a ? a + 1 : path;
+}
+#ifdef _WIN32
+int plat_addr_module(const void* p, char* name, size_t cap, uintptr_t* off)
+{
+    HMODULE m = NULL;
+    char path[MAX_PATH];
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)p, &m) ||
+        !m || !GetModuleFileNameA(m, path, sizeof path))
+        return 0;
+    snprintf(name, cap, "%s", base_name(path));
+    *off = (uintptr_t)p - (uintptr_t)m;
+    return 1;
+}
+void* plat_module_addr(const char* name, uintptr_t off)
+{
+    char exe[MAX_PATH];
+    HMODULE m = GetModuleHandleA(name);
+    if (!m && GetModuleFileNameA(NULL, exe, sizeof exe) && !_stricmp(base_name(exe), name)) m = GetModuleHandleA(NULL);
+    return m ? (void*)((uintptr_t)m + off) : NULL;
+}
+#else
+#include <link.h>
+typedef struct {
+    uintptr_t addr;
+    const char* want; /* by name: plat_module_addr */
+    char name[256];
+    uintptr_t bias;
+    int found;
+} ModFind;
+static int mod_find(struct dl_phdr_info* info, size_t size, void* arg)
+{
+    ModFind* f = (ModFind*)arg;
+    const char* nm = info->dlpi_name && *info->dlpi_name ? base_name(info->dlpi_name) : "<program>";
+    int i;
+    (void)size;
+    if (f->want) {
+        if (strcmp(nm, f->want) != 0) return 0;
+        f->bias = (uintptr_t)info->dlpi_addr;
+        f->found = 1;
+        return 1;
+    }
+    for (i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr)* ph = &info->dlpi_phdr[i];
+        uintptr_t lo = (uintptr_t)info->dlpi_addr + ph->p_vaddr;
+        if (ph->p_type != PT_LOAD || f->addr < lo || f->addr - lo >= ph->p_memsz) continue;
+        snprintf(f->name, sizeof f->name, "%s", nm);
+        f->bias = (uintptr_t)info->dlpi_addr;
+        f->found = 1;
+        return 1;
+    }
+    return 0;
+}
+int plat_addr_module(const void* p, char* name, size_t cap, uintptr_t* off)
+{
+    ModFind f;
+    memset(&f, 0, sizeof f);
+    f.addr = (uintptr_t)p;
+    dl_iterate_phdr(mod_find, &f);
+    if (!f.found) return 0;
+    snprintf(name, cap, "%s", f.name);
+    *off = (uintptr_t)p - f.bias;
+    return 1;
+}
+void* plat_module_addr(const char* name, uintptr_t off)
+{
+    ModFind f;
+    memset(&f, 0, sizeof f);
+    f.want = name;
+    dl_iterate_phdr(mod_find, &f);
+    return f.found ? (void*)(f.bias + off) : NULL;
+}
+#endif
+
 /* ---- directories ------------------------------------------------------------ */
 
 #ifdef _WIN32

@@ -278,3 +278,33 @@ void dsp_report(void)
             (unsigned long long)g_ctl_starts, (unsigned long long)g_ctl_running, g_ctl_running_lr,
             (unsigned long long)g_ctl_stops);
 }
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) ------------------------------
+ * The mailboxes and the microcode protocol's place, and AI's DMA: the block
+ * playing and the tick it is done at, which the fixed clock's idle skip goes
+ * to. The sound itself is in guest memory and ARAM. */
+#include "snapshot.h"
+void dsp_snap(Snap* sn)
+{
+    SNAP(sn, g_in_hi);
+    SNAP(sn, g_out);
+    SNAP(sn, g_out_head);
+    SNAP(sn, g_out_tail);
+    SNAP(sn, g_expect);
+    SNAP(sn, g_last_ctrl);
+    SNAP(sn, g_booted);
+    SNAP(sn, g_rom_after_stub);
+    SNAP(sn, g_mails_in);
+    SNAP(sn, g_mails_out);
+    SNAP(sn, g_cmdlists);
+    SNAP(sn, g_unknown);
+    SNAP(sn, g_dma_start);
+    SNAP(sn, g_dma_ctrl);
+    SNAP(sn, g_dma_due);
+    SNAP(sn, g_dma_period);
+    SNAP(sn, g_dma_blocks_done);
+    SNAP(sn, g_ctl_starts);
+    SNAP(sn, g_ctl_running);
+    SNAP(sn, g_ctl_stops);
+    SNAP(sn, g_ctl_running_lr);
+}

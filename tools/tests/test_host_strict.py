@@ -80,6 +80,18 @@ int swap_original(void) { return 0; }
 int swap_set(void) { return 0; }
 void tev_pixel(void) {}
 void watchdog_fallback(void) {}
+/* snapshot.c's, which a run here never takes or resumes */
+int snapshot_resuming(void) { return 0; }
+int snapshot_precheck(char* why, size_t cap) { (void)why, (void)cap; return 0; }
+int snapshot_request(const char* path) { (void)path; return 0; }
+int snapshot_status(long* frame, char* why, size_t cap) { (void)frame, (void)why, (void)cap; return 0; }
+int snapshot_arm_resume(const char* path, char* why, size_t cap) { (void)path, (void)why, (void)cap; return 1; }
+unsigned snapshot_resumed_frame(void) { return 0; }
+unsigned snapshot_armed_frame(void) { return 0; }
+int snapshot_host_put(const char* name, const void* data, size_t bytes) { (void)name, (void)data, (void)bytes; return 0; }
+long snapshot_host_get(const char* name, void* out, size_t max) { (void)name, (void)out, (void)max; return -1; }
+void snapshot_set_host_hook(void (*fn)(void* user), void* user) { (void)fn, (void)user; }
+int irq_event_rebind(int id, void* fn, void* user, void* extra) { (void)id, (void)fn, (void)user, (void)extra; return 0; }
 
 int window_pad(uint16_t* buttons, uint8_t stick[2], uint8_t cstick[2], uint8_t trig[2]);
 int window_pad2(uint16_t* buttons, uint8_t stick[2], uint8_t cstick[2], uint8_t trig[2]);

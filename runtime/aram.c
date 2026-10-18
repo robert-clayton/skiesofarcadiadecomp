@@ -564,3 +564,35 @@ void aram_report(void)
         fprintf(stderr, "[aram] census largest named uploads: %s\n", at ? line : "none");
     }
 }
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) ------------------------------
+ * ARAM's 16 MB (the samples the sound driver streams from), its registers,
+ * and a DMA in flight with its due tick. The census of where samples came
+ * from is the report's, and starts again. */
+#include "snapshot.h"
+void aram_snap(Snap* sn)
+{
+    void* p = g_aram;
+    size_t bytes = g_aram ? (size_t)ARAM_SIZE : 0u;
+    snap_buffer(sn, &p, &bytes);
+    if (snap_loading(sn) && !snap_failed(sn)) {
+        g_aram = (uint8_t*)p; /* snap_buffer freed the old one if it made another; NULL: never touched */
+        if (bytes && bytes != (size_t)ARAM_SIZE) {
+            free(g_aram);
+            g_aram = NULL;
+            snap_fail(sn, "ARAM is %zu bytes, not %u", bytes, (unsigned)ARAM_SIZE);
+            return;
+        }
+    }
+    SNAP(sn, g_ar_busy);
+    SNAP(sn, g_ar_due);
+    SNAP(sn, g_csr);
+    SNAP(sn, g_ar_size);
+    SNAP(sn, g_ar_mode);
+    SNAP(sn, g_ar_refresh);
+    SNAP(sn, g_mmaddr);
+    SNAP(sn, g_araddr);
+    SNAP(sn, g_cnt_hi);
+    SNAP(sn, g_dmas);
+    SNAP(sn, g_dma_bytes);
+}

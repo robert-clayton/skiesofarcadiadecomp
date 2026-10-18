@@ -200,3 +200,23 @@ void dvd_report(void)
             (unsigned long long)g_bytes);
     disc_report();
 }
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) ------------------------------
+ * The drive's registers and a command in flight: its data is in memory
+ * already (a read moves it at once), and what is left is the interrupt at its
+ * due tick. A snapshot taken in the middle of a load holds exactly that. */
+#include "snapshot.h"
+void dvd_snap(Snap* sn)
+{
+    SNAP(sn, g_disr);
+    SNAP(sn, g_dicvr);
+    SNAP(sn, g_cmd);
+    SNAP(sn, g_mar);
+    SNAP(sn, g_len);
+    SNAP(sn, g_imm);
+    SNAP(sn, g_cfg);
+    SNAP(sn, g_busy);
+    SNAP(sn, g_due);
+    SNAP(sn, g_reads);
+    SNAP(sn, g_bytes);
+}

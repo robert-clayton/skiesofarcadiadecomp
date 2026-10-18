@@ -687,12 +687,15 @@ def main() -> int:
     hooks = load_hle(args.config / "hooks.txt")
     savepoints = load_hle(args.config / "savepoints.txt")
     traces = load_hle(args.config / "trace.txt")
+    resumes = load_hle(args.config / "resumepoints.txt")
     if hle or hooks or savepoints:
         print(
             f"{len(hle)} functions bound to HLE, {len(hooks)} runtime hooks, "
             f"{len(savepoints)} savepoints"
         )
-    em = Emitter(dol, functions, tables, code, names, hle, hooks, savepoints, traces, swap=True)
+    em = Emitter(
+        dol, functions, tables, code, names, hle, hooks, savepoints, traces, swap=True, resumes=resumes
+    )
     entries = sorted(functions)
     if args.limit:
         entries = entries[: args.limit]
@@ -711,7 +714,7 @@ def main() -> int:
             the_seam,
             hle,
             entries,
-            seam.record(args.no_decomp, baked, dol_sha1, prof.name),
+            seam.record(args.no_decomp, baked, dol_sha1, prof.name, resume=resumes),
             functions=functions,
         ),
         encoding="utf-8",
@@ -745,6 +748,18 @@ def main() -> int:
         path = args.out / f"chunk_{n // args.chunk:03d}.c"
         path.write_text("\n".join(body), encoding="utf-8")
         chunks.append(path)
+    lost = sorted(set(resumes) - em.resumed)
+    if lost and not args.limit:
+        # The game library's record says it can resume there (seam.record),
+        # and runtime/snapshot.c believes it: a point no function holds is an
+        # error here, not a resume into the wrong place.
+        print(
+            "config/resumepoints.txt: "
+            + ", ".join(f"0x{a:08X}" for a in lost)
+            + " is in no translated function",
+            file=sys.stderr,
+        )
+        return 1
     st = em.stats
     total_bytes = sum(p.stat().st_size for p in chunks)
     print(

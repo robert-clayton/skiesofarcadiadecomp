@@ -1,0 +1,959 @@
+# Every variable of the runtime that lives between calls, and what a snapshot
+# does with it (runtime/snapshot.c, docs/SNAPSHOT.md). tools/tests/test_snapshot.py
+# compiles runtime/ as a host build, lists every data and bss symbol of every
+# object (a function's static as name.N, read here as name), and holds this
+# file to that list both ways: a variable added without a line here fails the
+# suite, and so does a line for one that is gone. A line `saved` also needs
+# the name in its file's *_snap function.
+#
+#   file  name  how  # why
+#
+# how:
+#   saved    in the file's section: restored as it was (or, where the comment
+#            says, as the snapshot's frame makes it)
+#   cpu      the CpuState and MEM1: snapshot.c's cpu and mem sections
+#   config   read from the environment, or set up by main.c, at the start of
+#            every run, so the same in a resumed one (a resume continues one
+#            run: its switches are that run's)
+#   report   a count, a timer or a log's state that the report or a log line
+#            prints; nothing the guest sees
+#   host     what a host or a window reads (frames, models, sound, rumble),
+#            made again from what the guest does from the resume on
+#   scratch  plumbing: locks, threads, handles, queues and buffers that are
+#            empty or unused at the safe point (or remade on the next call)
+#   refused  a mode a snapshot is refused in (mods, a recording, a GPU
+#            backend, a pair replay, the self test): its state never needs one
+
+aram  g_aram  saved  # 16 MB, the samples the sound driver streams
+aram  g_ar_busy  saved
+aram  g_ar_due  saved  # a DMA in flight finishes at this tick
+aram  g_ar_mode  saved
+aram  g_ar_refresh  saved
+aram  g_ar_size  saved
+aram  g_araddr  saved
+aram  g_cnt_hi  saved
+aram  g_csr  saved  # holds the AI, ARAM and DSP interrupt bits too
+aram  g_dma_bytes  saved
+aram  g_dmas  saved
+aram  g_mmaddr  saved
+aram  g_src_ext  report  # the census of where samples came from
+aram  g_src_exts  report
+aram  g_src_file  config  # the disc's files, indexed at the start
+aram  g_src_files  config
+aram  g_src_hash  config
+aram  g_src_ivl  report
+aram  g_src_ivls  report
+aram  g_src_last  report
+aram  g_src_named  report
+aram  g_src_ready  config
+aram  g_src_serial  report
+aram  g_src_unnamed  report
+aram  verbose  config  # SOA_ARAM_VERBOSE
+
+audio_out  g_blocks_seen  report
+audio_out  g_drop_longest  report
+audio_out  g_drop_run  report
+audio_out  g_drop_runs  report
+audio_out  g_dropped  report
+audio_out  g_muted  host
+audio_out  g_out  scratch  # one block's conversion
+audio_out  g_peak  report
+audio_out  g_pushed  report
+audio_out  g_rate_bytes  report
+audio_out  g_rate_first  report
+audio_out  g_rate_last  report
+audio_out  g_ready  host  # the device, opened at the first block
+audio_out  g_test_sink  refused  # the self test's
+audio_out  g_wav  host  # SOA_WAV: this run's file, from its first block
+audio_out  g_wav_bytes  host
+audio_out  g_wav_rate  host
+audio_out  g_wav_tried  host
+audio_out  test  config
+
+ax  g_auxa  scratch  # the buses, cleared for every command list
+ax  g_auxa_frames  report
+ax  g_auxa_live  report
+ax  g_auxa_peak  report
+ax  g_auxb  scratch
+ax  g_auxb_frames  report
+ax  g_auxb_live  report
+ax  g_auxb_peak  report
+ax  g_chain_hi  report
+ax  g_cmd_bad  report
+ax  g_cmd_bad_op  report
+ax  g_cmd_n  report
+ax  g_cmds_hi  report
+ax  g_ctrl_aux  report
+ax  g_ctrl_b10  report
+ax  g_ctrl_or  report
+ax  g_dl_aux_a  report
+ax  g_dl_aux_b  report
+ax  g_dl_aux_n  report
+ax  g_f_coef_sel  report
+ax  g_f_ctrl  report
+ax  g_f_dpop  report
+ax  g_f_format  report
+ax  g_f_gain  report
+ax  g_f_is_stream  report
+ax  g_f_itd  report
+ax  g_f_itd_sh  report
+ax  g_f_noloop  report
+ax  g_f_noupd  report
+ax  g_f_src_type  report
+ax  g_f_this  report
+ax  g_f_unk3  report
+ax  g_f_upd  report
+ax  g_frames  saved  # the lists mixed: a host's voice tap numbers its ticks by it
+ax  g_lists_full  report
+ax  g_main  scratch
+ax  g_nsrcs  report
+ax  g_repoints  report
+ax  g_ret_a  report
+ax  g_ret_b  report
+ax  g_ret_lr  report
+ax  g_ret_nw  report
+ax  g_samples_out  saved
+ax  g_srcs  report
+ax  g_srcs_lost  report
+ax  g_start_ms  report
+ax  g_starts  report
+ax  g_starts_at_tick  config  # SOA_AX_STARTS
+ax  g_stop_ms  report
+ax  g_tap  host  # soa_host_watch_voices
+ax  g_tap_back  scratch
+ax  g_tap_blocks  scratch
+ax  g_tap_changes  scratch
+ax  g_tap_mixed  scratch
+ax  g_tap_nblocks  scratch
+ax  g_tap_nchanges  scratch
+ax  g_tap_out  scratch
+ax  g_tap_voices  scratch
+ax  g_verbose  config
+ax  g_voices  saved
+ax  g_vs  report
+ax  traced  report
+
+clock  f  config  # the host counter's rate
+clock  g_clock_due  saved  # something may be due: every swap guard's byte follows it (snapshot_after_load)
+clock  g_clock_due_fn  config  # quiet.c's, set at the start
+clock  g_clock_quiet  saved  # checked: the snapshot's must be this run's
+clock  g_clock_quiet_off  saved  # checked
+clock  g_clock_wait_reads  saved
+clock  g_epoch  saved
+clock  g_excluded_ns  saved
+clock  g_fixed  saved  # checked
+clock  g_fx_poll  saved  # checked
+clock  g_fx_polls  saved
+clock  g_fx_read  saved  # checked
+clock  g_fx_reads  saved
+clock  g_fx_rtc  saved  # checked
+clock  g_fx_skipped  saved
+clock  g_fx_skips  saved
+clock  g_fx_spin  saved  # checked
+clock  g_fx_spin_max  saved
+clock  g_fx_ticks  saved  # the fixed clock itself
+clock  g_fx_waits  saved
+clock  g_gap_note  config
+clock  g_gap_ns  config
+clock  g_gaps  saved
+clock  g_guest_ns  saved  # the real clock's guest time, counted on from the host's now
+clock  g_last_host_ns  saved  # the real clock: set to the host's now on loading
+clock  g_origin_host_ns  saved  # the same
+clock  g_pause_req  host  # soa_host_pause
+clock  g_paused  saved  # 0 on loading
+clock  g_speed  config  # SOA_SPEED
+clock  g_started  saved  # 1 on loading
+
+disc  buf  scratch  # a block or a read being checked
+disc  cap  scratch
+disc  g_block_n  config  # the disc image, opened and checked at the start
+disc  g_blocks  config
+disc  g_boot  config
+disc  g_builtin  config
+disc  g_covered  config
+disc  g_dol  config
+disc  g_dol_n  config
+disc  g_ext  config
+disc  g_ext_n  config
+disc  g_f  config
+disc  g_flags  config
+disc  g_flip  config  # SOA_DISC_FLIP, a test's bit flipped in a read
+disc  g_flip_read  report
+disc  g_flip_said  config
+disc  g_fst  config
+disc  g_fst_n  config
+disc  g_hash_ns  report
+disc  g_hashed  report
+disc  g_info  config
+disc  g_iso  config
+disc  g_iso_path  config
+disc  g_log  config
+disc  g_names  config
+disc  g_open  config
+disc  g_past_bytes  report
+disc  g_past_reads  report
+disc  g_path  config
+disc  g_payload  config
+disc  g_seen  report  # which blocks have been hashed: a check, not a read
+disc  g_stop_hook  config
+disc  g_store  config
+disc  g_store_ext  config
+disc  g_store_ext_n  config
+disc  g_vbytes  report
+disc  g_vdiffer  report
+disc  g_verify  config
+disc  g_vpast  report
+disc  g_vreads  report
+disc  said  report
+
+dsp  g_booted  saved
+dsp  g_cmdlists  saved
+dsp  g_cpu  scratch  # the state the last mail came with
+dsp  g_ctl_running  saved
+dsp  g_ctl_running_lr  saved
+dsp  g_ctl_starts  saved
+dsp  g_ctl_stops  saved
+dsp  g_dma_blocks_done  saved
+dsp  g_dma_ctrl  saved
+dsp  g_dma_due  saved  # the AI block playing ends at this tick
+dsp  g_dma_period  saved
+dsp  g_dma_start  saved
+dsp  g_expect  saved
+dsp  g_in_hi  saved
+dsp  g_last_ctrl  saved
+dsp  g_mails_in  saved
+dsp  g_mails_out  saved
+dsp  g_out  saved  # the mail queue
+dsp  g_out_head  saved
+dsp  g_out_tail  saved
+dsp  g_rom_after_stub  saved
+dsp  g_unknown  saved
+dsp  noax  config  # SOA_NOAX
+
+dvd  g_busy  saved  # a command in flight: its data is in memory already
+dvd  g_bytes  saved
+dvd  g_cfg  saved
+dvd  g_cmd  saved
+dvd  g_dicvr  saved
+dvd  g_disr  saved
+dvd  g_due  saved  # and its interrupt comes at this tick
+dvd  g_imm  saved
+dvd  g_len  saved
+dvd  g_mar  saved
+dvd  g_reads  saved
+
+elfcheck  ok  config
+
+exi  g_card  saved  # the card's image, written to the resumed run's card at once
+exi  g_card_addr  saved
+exi  g_card_cmd  saved
+exi  g_card_dirty  saved
+exi  g_card_dirty_hi  saved
+exi  g_card_dirty_lo  saved
+exi  g_card_file  scratch  # reopened to write the image
+exi  g_card_int_en  saved
+exi  g_card_int_req  saved
+exi  g_card_ints  saved
+exi  g_card_path  saved  # SOA_CARD again, as card_load names it
+exi  g_card_reads  saved
+exi  g_card_status  saved
+exi  g_card_writes  saved
+exi  g_ch  saved
+exi  g_dma  saved
+exi  g_imm  saved
+exi  g_rtc_cmd  saved
+exi  g_rtc_latch  saved
+exi  g_sram  saved
+exi  g_sram_init  saved
+exi  v  config  # SOA_CARD_VERBOSE
+exi  warned  report
+
+game  soa_game_table  config  # the game library, loaded at the start
+
+gx  dir  config
+gx  g_bp  saved
+gx  g_bp_loads  saved
+gx  g_bytes  saved  # the pipe's bytes: the quiet rule compares them
+gx  g_cap  saved  # a capture's bytes since the frame began (SOA_FIFO_DUMP)
+gx  g_cap_bp  saved
+gx  g_cap_cap  scratch
+gx  g_cap_cp  saved
+gx  g_cap_len  saved
+gx  g_cap_xf  saved
+gx  g_census_note  config
+gx  g_cmds  saved
+gx  g_cp  saved
+gx  g_cp_loads  saved
+gx  g_cp_mmio  saved
+gx  g_dl_away  report  # SOA_GX_DLLOG's
+gx  g_dl_away_bytes  report
+gx  g_dl_away_draws  report
+gx  g_dl_buf  report
+gx  g_dl_bytes0  report
+gx  g_dl_call_bytes  saved
+gx  g_dl_calls  saved
+gx  g_dl_cp_seen  report
+gx  g_dl_cur  report
+gx  g_dl_draws0  report
+gx  g_dl_lines  report
+gx  g_dl_moves  report
+gx  g_dl_nbuf  report
+gx  g_dl_nonempty  saved
+gx  g_dl_overflows  saved
+gx  g_dl_rec  saved  # the CPU FIFO is a display list being recorded
+gx  g_dl_rec_bytes  saved
+gx  g_dl_recorded  saved
+gx  g_dl_sized  report
+gx  g_dl_spill  report
+gx  g_dl_zero  report
+gx  g_dllog  config
+gx  g_draws  saved
+gx  g_dump_checked  saved  # SOA_FIFO_DUMP read again on loading
+gx  g_dump_list  saved
+gx  g_efb_copies  saved
+gx  g_finishes  saved
+gx  g_frame  saved  # the frames presented: what every frame-keyed switch counts
+gx  g_frame_hook  config
+gx  g_frame_limit  config  # SOA_FRAMES (a replay's stop is si.c's to set again)
+gx  g_gx_parsing  scratch
+gx  g_in_list  saved  # 0 at the safe point
+gx  g_last_unknown  saved
+gx  g_list_addr  saved
+gx  g_list_called  config
+gx  g_list_recording  config
+gx  g_pe_mmio  saved
+gx  g_pi_fifo  saved
+gx  g_pipe  saved  # a command not yet whole
+gx  g_pipe_len  saved
+gx  g_pipe_watch  config
+gx  g_record_pipe  refused
+gx  g_replaying  refused
+gx  g_tokens  saved
+gx  g_unknown  saved
+gx  g_verts  saved
+gx  g_writers  report
+gx  g_writers_on  config
+gx  g_xf  saved
+gx  g_xf_loads  saved
+gx  g_xfb_copies  saved
+gx  warned  report
+
+gxr  dir  config
+gxr  done  config
+gxr  freq  config
+gxr  g_arena  scratch  # the draw queue's, recycled by the drain before a snapshot
+gxr  g_arena_used  scratch
+gxr  g_backend  refused  # a GPU backend keeps the frame buffer on the GPU
+gxr  g_be_sent  report
+gxr  g_bp_mask  report  # a tripwire's
+gxr  g_bp_prev  report
+gxr  g_bp_seen  report
+gxr  g_cal_qpc0  report
+gxr  g_cal_seconds  report
+gxr  g_cal_span  report
+gxr  g_cal_tick0  report
+gxr  g_clipped  saved
+gxr  g_copies_tex  saved
+gxr  g_copies_xfb  saved
+gxr  g_cull_flip  config
+gxr  g_dbg_x  config
+gxr  g_dbg_y  config
+gxr  g_debug  config
+gxr  g_debug_lights  config
+gxr  g_deflicker  config
+gxr  g_draw_every  config
+gxr  g_draw_limit  config
+gxr  g_draw_no  saved  # SOA_GXR_DRAWS counts draws from the start of the run
+gxr  g_efb  saved  # the frame buffer carries from frame to frame
+gxr  g_efb_z  saved
+gxr  g_enabled  config
+gxr  g_export  config
+gxr  g_fence_after  scratch
+gxr  g_fence_after_near  scratch
+gxr  g_fence_sleepers  scratch
+gxr  g_flushes  report
+gxr  g_frame_gate  scratch
+gxr  g_frames_presented  saved  # through g_presented_base
+gxr  g_gxr_phase  report
+gxr  g_gxr_phase_last  report
+gxr  g_gxr_ticks  report
+gxr  g_gxr_tsc  config
+gxr  g_hash  config  # SOA_HASH
+gxr  g_hazard_hits  report
+gxr  g_landed  scratch
+gxr  g_last_copy  scratch
+gxr  g_legacy  config
+gxr  g_lines  saved
+gxr  g_nthreads  config
+gxr  g_pair  refused  # a pair replay's (--replay A B)
+gxr  g_pair_cur  refused
+gxr  g_pair_demoted  refused
+gxr  g_pair_flags  refused
+gxr  g_pair_kept  refused
+gxr  g_pair_list  refused
+gxr  g_pair_list_hash  refused
+gxr  g_pair_matched  refused
+gxr  g_pair_maxdisp  refused
+gxr  g_pair_ndraw  refused
+gxr  g_pair_over  refused
+gxr  g_pair_over32  refused
+gxr  g_pair_peak_draws  refused
+gxr  g_pair_peak_verts  refused
+gxr  g_pair_rotations  refused
+gxr  g_pair_skipped  refused
+gxr  g_pair_t  refused
+gxr  g_pair_unmatched  refused
+gxr  g_pair_verts  refused
+gxr  g_passthrough  report
+gxr  g_pending  scratch  # queued copies: none after the drain
+gxr  g_pending_n  saved  # checked 0
+gxr  g_png_path  config
+gxr  g_points  saved
+gxr  g_pool_t0  report
+gxr  g_prep  scratch
+gxr  g_prepare_hazards  report
+gxr  g_presented_base  saved
+gxr  g_proj_filter  config  # a mod's
+gxr  g_proj_out  scratch  # a cache of one, keyed by XF's words exactly
+gxr  g_proj_raw  scratch
+gxr  g_proj_valid  scratch
+gxr  g_published  scratch  # the queue's numbering starts again with its workers
+gxr  g_queue  saved  # checked empty
+gxr  g_ran  scratch
+gxr  g_ran_floor  scratch
+gxr  g_rej_bary  saved
+gxr  g_screen  saved  # the last frame copied out, which a window or host shows
+gxr  g_screen_h  saved
+gxr  g_screen_w  saved
+gxr  g_skip_until  config
+gxr  g_sleepers  scratch
+gxr  g_snap_every  config
+gxr  g_snap_from  config
+gxr  g_snap_to  config
+gxr  g_stall  config  # SOA_GXR_STALL, a test's
+gxr  g_stall_n  config
+gxr  g_started  scratch
+gxr  g_target  config
+gxr  g_ticks_hz  report
+gxr  g_token_wait  config
+gxr  g_tokens_waited  report
+gxr  g_tris  saved
+gxr  g_ts  saved  # the pixel counts, summed into thread 0's
+gxr  g_verts_bad  saved
+gxr  g_wait_n  report
+gxr  g_wait_name  report
+gxr  g_wait_ticks  report
+gxr  g_workers  config
+gxr  last_frame  report
+gxr  said  report
+gxr  t_tid  scratch
+
+gxr_export  g_buf  scratch  # SOA_GXR_EXPORT's
+gxr_export  g_cap  scratch
+gxr_export  g_copies  report
+gxr_export  g_dir  config
+gxr_export  g_draws  report
+gxr_export  g_first  config
+gxr_export  g_hooks  config
+gxr_export  g_json  config
+gxr_export  g_last  config
+gxr_export  g_notes  report
+gxr_export  g_nverts  report
+gxr_export  g_on  config
+gxr_export  g_seen  report
+gxr_export  g_step  config
+gxr_export  g_textures  report
+gxr_export  g_verts  report
+
+gxr_tev  g_building  saved  # checked NULL
+gxr_tev  g_cache  saved  # the texture cache whole: a fresh one would decode afresh what this keeps
+gxr_tev  g_cache_used  saved
+gxr_tev  g_dec_dropped  saved
+gxr_tev  g_dec_levels  saved
+gxr_tev  g_dec_new  saved
+gxr_tev  g_dec_rewritten  saved
+gxr_tev  g_dec_same  saved
+gxr_tev  g_decodes  saved
+gxr_tev  g_evict_frame  report
+gxr_tev  g_evicted  saved
+gxr_tev  g_evicted_in_frame  report
+gxr_tev  g_grave  scratch  # empty after the drain
+gxr_tev  g_grave_cap  scratch
+gxr_tev  g_grave_lost  report
+gxr_tev  g_grave_n  saved  # checked 0
+gxr_tev  g_grave_peak  report
+gxr_tev  g_gxr_simd  config
+gxr_tev  g_hash_bytes  saved
+gxr_tev  g_hashes  saved
+gxr_tev  g_img_made  saved
+gxr_tev  g_img_overwritten  saved
+gxr_tev  g_img_retired  saved
+gxr_tev  g_img_used  saved
+gxr_tev  g_index  saved
+gxr_tev  g_lookups  saved
+gxr_tev  g_missed  saved
+gxr_tev  g_notex  config
+gxr_tev  g_s  scratch  # set at every draw
+gxr_tev  g_stamp  saved
+gxr_tev  g_tev_konst  saved  # built up a channel pair at a time: not GX's shadow
+gxr_tev  g_tev_narrate  report
+gxr_tev  g_tev_reg  saved
+gxr_tev  g_tex_epoch  saved
+gxr_tev  g_tex_fence  scratch  # each draw's, from 0
+gxr_tev  g_tex_provider  config  # a mod's
+gxr_tev  g_tex_verify  config
+gxr_tev  g_tlut_loads  saved
+gxr_tev  g_tlut_marked  saved
+gxr_tev  g_tmem  saved  # the palettes loaded
+gxr_tev  last  scratch  # a cache of one, keyed by the register exactly
+gxr_tev  last_ac  scratch
+gxr_tev  said  report
+
+hle  done  config  # the fixed clock set up; the report's once
+hle  g_clock_fixed  config
+hle  g_clock_utc  config
+hle  g_ft  report  # the frame times
+hle  g_ft_cap  report
+hle  g_ft_from  report
+hle  g_ft_last  report
+hle  g_ft_lock  scratch
+hle  g_ft_n  report
+hle  g_hits  saved
+hle  g_reads_since_write  saved  # the spin detector: a run that ends in [spin] ends there resumed too
+hle  g_record_armed  refused
+hle  g_record_note  refused
+hle  g_record_polls  refused
+hle  g_report_hooks  config
+hle  g_spin_ea  saved
+hle  g_spin_same  saved
+hle  g_syscalls  saved
+hle  g_tb_device  scratch  # 1 only inside a device's read
+hle  g_tb_origin  config  # SOA_CLOCK=utc's
+hle  g_tb_started  saved
+hle  g_wall_origin  report
+hle  g_wall_started  report
+hle  hz  config
+hle  reported  report
+hle  shown  report
+hle  strict  config  # SOA_STRICT
+hle  v  config  # SOA_MMIO
+
+hle_stdio  g_enabled  config
+
+host  T  scratch  # a draw's combiner, worked out for the host
+host  g_audio_lock  scratch
+host  g_black  scratch
+host  g_build  host  # the frames of models handed to the host
+host  g_disc  config
+host  g_ended  host
+host  g_flat_count  host
+host  g_flat_tex  host
+host  g_go  host  # the frame a holding host has let go
+host  g_head  host  # the sound queue the host empties
+host  g_held  host
+host  g_hold  config
+host  g_latched  saved  # strict mode's pads: the next frame's was latched before the snapshot
+host  g_mem  scratch
+host  g_mf  host
+host  g_mf_dropped  report
+host  g_mf_lock  scratch
+host  g_motor  host
+host  g_ninja_feed  config
+host  g_npad_at  saved
+host  g_nwatch  host
+host  g_nwrites  saved
+host  g_pad_at  saved  # pads named for later frames
+host  g_pad_lock  scratch
+host  g_ports  saved
+host  g_queue  host
+host  g_rate  host
+host  g_rc  host
+host  g_ready  host
+host  g_screen_export  config
+host  g_state  host
+host  g_stats_lock  scratch
+host  g_strict  saved  # checked: the snapshot's must be this run's
+host  g_strict_stats  saved
+host  g_tick_dropped  host
+host  g_tick_head  host
+host  g_tick_lock  scratch
+host  g_tick_used  host
+host  g_ticks  host
+host  g_used  host
+host  g_view  scratch
+host  g_watch  host
+host  g_watch_gen  host
+host  g_white  scratch
+host  g_write_lock  scratch
+host  g_writes  saved  # writes queued for a frame end not yet come
+host  name  config
+host  t_guest  scratch
+
+irq  g_ai_cr  saved
+irq  g_ai_it  saved
+irq  g_ai_scnt_base  saved  # AI's sample counter counts from here
+irq  g_ai_vr  saved
+irq  g_aid_count  saved
+irq  g_answers  config  # quiet.c's pointer to swap.c's count
+irq  g_ar_count  saved
+irq  g_dec_armed  saved
+irq  g_dec_arms  saved
+irq  g_dec_count  saved
+irq  g_dec_last  saved
+irq  g_dec_repeats  saved
+irq  g_dec_set  saved
+irq  g_dec_value  saved
+irq  g_delivered  saved
+irq  g_delivered_by_number  saved
+irq  g_di_count  saved
+irq  g_dsp_count  saved
+irq  g_event_late_max  saved
+irq  g_event_late_sum  saved
+irq  g_event_lock  scratch
+irq  g_event_next_id  saved
+irq  g_event_runs  saved
+irq  g_events  saved  # their functions and data found again by module and offset ("events")
+irq  g_exi_count  saved
+irq  g_exid_count  saved
+irq  g_in_handler  saved  # checked 0
+irq  g_irq_ctx  saved  # checked 0
+irq  g_irq_jmp  scratch  # a delivery's, dead between them
+irq  g_line_runs  saved
+irq  g_line_unhandled  saved
+irq  g_lines  saved
+irq  g_nevents  saved
+irq  g_nrebind  config  # soa_host_resume_event's, before the start
+irq  g_pace  config
+irq  g_pe_count  saved
+irq  g_pi_cause  saved
+irq  g_pi_mask  saved
+irq  g_poll_n  saved  # the old rule's count of back edges
+irq  g_quiet  saved  # the quiet rule's loop states: where the next waits are found
+irq  g_quiet_answer_passes  saved
+irq  g_quiet_answer_work  saved
+irq  g_quiet_epoch  saved
+irq  g_quiet_off  saved
+irq  g_quiet_off_epoch  saved
+irq  g_quiet_off_run  saved
+irq  g_quiet_off_sum  saved
+irq  g_quiet_off_used  saved
+irq  g_quiet_off_waits  saved
+irq  g_quiet_passes_differ  saved
+irq  g_quiet_run  saved
+irq  g_quiet_sum  saved
+irq  g_rebind  config
+irq  g_si_count  saved
+irq  g_step_off  saved
+irq  g_step_on  saved
+irq  g_vi_count  saved
+irq  g_vi_di  saved
+irq  g_vi_last  saved  # the retrace's phase
+irq  g_vi_pending  saved
+irq  g_wait_ai_steps  saved
+irq  g_wait_tb_steps  saved
+irq  warned  report
+
+main  buf  scratch
+main  extra  config
+main  g_frametime_from  config
+main  g_mem_base  scratch  # MEM1's reservation (its contents: cpu)
+main  g_mem_guarded  scratch
+main  g_mem_state  scratch
+main  g_nsyms  report  # the symbol table the reports name blocks from
+main  g_peek_n  saved  # SOA_PEEK, read again; what fell before the snapshot's frame is done
+main  g_peeks  saved
+main  g_poke_n  saved  # SOA_POKE, the same
+main  g_pokes  saved
+main  g_skip_ask_frame  host  # soa_host_skip_to: a host's request, taken at a frame end
+main  g_skip_ask_speed  host
+main  g_skip_back  saved
+main  g_skip_speed_was  saved
+main  g_skip_to  saved  # SOA_SKIP_TO, the same
+main  g_stall_at  saved  # SOA_STALL, the same
+main  g_stall_done  saved
+main  g_stall_parsed  config
+main  g_stall_secs  config
+main  g_state  scratch
+main  g_sym_tried  report
+main  g_sympath  report
+main  g_syms  report
+main  g_symtext  report
+main  g_uncap_from  config
+main  g_uncap_read  config
+main  g_watchdog_on  config
+main  reported  report
+main  s  cpu  # the CpuState
+main  started  report
+
+mod  g_api  config
+mod  g_at_safe_point  refused  # mods (SOA_MODS) are refused: a mod's library keeps state of its own
+mod  g_cb  refused
+mod  g_cb_n  refused
+mod  g_cur_dir  refused
+mod  g_cur_mod  refused
+mod  g_describe  refused
+mod  g_host_fn  config
+mod  g_in_init  refused
+mod  g_last_map  refused
+mod  g_last_scene  refused
+mod  g_loading  refused
+mod  g_maps_loaded  refused
+mod  g_mod_n  saved  # checked 0
+mod  g_mods  refused
+mod  g_pad_reader  config
+mod  g_patch_n  refused
+mod  g_patch_reload  refused
+mod  g_patches  refused
+mod  g_s  refused
+mod  g_seen_scene  refused
+mod  g_text  config  # the DOL's code sections, from the disc at the start
+mod  k_trigger  config
+mod  names  config
+
+ninja  cur  scratch  # a list call's, reset at each call
+ninja  draws  scratch
+ninja  g_feed  config
+ninja  g_frame  host  # the models handed to a host, numbered a frame at a time
+ninja  g_known  host
+ninja  g_known_next  host
+ninja  g_list  host
+ninja  g_nknown  host
+ninja  g_nopen  host
+ninja  g_nrec  host
+ninja  g_nseen  host
+ninja  g_open  host
+ninja  g_rec  host
+ninja  g_rec_dropped  report
+ninja  g_seen  host
+ninja  g_visit  host
+ninja  hooked  config
+ninja  in_list  scratch
+ninja  inside  scratch
+ninja  line  scratch
+ninja  n  scratch
+
+picture  cb  config
+
+plat  g_guard_base  scratch  # the MEM1 tripwire, installed at the start
+plat  g_guard_fn  scratch
+plat  g_guard_hi  scratch
+plat  g_guard_lo  scratch
+plat  g_guard_owner_id  scratch
+plat  g_guard_owner_set  scratch
+plat  g_guard_prev  scratch
+
+png  crc_table  config
+
+record  g_active  refused  # SOA_RECORD is refused: a recording's counts are part of the run
+record  g_all  refused
+record  g_buf  refused
+record  g_buf_cap  refused
+record  g_bytes  refused
+record  g_callee  refused
+record  g_dropped  refused
+record  g_every  refused
+record  g_flags  refused
+record  g_fn  refused
+record  g_gx_part  refused
+record  g_gx_post  refused
+record  g_gx_pre  refused
+record  g_gx_shadow  refused
+record  g_head  refused
+record  g_in  refused
+record  g_irq0  refused
+record  g_left  refused
+record  g_limit  refused
+record  g_max_pages  refused
+record  g_mem  refused
+record  g_most  refused
+record  g_named  refused
+record  g_ncallee  refused
+record  g_nfn  saved  # checked 0
+record  g_nin  refused
+record  g_nnamed  refused
+record  g_npages  refused
+record  g_ntouched  refused
+record  g_nwait  refused
+record  g_out  refused
+record  g_owner  refused
+record  g_page  refused
+record  g_path  refused
+record  g_pipe_cap  refused
+record  g_pipe_log  refused
+record  g_pipe_n  refused
+record  g_pool  refused
+record  g_prev  refused
+record  g_protected  refused
+record  g_shadow  refused
+record  g_shadowed  refused
+record  g_spent  refused
+record  g_state  refused
+record  g_switch0  refused
+record  g_t0  refused
+record  g_touched  refused
+record  g_wait  refused
+record  g_zero  refused
+record  order  refused
+record  order_cap  refused
+
+seed  g_other  saved
+seed  g_pinned  saved  # each site's next pin
+seed  g_seed  saved  # checked: SOA_SEED must be the snapshot's
+seed  g_seed_on  saved  # checked
+
+selftest  before  refused  # the self test's (SOA_SELFTEST runs no game)
+selftest  g_heard  refused
+selftest  g_heard_n  refused
+selftest  g_rng  refused
+selftest  g_sink_calls  refused
+selftest  g_sink_speed  refused
+selftest  g_swap_buf  refused
+selftest  g_swap_mode  refused
+selftest  k_case  refused
+selftest  native  refused
+selftest  saved  refused
+selftest  twin  refused
+
+settings  g_disc  config  # soa.ini, read at the start
+settings  g_loaded  config
+settings  g_record_as  config
+settings  g_record_as_set  config
+settings  g_root  config
+settings  k_path_keys  config
+settings  k_settings  config
+
+si  g_button_names  config
+si  g_cfg_extra  config
+si  g_chord_fn  config
+si  g_comcsr  saved
+si  g_exilk  saved
+si  g_host  saved  # the host buttons' last state: a chord held across the snapshot does not fire again
+si  g_host_frame  saved
+si  g_host_names  config
+si  g_host_prev  saved
+si  g_host_valid  saved
+si  g_inbuf_hi  saved
+si  g_inbuf_lo  saved
+si  g_iobuf  saved
+si  g_motor_asked  host  # the rumble a window or host plays
+si  g_motor_cmd  host
+si  g_motor_on  host
+si  g_motor_sink  config
+si  g_motor_strength  config
+si  g_motor_turned  host
+si  g_motor_window  host
+si  g_outbuf  saved
+si  g_pad2_source  config
+si  g_pad_filter  config
+si  g_pad_frame  report
+si  g_pad_seen  report
+si  g_path_root  config
+si  g_play  config  # SOA_PAD_FILE's lines, read again (its length is checked)
+si  g_play_cap  config
+si  g_play_done  saved
+si  g_play_drift  saved
+si  g_play_drift_max  saved
+si  g_play_end_frame  saved
+si  g_play_i  saved  # the replay's cursor: a line a read, not a function of the frame
+si  g_play_late  saved
+si  g_play_n  saved  # checked
+si  g_play_path  config
+si  g_play_tried  saved  # the file read before the cursor is set
+si  g_poll  saved
+si  g_polls  saved
+si  g_present  saved
+si  g_reads  saved
+si  g_rec  config  # SOA_PAD_RECORD: a resumed run's recording is a file of its own
+si  g_rec_changes  report
+si  g_rec_done  config
+si  g_rec_last  config
+si  g_rec_path  config
+si  g_rec_tried  config
+si  g_scr1  config  # SOA_PAD: a function of the frame alone, parsed again
+si  g_scr2  config
+si  g_sr  saved
+si  g_transfers  saved
+si  have  report  # the [si] log's last line
+si  k_chords  config
+si  last  report
+si  latch_frame  config  # a recording's
+si  latch_valid  config
+si  latched  config
+si  said  report
+
+snapshot  OPS  config
+snapshot  SECTIONS  config
+snapshot  env_read  config
+snapshot  g_at  config  # SOA_SNAPSHOT_AT, read again: a resumed run takes the ones still ahead
+snapshot  g_host_hook  config
+snapshot  g_host_hook_user  config
+snapshot  g_host_lock  scratch
+snapshot  g_host_put  scratch
+snapshot  g_loaded  config
+snapshot  g_nat  config
+snapshot  g_nhost_put  scratch
+snapshot  g_req  host
+snapshot  g_req_frame  host
+snapshot  g_req_lock  scratch
+snapshot  g_req_path  host
+snapshot  g_req_status  host
+snapshot  g_req_why  host
+snapshot  g_resume_armed  config
+snapshot  g_resumed  config
+snapshot  g_s  scratch
+snapshot  g_skip_one  config
+
+swap  g_answered  saved  # while counting
+swap  g_calls  saved
+swap  g_cap_pending  scratch  # requests before the game library: applied at its load
+swap  g_census_at  report  # SOA_PIPE_CENSUS's
+swap  g_census_hi  report
+swap  g_census_lo  report
+swap  g_census_path  config
+swap  g_count_path  config
+swap  g_counting  saved
+swap  g_due  scratch  # follows the clock's flag (snapshot_after_load)
+swap  g_due_take  config
+swap  g_game  config
+swap  g_lock  scratch
+swap  g_npending  scratch
+swap  g_pending  scratch
+swap  g_pipe_bytes  report
+swap  g_pipe_outside  report
+swap  g_pipe_stores  report
+swap  g_skip  scratch  # 0 between calls
+swap  g_swap  saved  # the host sets them again; "swaps" checks they are the snapshot's
+swap  g_swap_answers  saved  # the quiet rule compares it pass by pass
+swap  g_trace  refused  # SOA_RECORD's
+swap  g_translated  saved
+
+threads  g_main_fiber  scratch
+threads  g_resumes  saved
+threads  g_resuming  scratch  # set only between a load and its landing
+threads  g_s  scratch
+threads  g_saves  saved
+threads  g_switches  saved
+threads  g_threads  saved  # each thread's context and its last save; a second on a fiber is refused
+
+tick  g_first  config
+tick  g_held  config
+tick  g_released  saved
+tick  g_reported  config
+tick  g_safe  config  # the safe point's callbacks (mods')
+tick  g_safe_n  config
+tick  g_safe_points  saved
+tick  g_spin_wait  config
+tick  g_turbo_armed  saved  # the chord can have flipped it
+tick  g_turbo_frames  saved
+tick  g_turbo_mode  config
+tick  g_turbo_now  saved
+tick  g_turbo_toggle  host  # the chord's request
+tick  g_unlock_from  config
+
+trace  dump  config
+trace  enabled  config
+trace  g_watch_addr  config
+trace  g_watch_from  config
+trace  g_watch_len  config
+trace  hits  report
+trace  last_pc  report

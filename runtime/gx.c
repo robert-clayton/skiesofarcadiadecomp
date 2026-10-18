@@ -1006,3 +1006,72 @@ int gx_replay_pair(CpuState* s, const char* a, const char* b)
     gx_report();
     return 0;
 }
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) -------------------------------
+ * The register shadows every draw is set up from, the CP, PE and PI FIFO
+ * registers the guest reads back, the bytes of a command not yet whole, the
+ * frame count (what SOA_FRAMES, SOA_PAD and every frame-keyed switch count),
+ * the counts the report gives -- the pipe's bytes among them, which the quiet
+ * rule compares -- and a capture's registers as the frame began. */
+#include "snapshot.h"
+void gx_snap(Snap* sn)
+{
+    uint64_t pipe_len = g_pipe_len, cap_len = g_cap_len;
+    if (!snap_loading(sn) && (g_in_list || g_replaying)) {
+        snap_fail(sn, "the command stream is inside a display list");
+        return;
+    }
+    SNAP(sn, g_cp);
+    SNAP(sn, g_xf);
+    SNAP(sn, g_bp);
+    SNAP(sn, g_cp_mmio);
+    SNAP(sn, g_pe_mmio);
+    SNAP(sn, g_pi_fifo);
+    SNAP(sn, g_dl_rec);
+    SNAP(sn, g_frame);
+    SNAP(sn, pipe_len);
+    if (pipe_len > PIPE_CAP) {
+        snap_fail(sn, "the gather pipe holds %llu bytes, more than its %u", (unsigned long long)pipe_len, (unsigned)PIPE_CAP);
+        return;
+    }
+    snap_bytes(sn, g_pipe, (size_t)pipe_len);
+    SNAP(sn, g_bytes);
+    SNAP(sn, g_cmds);
+    SNAP(sn, g_draws);
+    SNAP(sn, g_verts);
+    SNAP(sn, g_dl_calls);
+    SNAP(sn, g_bp_loads);
+    SNAP(sn, g_xf_loads);
+    SNAP(sn, g_cp_loads);
+    SNAP(sn, g_finishes);
+    SNAP(sn, g_tokens);
+    SNAP(sn, g_efb_copies);
+    SNAP(sn, g_xfb_copies);
+    SNAP(sn, g_unknown);
+    SNAP(sn, g_last_unknown);
+    SNAP(sn, g_dl_recorded);
+    SNAP(sn, g_dl_rec_bytes);
+    SNAP(sn, g_dl_nonempty);
+    SNAP(sn, g_dl_call_bytes);
+    SNAP(sn, g_dl_overflows);
+    SNAP(sn, g_cap_cp);
+    SNAP(sn, g_cap_xf);
+    SNAP(sn, g_cap_bp);
+    SNAP(sn, cap_len);
+    if (snap_loading(sn)) {
+        if (snap_failed(sn)) return;
+        g_pipe_len = (size_t)pipe_len;
+        g_list_addr = 0;
+        g_in_list = 0;
+        if (!g_dump_checked) { g_dump_checked = 1; g_dump_list = getenv("SOA_FIFO_DUMP"); }
+        g_cap_len = 0;
+        if (cap_len) {
+            uint8_t* tmp = (uint8_t*)malloc((size_t)cap_len);
+            snap_bytes(sn, tmp, (size_t)cap_len);
+            if (tmp && !snap_failed(sn)) cap_append(tmp, (size_t)cap_len); /* kept only when a capture is asked for */
+            free(tmp);
+        }
+    } else if (cap_len) {
+        snap_bytes(sn, g_cap, (size_t)cap_len);
+    }
+}

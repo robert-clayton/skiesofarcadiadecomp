@@ -923,3 +923,16 @@ void ax_report(void)
             (unsigned long long)g_frames, (unsigned long long)g_voices, (unsigned long long)g_samples_out);
     census_report();
 }
+
+/* A snapshot (snapshot.h; docs/SNAPSHOT.md): the mixer keeps nothing of the
+ * game's between command lists -- every voice's state is in its parameter
+ * block in guest memory, and the buses are cleared for each list -- so what is
+ * here is the count of lists (a host's voice tap numbers its ticks by it) and
+ * the report's counts. */
+#include "snapshot.h"
+void ax_snap(Snap* sn)
+{
+    SNAP(sn, g_frames);
+    SNAP(sn, g_voices);
+    SNAP(sn, g_samples_out);
+}

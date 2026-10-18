@@ -39,6 +39,7 @@
  */
 #include "cpu.h"
 #include "plat.h"
+#include "snapshot.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,6 +139,16 @@ static void tick_register_report(void)
     hle_on_report(tick_report);
 }
 
+/* What runs at the safe point before anything else of it: snapshot.c's
+ * snapshot_safe_point (main.c sets it), whose snapshot is the state as the
+ * frame's top finds it. A setter, so this file still links alone. */
+static void (*g_first)(CpuState*);
+
+void tick_set_safe_point_first(void (*fn)(CpuState*))
+{
+    g_first = fn;
+}
+
 /* A callback for the top of every frame; 0 when the table is full. */
 int tick_on_safe_point(void (*fn)(CpuState*))
 {
@@ -183,6 +194,7 @@ void fn_8023F704(CpuState* s)
     tick_register_report();
     if (s->lr == LR_FRAME_START) {
         int i;
+        if (g_first) g_first(s); /* first: a snapshot's state is the state here (snapshot.c's) */
         g_safe_points++;
         hold_while_paused();
         turbo_evaluate(s);
@@ -196,4 +208,18 @@ void fn_8023F704(CpuState* s)
         g_spin_wait(s); /* the spin goes round again: under the fixed clock, a wait (docs/CLOCK.md) */
     }
     s->gpr[3] = mem_r32(s, RETRACE_COUNT);
+}
+
+/* A snapshot (snapshot.h): turbo's state, which the chord can have flipped,
+ * and the counts the report gives. */
+void tick_snap(Snap* sn)
+{
+    int armed = g_turbo_armed, now = g_turbo_now;
+    if (g_turbo_mode < 0) turbo_read();
+    SNAP(sn, armed);
+    SNAP(sn, now);
+    SNAP(sn, g_turbo_frames);
+    SNAP(sn, g_safe_points);
+    SNAP(sn, g_released);
+    if (snap_loading(sn)) g_turbo_armed = armed, g_turbo_now = now;
 }

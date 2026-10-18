@@ -324,3 +324,41 @@ void clock_reset(void)
     g_pause_req = g_paused = 0;
     g_gap_note = NULL;
 }
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) ------------------------------
+ * The fixed clock is a count and its rule's state: restored as it was, and
+ * its configuration (SOA_CLOCK and the SOA_CLOCK_* numbers, read at the start
+ * of every run) must be the snapshot's -- a resume continues one run. The
+ * real clock's guest time is restored and counts on from the host's now. */
+#include "snapshot.h"
+void clock_snap(Snap* sn)
+{
+    uint64_t cfg[6] = {(uint64_t)g_fixed, g_fx_read, g_fx_poll, g_fx_rtc, (uint64_t)g_clock_quiet | (uint64_t)g_clock_quiet_off << 1,
+                       g_fx_spin};
+    int due = g_clock_due;
+    unsigned epoch = g_epoch;
+    SNAP_CHECK(sn, cfg, "the clock (SOA_CLOCK, SOA_CLOCK_POLL_TICKS, SOA_CLOCK_READ_TICKS, SOA_CLOCK_RTC, SOA_CLOCK_SPIN)");
+    SNAP(sn, g_fx_ticks);
+    SNAP(sn, g_fx_skipped);
+    SNAP(sn, g_fx_reads);
+    SNAP(sn, g_fx_polls);
+    SNAP(sn, g_fx_skips);
+    SNAP(sn, g_clock_wait_reads);
+    SNAP(sn, due);
+    SNAP(sn, g_fx_waits);
+    SNAP(sn, g_fx_spin_max);
+    SNAP(sn, g_guest_ns);
+    SNAP(sn, g_gaps);
+    SNAP(sn, g_excluded_ns);
+    SNAP(sn, epoch);
+    if (snap_loading(sn) && !snap_dry(sn)) {
+        g_epoch = epoch;
+        g_clock_due = due; /* swap.c's bytes follow in snapshot_after_load */
+        if (!g_fixed) {
+            uint64_t now = clock_host_ns();
+            g_started = 1;
+            g_last_host_ns = g_origin_host_ns = now;
+            g_paused = 0;
+        }
+    }
+}

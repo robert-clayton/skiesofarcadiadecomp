@@ -841,6 +841,56 @@ SOA_HOST_API long soa_host_held(void);
 SOA_HOST_API int soa_host_set_pad_at(long frame, unsigned port, const SoaHostPad* pad);
 SOA_HOST_API void soa_host_strict_stats(SoaHostStrictStats* out);
 
+/* ---- Save states (within ABI 24; docs/SNAPSHOT.md) ----
+ *
+ * Functions only, to resolve by name: a runtime before them has none.
+ *
+ * A snapshot is the run's whole state -- the game's memory and registers, ARAM,
+ * every device, the clock and its quiet rule, the card, the pads latched -- at
+ * the start of a frame: the top of the game's main loop, where the last frame
+ * has ended and the next has not begun. A run resumed from it in a fresh
+ * process goes on as the run it was taken from did: the same frames, calls,
+ * sound and card, under the fixed clock, given the same host acts from there.
+ * The file is for this build and this disc only, and holds the game's memory:
+ * keep it out of any repository.
+ *
+ * soa_host_snapshot(path) asks for one at the next frame's start, taken on the
+ * game's thread: while held (strict mode, or soa_host_hold), at the frame
+ * held, the snapshot is of the frame after it, held + 1, which a resumed run
+ * presents first. It returns 1 when asked (0 before the start, or in strict
+ * mode from a host thread while the game runs). soa_host_snapshot_status
+ * gives 1 once written (with the frame in *frame), -1 if it failed (why in
+ * `why`), 0 before.
+ *
+ * soa_host_resume(path, why, cap), before soa_host_start, names the snapshot
+ * the run begins from: 0, or nonzero with why (no such file, damaged, another
+ * build's). The host then sets the same replacements as the run it was taken
+ * from (soa_host_replace) and the same strict mode and clock before it starts:
+ * soa_host_start refuses a different set of replacements, and the run a
+ * different clock. Events the host had scheduled come back by themselves when
+ * their function and data lie in a module (the host's program or a library);
+ * one whose user data is on the heap is given back with
+ * soa_host_resume_event(id, fn, user), the id soa_host_schedule returned, or
+ * soa_host_start refuses. soa_host_resumed_frame is the snapshot's frame, or -1.
+ * The pads, writes and named pads a strict host had given for frames after the
+ * snapshot come back with it; frame counts, call counts (when counting) and
+ * the strict counts go on from the snapshot's.
+ *
+ * A host's own state at the same point: soa_host_set_snapshot_hook(fn, user)
+ * is called on the game's thread as each snapshot is taken, and from it the
+ * host puts sections of its own (soa_host_snapshot_put, a name of up to ten
+ * characters); a resumed run's host reads them back before it starts
+ * (soa_host_snapshot_get: the bytes, at most max into out, and the section's
+ * size, or -1 when the snapshot has none of that name). */
+SOA_HOST_API int soa_host_snapshot(const char* path);
+SOA_HOST_API int soa_host_snapshot_status(long* frame, char* why, size_t cap);
+SOA_HOST_API int soa_host_resume(const char* path, char* why, size_t cap);
+SOA_HOST_API long soa_host_resumed_frame(void);
+SOA_HOST_API int soa_host_resume_event(int id, SoaHostEvent fn, void* user);
+SOA_HOST_API void soa_host_set_snapshot_hook(void (*fn)(void* user), void* user);
+SOA_HOST_API int soa_host_snapshot_put(const char* name, const void* data, size_t bytes);
+SOA_HOST_API long soa_host_snapshot_get(const char* name, void* out, size_t max);
+
 #ifdef __cplusplus
 }
 #endif

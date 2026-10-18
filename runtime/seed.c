@@ -117,3 +117,16 @@ void seed_report(void)
     fprintf(stderr, "[seed] SOA_SEED=%u: field load %llu, battle start %llu and %llu pinned; %llu other OSGetTick reads left alone\n",
             g_seed, g_pinned[0], g_pinned[1], g_pinned[2], g_other);
 }
+
+/* A snapshot (snapshot.h): how many times each site has been pinned is the
+ * next pin's number. SOA_SEED itself must be the snapshot's. */
+#include "snapshot.h"
+void seed_snap(Snap* sn)
+{
+    uint32_t cfg[2];
+    cfg[0] = (uint32_t)g_seed_on;
+    cfg[1] = g_seed_on ? g_seed : 0u;
+    SNAP_CHECK(sn, cfg, "SOA_SEED");
+    SNAP(sn, g_pinned);
+    SNAP(sn, g_other);
+}

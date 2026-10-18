@@ -185,6 +185,7 @@ static uint32_t g_dec_value;
 static uint64_t g_dec_set;
 static int g_dec_armed;
 static uint64_t g_dec_repeats; /* decrementer exceptions moved on 8 ticks: a second at one instant (quiet rule) */
+static uint64_t g_dec_last = ~0ull; /* the tick the last decrementer exception ran at (quiet rule) */
 static uint64_t g_dec_count, g_dec_arms, g_di_count, g_pe_count, g_ar_count, g_dsp_count, g_aid_count, g_si_count,
     g_exi_count, g_exid_count;
 
@@ -502,13 +503,12 @@ static void deliver_pending(CpuState* s)
              * decrementer exception at one instant first moves the clock as
              * far as one read used to (8 ticks), which is all the OS needs to
              * see time pass. */
-            static uint64_t last = ~0ull;
-            if (g_clock_quiet_off && clock_fixed_now() == last) {
-                clock_fixed_skip_to(last + 8);
+            if (g_clock_quiet_off && clock_fixed_now() == g_dec_last) {
+                clock_fixed_skip_to(g_dec_last + 8);
                 g_dec_repeats++;
             }
             call_guest_handler(s, handler, EXC_DECREMENTER);
-            if (g_clock_quiet_off) last = clock_fixed_now();
+            if (g_clock_quiet_off) g_dec_last = clock_fixed_now();
         } else if (handler) {
             static int warned;
             if (!warned++) fprintf(stderr, "[irq] decrementer expired before its handler was installed\n");
@@ -977,9 +977,10 @@ static void quiet_poll_off(CpuState* s)
     if (++g_quiet_off_run >= clock_fixed_spin()) quiet_off_wait(s, 1);
 }
 
+static unsigned g_poll_n; /* the old rule's count of back edges with interrupts on */
+
 void irq_poll(CpuState* s)
 {
-    static unsigned n;
     if (!(s->msr & 0x8000u) || g_in_handler) { /* MSR[EE] clear, or nested */
         if (g_clock_quiet && g_clock_quiet_off) quiet_poll_off(s);
         return;
@@ -990,7 +991,7 @@ void irq_poll(CpuState* s)
         quiet_poll(s);
         return;
     }
-    if (++n & 0xFu) return;
+    if (++g_poll_n & 0xFu) return;
     if (clock_fixed()) clock_fixed_poll(); /* the guest's work is its clock's */
     deliver_and_reschedule(s);
 }
@@ -1073,4 +1074,154 @@ int irq_charge(uint64_t ticks)
 uint64_t irq_retrace_count(void)
 {
     return g_vi_count;
+}
+
+/* ---- a snapshot (snapshot.h; docs/SNAPSHOT.md) ------------------------------
+ * Taken at the main loop's top, never inside a delivery: g_in_handler and
+ * g_irq_ctx are 0 there and the jmp_buf is dead. Everything else here is the
+ * future -- the devices' registers, the decrementer, the retrace's phase, the
+ * quiet rule's tables of loop states, which decide where the next waits are
+ * found -- and the report's counters, so a resumed run's report is the
+ * whole run's. */
+#include "snapshot.h"
+
+/* A host's own function and data for an event of the snapshot's, given
+ * before the run starts (soa_host_resume_event): for an event whose user
+ * data is on the heap, which no snapshot can find again. */
+typedef struct {
+    int id;
+    IrqEventFn fn;
+    void* user;
+    void (*extra)(void);
+} Rebind;
+static Rebind g_rebind[IRQ_EVENTS];
+static int g_nrebind;
+
+int irq_event_rebind(int id, IrqEventFn fn, void* user, void (*extra)(void))
+{
+    int k;
+    if (id <= 0 || !fn) return 0;
+    plat_lock(&g_event_lock);
+    for (k = 0; k < g_nrebind && g_rebind[k].id != id; k++) {}
+    if (k == IRQ_EVENTS) {
+        plat_unlock(&g_event_lock);
+        return 0;
+    }
+    g_rebind[k].id = id, g_rebind[k].fn = fn, g_rebind[k].user = user, g_rebind[k].extra = extra;
+    if (k == g_nrebind) g_nrebind++;
+    plat_unlock(&g_event_lock);
+    return 1;
+}
+
+/* The events: each one's tick and period, and its function, data and the
+ * caller's function as modules and offsets (snap_pointer). Loading with
+ * snap_dry (soa_host_start's check) reads them into nothing and fails for an
+ * event that would not run. */
+void irq_events_snap(Snap* sn)
+{
+    int k, n = IRQ_EVENTS, dry = snap_dry(sn);
+    SNAP_CHECK(sn, n, "the size of the event table");
+    if (!snap_loading(sn)) plat_lock(&g_event_lock);
+    for (k = 0; k < IRQ_EVENTS && !snap_failed(sn); k++) {
+        IrqEvent e = g_events[k];
+        void *fn = (void*)e.fn, *user = e.user, *extra = (void*)e.extra;
+        int ok_fn = 1, ok_user = 1, ok_extra = 1, r;
+        SNAP(sn, e.id);
+        SNAP(sn, e.due);
+        SNAP(sn, e.period);
+        snap_pointer(sn, &fn, &ok_fn);
+        snap_pointer(sn, &user, &ok_user);
+        snap_pointer(sn, &extra, &ok_extra);
+        if (!snap_loading(sn) || snap_failed(sn)) continue;
+        for (r = 0; r < g_nrebind && g_rebind[r].id != e.id; r++) {}
+        if (e.id && r < g_nrebind) { /* the host's word for it is the last */
+            fn = (void*)g_rebind[r].fn, user = g_rebind[r].user, extra = (void*)g_rebind[r].extra;
+            ok_fn = ok_user = ok_extra = 1;
+        }
+        if (e.id && (!ok_fn || !ok_user || !ok_extra || !fn)) {
+            snap_fail(sn, "event %d (due at tick %llu%s) has %s no snapshot can find again; the host gives it back with "
+                          "soa_host_resume_event before soa_host_start",
+                      e.id, (unsigned long long)e.due, e.period ? ", periodic" : "",
+                      !ok_fn || !fn ? "a function" : !ok_extra ? "a host function" : "user data on the heap,");
+            continue;
+        }
+        if (dry) continue;
+        e.fn = (IrqEventFn)fn;
+        e.user = user;
+        e.extra = (void (*)(void))extra;
+        if (!e.id) memset(&e, 0, sizeof e);
+        g_events[k] = e;
+    }
+    {
+        int next = g_event_next_id;
+        SNAP(sn, next);
+        if (!dry) g_event_next_id = next;
+    }
+    if (!dry && snap_loading(sn) && !snap_failed(sn)) {
+        int pending = 0;
+        for (k = 0; k < IRQ_EVENTS; k++) pending += g_events[k].id != 0;
+        g_nevents = pending;
+    }
+    if (!snap_loading(sn)) plat_unlock(&g_event_lock);
+}
+
+void irq_snap(Snap* sn)
+{
+    uint32_t lines = g_lines;
+    if (!snap_loading(sn) && (g_in_handler || g_irq_ctx)) {
+        snap_fail(sn, "an interrupt handler is running");
+        return;
+    }
+    SNAP(sn, g_vi_di);
+    SNAP(sn, g_pi_mask);
+    SNAP(sn, g_pi_cause);
+    SNAP(sn, g_ai_cr);
+    SNAP(sn, g_ai_vr);
+    SNAP(sn, g_ai_it);
+    SNAP(sn, g_ai_scnt_base);
+    SNAP(sn, g_vi_pending);
+    SNAP(sn, g_vi_last);
+    SNAP(sn, g_vi_count);
+    SNAP(sn, g_dec_value);
+    SNAP(sn, g_dec_set);
+    SNAP(sn, g_dec_armed);
+    SNAP(sn, g_dec_repeats);
+    SNAP(sn, g_dec_last);
+    SNAP(sn, g_dec_count);
+    SNAP(sn, g_dec_arms);
+    SNAP(sn, g_di_count);
+    SNAP(sn, g_pe_count);
+    SNAP(sn, g_ar_count);
+    SNAP(sn, g_dsp_count);
+    SNAP(sn, g_aid_count);
+    SNAP(sn, g_si_count);
+    SNAP(sn, g_exi_count);
+    SNAP(sn, g_exid_count);
+    SNAP(sn, g_delivered);
+    SNAP(sn, g_delivered_by_number);
+    SNAP(sn, lines);
+    if (snap_loading(sn)) g_lines = lines;
+    SNAP(sn, g_event_runs);
+    SNAP(sn, g_event_late_max);
+    SNAP(sn, g_event_late_sum);
+    SNAP(sn, g_line_runs);
+    SNAP(sn, g_line_unhandled);
+    SNAP(sn, g_step_on);
+    SNAP(sn, g_step_off);
+    SNAP(sn, g_wait_tb_steps);
+    SNAP(sn, g_wait_ai_steps);
+    SNAP(sn, g_quiet_off_waits);
+    SNAP(sn, g_quiet_passes_differ);
+    SNAP(sn, g_quiet_answer_passes);
+    SNAP(sn, g_quiet_answer_work);
+    SNAP(sn, g_quiet);
+    SNAP(sn, g_quiet_run);
+    SNAP(sn, g_quiet_sum);
+    SNAP(sn, g_quiet_off);
+    SNAP(sn, g_quiet_off_epoch);
+    SNAP(sn, g_quiet_epoch);
+    SNAP(sn, g_quiet_off_used);
+    SNAP(sn, g_quiet_off_run);
+    SNAP(sn, g_quiet_off_sum);
+    SNAP(sn, g_poll_n);
 }

@@ -1115,3 +1115,11 @@ void mod_report(void)
         }
     }
 }
+
+/* A snapshot (snapshot.h; docs/SNAPSHOT.md): a mod's library keeps state no
+ * file of the runtime's can hold, so a run with mods is not snapshotted. */
+#include "snapshot.h"
+void mod_snap(Snap* sn)
+{
+    if (g_mod_n) snap_fail(sn, "mods are loaded (SOA_MODS): their own state cannot be snapshotted");
+}

@@ -32,10 +32,13 @@ void ENTRY_FN(CpuState* s);
  * as the Windows link's /STACK (tools/recompile.py): there the main thread,
  * elsewhere a thread of that size, which then owns the MEM1 guard (L7). */
 #define GUEST_STACK_BYTES ((size_t)32 << 20)
+int snapshot_resuming(void);              /* snapshot.c (docs/SNAPSHOT.md) */
+void snapshot_resume_run(CpuState* s);
 static int run_guest(void* s)
 {
     plat_guard_owner();
-    ENTRY_FN((CpuState*)s);
+    if (snapshot_resuming()) snapshot_resume_run((CpuState*)s); /* SOA_RESUME: from a snapshot, not from the entry */
+    else ENTRY_FN((CpuState*)s);
     return 0;
 }
 void hle_report(void);
@@ -82,6 +85,8 @@ int settings_console_to_log(char* path, size_t cap);
 void si_set_path_root(const char* root);
 void aram_census_prepare(void); /* aram.c: its disc reads before the clock starts (M19) */
 void tick_set_hold(int (*held)(void)); /* tick.c; M19's pause */
+void tick_set_safe_point_first(void (*fn)(CpuState*)); /* tick.c */
+void snapshot_safe_point(CpuState* s);                  /* snapshot.c */
 void tick_set_spin_wait(void (*fn)(CpuState*)); /* tick.c; the fixed-step clock's frame-end wait */
 void irq_fixed_wait(CpuState* s);               /* irq.c */
 void clock_quiet_start(void);                    /* quiet.c */
@@ -953,22 +958,22 @@ void host_frame_end(CpuState* s, unsigned frame);
 /* SOA_STALL=<frame>:<seconds> (M19's check): the guest thread sleeps once, at
  * that frame's end, the way a host that went to sleep would stop it. The
  * clock is to count none of it. */
+static int g_stall_parsed, g_stall_done;
+static unsigned g_stall_at, g_stall_secs;
 static void stall_at_frame(unsigned frame)
 {
-    static int parsed, done;
-    static unsigned at, secs;
-    if (!parsed) {
+    if (!g_stall_parsed) {
         const char* v = getenv("SOA_STALL");
-        parsed = 1;
-        if (v && *v && sscanf(v, "%u:%u", &at, &secs) != 2) {
+        g_stall_parsed = 1;
+        if (v && *v && sscanf(v, "%u:%u", &g_stall_at, &g_stall_secs) != 2) {
             fprintf(stderr, "[boot] SOA_STALL=%s is not frame:seconds; ignored\n", v);
-            at = 0;
+            g_stall_at = 0;
         }
     }
-    if (done || !at || frame < at) return;
-    done = 1;
-    fprintf(stderr, "[boot] frame %u: stalling the guest thread %u s (SOA_STALL)\n", frame, secs);
-    plat_sleep_ms(secs * 1000u);
+    if (g_stall_done || !g_stall_at || frame < g_stall_at) return;
+    g_stall_done = 1;
+    fprintf(stderr, "[boot] frame %u: stalling the guest thread %u s (SOA_STALL)\n", frame, g_stall_secs);
+    plat_sleep_ms(g_stall_secs * 1000u);
 }
 
 /* SOA_SKIP_TO=frame[@speed]: get to a frame fast and then carry on as
@@ -1082,6 +1087,33 @@ void poke_at_frame(CpuState* s, unsigned frame)
             started = 1;
             hle_frametime_restart(frame);
         }
+    }
+}
+
+/* A snapshot (snapshot.h; docs/SNAPSHOT.md). What this file keeps are the
+ * switches keyed by frame -- SOA_POKE, SOA_PEEK, SOA_STALL, SOA_SKIP_TO --
+ * read from the environment of each run. A resumed run reads them again, and
+ * what they name for a frame before the snapshot's has happened already: it
+ * is in the memory the snapshot holds, so it is not done again. */
+#include "snapshot.h"
+void main_snap(Snap* sn)
+{
+    uint32_t frame = gx_frame_count();
+    int i;
+    SNAP(sn, frame);
+    if (!snap_loading(sn) || snap_failed(sn)) return;
+    if (g_poke_n < 0) poke_parse();
+    for (i = 0; i < g_poke_n; i++)
+        if (g_pokes[i].frame < frame) g_pokes[i].done = 1;
+    if (g_peek_n < 0) peek_parse();
+    for (i = 0; i < g_peek_n; i++)
+        if (g_peeks[i].last < frame) g_peeks[i].done = 1;
+    stall_at_frame(0); /* parse it */
+    if (g_stall_at && g_stall_at < frame) g_stall_done = 1;
+    if (g_skip_to && g_skip_to < frame) { /* the skip was over before the snapshot */
+        plat_setenv("SOA_SPEED", g_skip_speed_was);
+        clock_set_speed_at(g_skip_back, clock_host_ns());
+        g_skip_to = 0;
     }
 }
 
@@ -1454,6 +1486,7 @@ int main(int argc, char** argv)
         si_set_motor_strength(rumble && *rumble ? atoi(rumble) : 100);
         si_set_chord_handler(on_chord);
         tick_set_hold(clock_pause_requested);
+        tick_set_safe_point_first(snapshot_safe_point); /* SOA_SNAPSHOT_AT, soa_host_snapshot (docs/SNAPSHOT.md) */
         if (hle_clock_fixed()) tick_set_spin_wait(irq_fixed_wait); /* docs/CLOCK.md */
         if (hle_clock_fixed()) clock_quiet_start(); /* quiet.c: every function's entry delivers too */
         si_set_pad2_source(window_pad2); /* P10a: port 2 for mods */
@@ -1504,6 +1537,7 @@ int main(int argc, char** argv)
     swap_env(); /* SOA_COUNT_CALLS, SOA_PIPE_CENSUS */
     if (swap_pipe_census_on()) gx_set_pipe_census(swap_pipe_census_note);
     record_env(&s); /* SOA_RECORD (docs/RECORD.md) */
+    snapshot_resuming(); /* SOA_RESUME read and its file checked here, before the run (docs/SNAPSHOT.md) */
     if (argc > 2 && strcmp(argv[1], "--replay") == 0) {
         /* Render one captured frame (see gx.c frame capture) to <base>.png,
          * or a consecutive pair and the image between them (H10). */
