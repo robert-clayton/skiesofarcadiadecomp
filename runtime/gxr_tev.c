@@ -1521,7 +1521,14 @@ void tex_snap(Snap* sn)
         SNAP(sn, e->hashed);
         SNAP(sn, e->replaced);
         SNAP(sn, e->from_copy);
-        SNAP(sn, e->copy_cmd);
+        {
+            /* the command that made a copy's image is this process's number, and
+             * after the drain before a snapshot no queued one is newest: saved
+             * as -2, which no command is, as it is loaded */
+            long long cmd = e->from_copy ? -2 : e->copy_cmd;
+            SNAP(sn, cmd);
+            if (snap_loading(sn)) e->copy_cmd = cmd;
+        }
         SNAP(sn, e->gen);
         if (snap_loading(sn)) rgba = NULL;
         snap_buffer(sn, &rgba, &bytes);
@@ -1535,10 +1542,6 @@ void tex_snap(Snap* sn)
                 if (at && l < e->nlevels) at += (size_t)e->lw[l] * (size_t)e->lh[l] * 4u;
             }
         }
-        /* a copy's image was made by a command of the other process: never
-         * the newest queued here, so the next lookup reads memory (as the
-         * other process's would, its queue drained) */
-        if (e->from_copy) e->copy_cmd = -2;
     }
     SNAP(sn, g_lookups);
     SNAP(sn, g_hashes);
