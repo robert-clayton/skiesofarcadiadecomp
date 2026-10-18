@@ -239,8 +239,8 @@ static const Section SECTIONS[] = {
     {"mem", mem_snap},       {"threads", threads_snap}, {"clock", clock_snap},       {"hle", hle_snap},
     {"seed", seed_snap},     {"irq", irq_snap},         {"tick", tick_snap},         {"swap", swap_snap},
     {"main", main_snap},     {"gx", gx_snap},           {"gxr", gxr_snap},           {"tex", tex_snap},
-    {"dvd", dvd_snap},       {"dsp", dsp_snap},       {"ax", ax_snap},       {"aram", aram_snap},       {"si", si_snap},
-    {"exi", exi_snap},       {"record", record_snap},   {"mod", mod_snap},
+    {"dvd", dvd_snap},       {"dsp", dsp_snap},         {"ax", ax_snap},             {"aram", aram_snap},
+    {"si", si_snap},         {"exi", exi_snap},         {"record", record_snap},     {"mod", mod_snap},
 #ifdef SOA_HOST
     {"host", host_snap},
 #endif
@@ -422,7 +422,7 @@ static int save(CpuState* s, const char* path, char* why, size_t cap)
         return 0;
     }
     if (record_busy()) {
-        snprintf(why, cap, "a recorded call is under way (SOA_RECORD)");
+        snprintf(why, cap, "SOA_RECORD is on: a recording's counts are part of the run, and it is not snapshotted");
         return 0;
     }
     g_s = s;

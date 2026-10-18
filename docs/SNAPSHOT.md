@@ -102,14 +102,17 @@ the EFB, the texture cache and TMEM) and takes 0.3 s to write.
 
 **Nothing is forgotten.** `config/snapshot_state.txt` lists every variable
 the runtime keeps between calls -- every data and bss symbol of every object
-of a host build, each function's statics included, 920 of them -- with what a
-snapshot does with it: `saved`, `cpu`, or why not (`config`: read again at
-the start of every run; `report`; `host`: what a host or window reads, made
-again from the frames; `scratch`: empty or unused at the safe point;
-`refused`). `test_snapshot.py` compiles runtime/, lists the symbols with nm
+of a host build, each function's statics included, 902 of them -- with what a
+snapshot does with it: `saved` (298), `cpu`, or why not (`config`, 188: read
+again at the start of every run; `report`, 160; `host`, 56: what a host or
+window reads, made again from the frames; `scratch`, 93: empty or unused at
+the safe point; `refused`, 106: a mode no snapshot is taken in). `test_snapshot.py` compiles runtime/, lists the symbols with nm
 and holds the file to them both ways, and every `saved` name to its file's
 `*_snap` function. A variable added to the runtime without that decision
-fails the suite.
+fails the suite. The list is a Linux host build's (the plugin's, and the
+launcher of one): what only other builds compile -- the Vulkan backend
+(refused), SDL's window and sound and Win32's window (devices, live input:
+nothing that repeats), the Windows sampler (the profile) -- is not on it.
 
 **What a resumed run must share with the run it continues**, since a resume
 continues one run: the build (game library and runtime; the `build` section

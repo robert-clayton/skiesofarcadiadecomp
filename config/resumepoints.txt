@@ -1,9 +1,13 @@
 # Where a snapshot resumes (runtime/snapshot.c, docs/SNAPSHOT.md). A statically
 # translated function can only be entered at its head, so the recompiler gives
 # the function holding each address here a second way in: when s->spr[1000]
-# names the address on entry, it is cleared and control goes straight to it.
-# Each must be a block the function already labels (a branch target), and the
-# guest's whole state there must be in CpuState and memory -- true of every
-# translated function, which keeps nothing in C locals across a block.
+# names the address on entry, it is cleared and control goes to the address's
+# block, before the swap guard (a resume is not a call). The guest's whole
+# state there must be in CpuState and memory -- true of every translated
+# function, which keeps nothing in C locals across a block -- and the host's C
+# stack under it the same in every run: the function and the frames below it
+# are all there is. Baked in (a change here is a retranslation); the game
+# library's build record names them (resume=...), and recompile.py refuses an
+# address no translated function holds.
 
-0x801DCB84  MainLoop.frame_top   # the game's main loop, at its call of VIGetRetraceCount (tick.c's safe point)
+0x801DCB84  MainLoop.frame_top   # main's loop, at its call of VIGetRetraceCount (tick.c's safe point)
