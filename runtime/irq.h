@@ -54,6 +54,11 @@ void irq_fixed_wait(struct CpuState* s);
 /* The fixed clock's quiet rule (docs/CLOCK.md): a translated function's entry
  * delivers what has come due, as a back edge does (swap.c calls it). */
 void irq_quiet_entry(struct CpuState* s);
+/* The quiet rule's count of native answers (swap.c's g_swap_answers, given by
+ * quiet.c): a pass of a loop with an answer in it is a repeat only if the
+ * guest's memory is the same too (docs/CLOCK.md, "A native answer is not a
+ * wait"). NULL: none counted, every pass judged by its registers alone. */
+void irq_quiet_answers(const volatile uint64_t* count);
 
 /* hle.c: guest ticks now from any thread, moving and writing nothing; 0
  * before the guest's first read of the timebase. */

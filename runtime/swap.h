@@ -103,6 +103,11 @@ void swap_pipe_census_note(uint32_t pc, unsigned size);
  * clock.c's g_clock_due_fn when the rule is on. */
 void swap_due(int on);
 void swap_due_handler(void (*take)(CpuState* s));
+/* Every call a replacement answered (SWAP_ANSWERED, or SWAP_BOTH's), counted
+ * on the guest's thread whether or not counting is on: the quiet rule (irq.c,
+ * through quiet.c) reads it, so a loop around an answer that did work in
+ * memory is not taken for a wait (docs/CLOCK.md). */
+extern volatile uint64_t g_swap_answers;
 
 int soa_swap_enter(CpuState* s, uint32_t index); /* the guard's slow path */
 

@@ -49,6 +49,8 @@ the hardware.
      gather pipe since, twice running and with the floating registers the
      same the second time, and the other back edges in between the same
      both times (an inner loop's, a callee's; "A loop around a call is not
+     a wait" below), and -- if a native answer ran in the last pass -- the
+     guest's memory as the pass before left it too ("A native answer is not
      a wait" below), has gone round a loop that changed nothing it holds.
      That is a loop waiting on what only an interrupt can change
      (the boot's disc-load loop at `0x8021A024`, the SDK's ARQ and DSP
@@ -343,6 +345,9 @@ were before the call while the translation leaves its own: a loop around a
 call can repeat its state on a different pass. Leaving the volatile
 registers out of the state was tried and is wrong: work in a leaf loop
 keeps its count there, and the opening went to 932 retraces a frame.
+The other side of the same gap -- an answer that did work but left the
+registers as a wait's -- was closed on 2026-10-18 ("A native answer is not
+a wait" below); a poll found a pass sooner or later is still possible.
 
 ## Reads cost nothing (2026-10-17, afternoon)
 
@@ -499,6 +504,85 @@ threads) agree in all 3,900 frame hashes (2,433 distinct), every frame's
 globals and the call counts (2,225 functions); 3,900 held, none late or
 refused. (Strict, bd9bc7f's rule did not hang on this script -- the host's
 5 ms event is a deadline that caps the step -- but made 3,610 false waits.)
+
+### A native answer is not a wait (2026-10-18)
+
+**The problem.** A native answer (docs/SWAP.md) leaves the registers cleaner
+than its translation: it puts back what the calling convention lets a
+function clobber, where the translation leaves cursors, masks and operands
+that change with what it did. So a loop around an answered call can come
+back to its back edge with the registers it left last pass although the
+answer did work -- in memory, where the wait's state does not look. soa-ue5
+found it twice; the second time (its docs/layer3-scripts.md, "Flight-scene
+false waits") the script runner at `0x80212974`, `while (...) dispatch(&pc,
+1);`, with the plugin's native dispatcher: three like instructions in a row
+gave the same state three times, 29 false waits, six retraces, and the
+battle's reseed moved the encounter. The plugin worked round it by leaving
+r0 and r4 as the translation does; every other swap could meet the same.
+
+**The rule now.** swap.c counts every call a replacement answers
+(`g_swap_answers`: `SWAP_ANSWERED`, and `SWAP_BOTH`'s, whose handler runs
+after the translation), and quiet.c hands irq.c the count. A back edge
+whose registers repeat, in a pass with an answer in it, also hashes the
+guest's memory (MEM1, 24 MB, at the back edge), and the pass is a repeat
+that can make a wait only if memory is as the last pass left it too. So:
+
+- a loop whose answer wrote anything (the dispatcher's cursor) is not a
+  wait, whatever the answer left in the registers; with the hash checked
+  before, its next passes are judged afresh;
+- a poll around an answer that only reads -- a status, a count, polled until
+  an interrupt changes it -- is still a wait, on the same pass as its
+  translation's (the last pass's memory was hashed when its registers first
+  repeated);
+- a pass with no answer in it is judged as before, so a run with no
+  replacements set hashes nothing and finds every wait as it did, and a
+  translated loop that rewrites memory with the same values is a wait as
+  before.
+
+No answer has anything to do, and none may leave registers for the clock's
+sake (the plugin's r0/r4 workaround is no longer needed). The report adds
+`[clock] answers: N repeated passes had a native answer in them (memory
+hashed); M of them would have been a wait but the answer had changed
+memory`. Tests: `test_clock_fixed.py`'s
+`..._loop_around_a_native_answer_that_did_work_is_not_a_wait` (with
+interrupts on and off: an answer that moves a cursor in memory is no wait;
+one that only reads is; a run with no answers as before; it fails against
+the runtime before this) and `test_swap.py`'s count of answers.
+
+**Measured** (this tree; the combined host of "Reads cost nothing" rebuilt
+against it -- `all_host` with the plugin's disc, sound, card and pad, 122
+replacements -- and the same host on 08b4f4b's runtime; SOA_THREADS=1,
+muted, `SOA_RENDER=1 SOA_HASH=1`, fresh card copies):
+
+| run | frames | on against off, this tree | on, 08b4f4b against this tree | PCM samples, identical | guest ticks | repeated passes with an answer hashed / turned down |
+|---|---:|---|---|---|---:|---|
+| opening | 6,000 | 0 frames differ, every frame's tick the same | 0; 2,655 waits both | 13,002,560 | 8,228,925,000 | 22,433 / 0 |
+| warps | 9,000 | 0 (5,886 distinct) | 0; 4,172 waits both | 19,510,080 | 12,347,100,000 | 21,015 / 2 |
+| battle | 6,000 | 0 (4,407 distinct) | 0 | 13,053,760 | 8,261,325,000 | 17,530 / 0 |
+
+Wall time with the answers on, this tree against 08b4f4b: 372 / 371 s,
+731 / 705 s, 372 / 342 s (the hash is about a millisecond; the load
+average was 12 to 20). The warps' two turned down were each found as a wait
+a pass later, at the same guest time. The strict host (next section),
+4,000 frames, seed 1 at up to 0.3 ms and seed 2 at up to 3 ms with four
+rasterizer threads: the same 4,000 hashes (2,894 distinct), globals, call
+counts and 13,397 runs of the event, both runs and as at 08b4f4b; 4,000 held,
+3,999 pads, none late or refused. The crescent check: 3,900 frames, 2.09
+retraces a frame, 135.9 guest s, as before.
+
+**The flight scene without the workaround.** soa-ue5's script swap from
+before it (its commit 255ada1's parent: `FSwap::Dispatch` leaving every
+register as it found it), the flight scene of its `script_swap_run.py
+--flight` (secrets card, the encounter counter forced every 600 frames),
+13,100 frames, `SOA_THREADS=1`:
+
+| runtime | frames agreeing, on against off | guest ticks, on (off: 18,053,550,000) | waits found, on (off: 11,036) |
+|---|---|---:|---|
+| 08b4f4b | 7,594 of 13,100, from frame 3,891 | 18,077,175,000 (35 retraces more) | 11,759 |
+| this tree | 13,100 of 13,100 | 18,053,550,000, and the same reads and idle skips | 11,036; 228 repeats turned down |
+
+The same as the plugin's own fix gave (13,100 of 13,100), with no help from
+the plugin. The 279 hashes cost nothing measurable there.
 
 ## Deterministic runs under a host (strict mode)
 

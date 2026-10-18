@@ -13,6 +13,7 @@ void clock_quiet_start(void)
 {
     if (!clock_fixed() || !g_clock_quiet) return;
     swap_due_handler(irq_quiet_entry);
+    irq_quiet_answers(&g_swap_answers); /* a loop around a native answer is a wait only if memory repeats too */
     g_clock_due_fn = swap_due;
     if (g_clock_due) swap_due(1);
 }

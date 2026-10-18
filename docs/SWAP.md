@@ -111,7 +111,11 @@ cooperatively).
   overlaps its entry skips the guard. The recompiler only emits such a
   `goto` when another function's blocks include that address, which is rare.
 - A handler must keep the caller's non-volatile registers (r1, r2, r13–r31,
-  f14–f31) as it found them.
+  f14–f31) as it found them. It need not leave the volatile ones as its
+  translation would for the fixed clock's sake: every answered call is
+  counted (`g_swap_answers`), and a loop around one is taken for a wait only
+  if the guest's memory repeats as well as the registers (docs/CLOCK.md, "A
+  native answer is not a wait").
 
 ## What the host gets (`soa_host.h`, ABI 23; 24 adds the clock and events)
 
@@ -222,6 +226,12 @@ The checks:
   guest. The byte guard is portable C.
 
 ## What changed (and what to rebuild)
+
+- **2026-10-18, no ABI change**: `soa_swap_enter` counts every call a
+  replacement answers (`g_swap_answers`, swap.h), and the quiet clock checks
+  the guest's memory on a repeated pass with an answer in it
+  (docs/CLOCK.md, "A native answer is not a wait"). A runtime-only change:
+  `--link`.
 
 - **Within host ABI 24** (2026-10-17): strict mode, functions and one struct
   added after the rest of the header (`soa_host_set_strict`,

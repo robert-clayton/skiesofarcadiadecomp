@@ -204,6 +204,7 @@ int main(void)
     printf("due flags %u %u\n", soa_game()->swap[0], soa_game()->swap[1]);
     k = run(&s, 0); /* the caller's entry takes it; the callee's finds it gone */
     printf("due taken %u, %u, flags %u %u\n", taken, k, soa_game()->swap[0], soa_game()->swap[1]);
+    printf("answers %llu\n", (unsigned long long)g_swap_answers);
     return 0;
 }
 """
@@ -265,6 +266,10 @@ def test_a_translated_function_is_answered_in_each_way_and_counted(tmp_path):
         # the quiet rule's due bit (SWAP_DUE, 8) in every byte, taken at the first entry
         "due flags 8 8",
         "due taken 1, 41, flags 0 0",
+        # every call a replacement answered, counted or not, for the quiet
+        # rule's waits (docs/CLOCK.md): kept, both, original, call_original,
+        # and the two counted answers; not the games, not the cleared one
+        "answers 6",
     ]
     # each of the 1000 that named no function said so once the table came
     assert run.stderr.count("not a function of the game's") == 1000

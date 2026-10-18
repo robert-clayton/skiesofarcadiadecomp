@@ -762,6 +762,9 @@ typedef struct {
     uint64_t stores;   /* gx_pipe_bytes() when noted: a loop that drew something is not a wait */
     uint64_t mark;     /* the table's running sum just after this back edge last came by */
     uint64_t pass;     /* the sum over the other back edges of the last pass (seen == 2) */
+    uint64_t answers;  /* swap.c's count of native answers when this back edge last came by */
+    uint64_t memory;   /* the guest's memory, hashed, when it last came by after a pass with an answer in it */
+    uint32_t memory_ok; /* 1: `memory` is that pass's */
     uint32_t gpr[32], cr, lr, ctr, xer;
     Fpr fpr[32];
 } QuietSlot;
@@ -786,18 +789,71 @@ static uint64_t quiet_state_hash(const CpuState* s)
     return h;
 }
 
+/* Native answers (docs/SWAP.md) are not loops of the guest's, and leave the
+ * registers cleaner than their translations do: an answer puts back what the
+ * calling convention lets a function clobber (r0, r4-r12, CTR, CR...), where
+ * the translation leaves cursors, masks and operands that change with what it
+ * did. So a loop around an answered call -- the script runner's
+ * `while (...) dispatch(&pc, 1)` at 0x80212974 -- can come back with the
+ * registers it left last pass although the answer did work: the work is in
+ * memory, where the state above does not look. A pass with an answer in it
+ * is therefore a repeat only if the guest's memory is as the last pass left
+ * it too (hashed, MEM1, at the back edge), and only then can it make a wait:
+ * a poll around an answer that only reads (a status, a count) is still a
+ * wait, on the same pass as its translation's would be; a loop whose answer
+ * wrote anything is not. Passes with no answer in them are unchanged, so a
+ * run with no answers set hashes nothing and finds every wait as before.
+ * swap.c counts the answers; quiet.c hands irq.c the count. */
+static const volatile uint64_t* g_answers;
+static unsigned long long g_quiet_answer_passes, g_quiet_answer_work;
+
+void irq_quiet_answers(const volatile uint64_t* count)
+{
+    g_answers = count;
+}
+
+static uint64_t quiet_memory_hash(const CpuState* s)
+{
+    const uint8_t* p = s->mem;
+    uint64_t a = 0x243F6A8885A308D3ull, b = 0x13198A2E03707344ull, c = 0xA4093822299F31D0ull, d = 0x082EFA98EC4E6C89ull;
+    size_t i;
+    for (i = 0; i + 32u <= MEM1_SIZE; i += 32u) {
+        uint64_t w[4];
+        memcpy(w, p + i, sizeof w);
+        a = (a ^ w[0]) * 0x9E3779B97F4A7C15ull;
+        b = (b ^ w[1]) * 0xC2B2AE3D27D4EB4Full;
+        c = (c ^ w[2]) * 0x165667B19E3779F9ull;
+        d = (d ^ w[3]) * 0xD6E8FEB86659FD93ull;
+        a ^= a >> 29, b ^= b >> 31, c ^= c >> 27, d ^= d >> 33;
+    }
+    return a ^ (b * 3u) ^ (c * 5u) ^ (d * 7u);
+}
+
 /* One back edge against its slot: 0 noted (the state is new), 1 the same
  * state again, 2 a wait (the same state a third time running, with the same
- * floats and the same pass in between as the last time). */
+ * floats and the same pass in between as the last time, and, if an answer
+ * ran in that pass, the same memory). */
 static int quiet_match(QuietSlot* q, const CpuState* s, uint64_t* sum, int fresh)
 {
-    uint64_t f = quiet_state_hash(s), before = *sum;
+    uint64_t f = quiet_state_hash(s), before = *sum, answers = g_answers ? *g_answers : 0;
     *sum += f;
     if (!fresh && q->seen && q->pc == s->pc && q->stores == gx_pipe_bytes() && q->cr == s->cr && q->lr == s->lr &&
         q->ctr == s->ctr && q->xer == s->xer && !memcmp(q->gpr, s->gpr, sizeof q->gpr)) {
         uint64_t pass = before - q->mark;
+        int changed = 0;
         q->mark = *sum;
-        if (q->seen == 2 && pass == q->pass && !memcmp(q->fpr, s->fpr, sizeof q->fpr)) return 2;
+        if (answers != q->answers) { /* an answer ran in the pass: did it leave memory as it found it? */
+            uint64_t m = quiet_memory_hash(s);
+            g_quiet_answer_passes++;
+            changed = !q->memory_ok || m != q->memory;
+            q->answers = answers, q->memory = m, q->memory_ok = 1;
+        } else {
+            q->memory_ok = 0;
+        }
+        if (q->seen == 2 && pass == q->pass && !memcmp(q->fpr, s->fpr, sizeof q->fpr)) {
+            if (!changed) return 2;
+            g_quiet_answer_work++;
+        }
         if (q->seen == 2 && pass != q->pass) g_quiet_passes_differ++;
         q->seen = 2;
         q->pass = pass;
@@ -805,6 +861,7 @@ static int quiet_match(QuietSlot* q, const CpuState* s, uint64_t* sum, int fresh
         return 1;
     }
     q->pc = s->pc, q->seen = 1, q->stores = gx_pipe_bytes(), q->mark = *sum;
+    q->answers = answers, q->memory_ok = 0;
     q->cr = s->cr, q->lr = s->lr, q->ctr = s->ctr, q->xer = s->xer;
     memcpy(q->gpr, s->gpr, sizeof q->gpr);
     return 0;
@@ -997,6 +1054,10 @@ void irq_report(void)
                                 "different\n",
                         g_quiet_off_waits, g_wait_tb_steps, g_wait_ai_steps, (unsigned long long)g_dec_repeats,
                         g_quiet_passes_differ);
+            if (g_answers)
+                fprintf(stderr, "[clock] answers: %llu repeated passes had a native answer in them (memory hashed); "
+                                "%llu of them would have been a wait but the answer had changed memory\n",
+                        g_quiet_answer_passes, g_quiet_answer_work);
         }
     }
 }

@@ -53,6 +53,7 @@ static uint32_t g_skip;
 static SwapTraceFn g_trace; /* swap_trace's, with SWAP_TRACE in every byte while it is set */
 static void (*g_due_take)(CpuState* s); /* swap_due_handler's */
 static int g_due;                       /* SWAP_DUE is in every byte */
+volatile uint64_t g_swap_answers; /* swap.h */
 
 static const SoaGame* table(void)
 {
@@ -341,6 +342,7 @@ int soa_swap_enter(CpuState* s, uint32_t i)
             uint32_t address = g->address[i];
             s->pc = address; /* a sample in the replacement names the function, as its own block head would */
             how = w.handler(s, address, w.fn, w.user, 0);
+            if (how == SWAP_ANSWERED || how == SWAP_BOTH) g_swap_answers++; /* native work: not a wait's */
             if (how == SWAP_ANSWERED) {
                 if (f & SWAP_COUNT) g_answered[i]++;
                 return 1;

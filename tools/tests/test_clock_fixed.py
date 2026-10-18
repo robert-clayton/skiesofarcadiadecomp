@@ -52,6 +52,10 @@ DRIVER = r"""
 
 void hook_80237BA8(CpuState* s); /* irq.c's: the scheduler's idle loop */
 void irq_report(void);
+/* swap.c's count of native answers, as quiet.c hands it over; weak, so the
+ * driver also builds against a runtime without it (the test then fails) */
+void irq_quiet_answers(const volatile uint64_t* count) __attribute__((weak));
+static volatile uint64_t answers;
 
 /* the devices: none busy, nothing pending */
 int di_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out) { (void)s, (void)ea, (void)size, (void)out; return 0; }
@@ -148,6 +152,7 @@ int main(void)
     wr32(&s, 0x80003000u + 4 * 8, 0x9u);   /* the decrementer's: "9" */
     wr32(&s, 0x80003040u + 4 * 18, 0x12u); /* PE token's: "12" */
     s.gpr[3] = 77, s.gpr[31] = 31;
+    if (irq_quiet_answers) irq_quiet_answers(&answers);
     while (scanf("%15s", cmd) == 1) {
         if (!strcmp(cmd, "idle") && scanf("%llu", &a) == 1) {
             while (a--) hook_80237BA8(&s);
@@ -198,6 +203,23 @@ int main(void)
                 irq_poll(&s);
             }
             s.msr &= ~0x8000u;
+        } else if (!strcmp(cmd, "answered") && scanf("%llu %llu", &a, &b) == 2) {
+            /* a loop around a call a native answer took: the script runner's
+             * `while (...) dispatch(&pc, 1)`. The answer puts back every
+             * register, so each pass comes to the back edge with the same
+             * state; b & 1: the answer did work (the cursor in memory moves),
+             * or only read (a status poll); b & 2: interrupts on */
+            unsigned long long i;
+            if (b & 2) s.msr |= 0x8000u;
+            s.gpr[3] = 0x80200000u, s.gpr[4] = 1u, s.gpr[31] = 0x31u;
+            for (i = 0; i < a; i++) {
+                answers++;
+                if (b & 1) wr32(&s, 0x80200000u, rd32(&s, 0x80200000u) + 4u);
+                s.pc = 0x80006000u;
+                irq_poll(&s);
+            }
+            s.msr &= ~0x8000u;
+            printf("cursor %u\n", rd32(&s, 0x80200000u));
         } else if (!strcmp(cmd, "dec") && scanf("%llu %llu", &a, &b) == 2) {
             rearm = (unsigned)b;
             dec_write(&s, (uint32_t)a);
@@ -435,3 +457,27 @@ def test_free_an_elapsed_time_loop_entered_again_is_stepped_from_8_again(driver)
     out, _ = drive(driver, "until 1000\nbusy 1\nuntil 2000\n", {"FREE": "4194304"})
     ends = [int(x.split(" out at ")[1].split()[0]) for x in out.splitlines() if x.startswith("until")]
     assert ends == [1016, 2032], out  # 1016 + 8 + 16 + ... + 512, not 1016 + 1024
+
+
+@gnu
+@pytest.mark.parametrize("on", [0, 2])
+def test_free_a_loop_around_a_native_answer_that_did_work_is_not_a_wait(driver, on):
+    # the flight scene's false waits (soa-ue5, 2026-10-18): the script runner
+    # at 0x80212974 calls the dispatcher step by step; answered natively, the
+    # step puts back every register, so three like instructions running gave
+    # the same state three times and the quiet rule moved the clock to the
+    # next retrace, 29 times, six retraces in all, and the encounter moved.
+    # The translation's leftovers (r0, r4) had kept it from looking like one.
+    # The answer moved the cursor in memory: no wait, no time.
+    out, err = drive(driver, f"answered 50 {on | 1}\nregs\n", {"FREE": "4194304"})
+    assert "cursor 200" in out, out
+    assert out.splitlines()[-1].endswith(" now 0"), out
+    assert "0 waits found" in err, err
+    assert "would have been a wait but the answer had changed memory" in err, err
+    # an answer that only reads -- a status polled until an interrupt -- is
+    # still a wait, on the pass its translation's would be
+    out, err = drive(driver, f"answered 4 {on}\nregs\n", {"FREE": "4194304"})
+    assert out.splitlines()[-1].endswith(f" now {VI}"), out
+    # and a run that answers nothing is judged as before
+    out, err = drive(driver, "offwait 4\nwait 4\nregs\n", {"FREE": "4194304"})
+    assert out.splitlines()[-1].endswith(f" now {2 * VI}"), out
