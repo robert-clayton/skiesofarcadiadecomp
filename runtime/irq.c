@@ -668,10 +668,17 @@ static void fixed_idle_skip(CpuState* s)
  * timebase, a step that starts at 8 ticks and doubles each time the same
  * loop is found waiting again, so an elapsed-time loop ends late by less
  * than it waited. */
-static uint32_t g_wait_pc;
-static uint64_t g_wait_step;
-static unsigned long long g_wait_tb_steps, g_wait_ai_steps, g_quiet_off_waits;
-static void fixed_wait_skip(CpuState* s, unsigned reads)
+typedef struct {
+    uint32_t pc;   /* the loop the step is for; 0: none */
+    uint64_t step; /* the next step for a wait on the timebase there */
+} WaitStep;
+/* One for each table of waits (below): a handler's wait with interrupts off
+ * does not move the step of the loop it interrupted, and a stretch with
+ * interrupts off that ends (an elapsed-time loop left) starts the next one's
+ * at 8 ticks again. */
+static WaitStep g_step_on, g_step_off;
+static unsigned long long g_wait_tb_steps, g_wait_ai_steps, g_quiet_off_waits, g_quiet_passes_differ;
+static void fixed_wait_skip(CpuState* s, unsigned reads, WaitStep* w)
 {
     uint64_t now = tb_now(s), best = next_deadline(now);
     if (reads & CLOCK_READ_AISCNT) {
@@ -679,11 +686,11 @@ static void fixed_wait_skip(CpuState* s, unsigned reads)
         if (next > now && next < best) best = next, g_wait_ai_steps++;
     }
     if (reads & CLOCK_READ_TB) {
-        g_wait_step = s->pc == g_wait_pc && g_wait_step && g_wait_step < (1ull << 40) ? g_wait_step * 2 : 8;
-        g_wait_pc = s->pc;
-        if (now + g_wait_step < best) best = now + g_wait_step, g_wait_tb_steps++;
+        w->step = s->pc == w->pc && w->step && w->step < (1ull << 40) ? w->step * 2 : 8;
+        w->pc = s->pc;
+        if (now + w->step < best) best = now + w->step, g_wait_tb_steps++;
     } else {
-        g_wait_pc = 0;
+        w->pc = 0;
     }
     clock_fixed_skip_to(best);
 }
@@ -753,12 +760,59 @@ static int deliver_and_reschedule(CpuState* s)
 typedef struct {
     uint32_t pc, seen; /* seen: 0 empty, 1 noted, 2 noted twice the same, with the floats */
     uint64_t stores;   /* gx_pipe_bytes() when noted: a loop that drew something is not a wait */
+    uint64_t mark;     /* the table's running sum just after this back edge last came by */
+    uint64_t pass;     /* the sum over the other back edges of the last pass (seen == 2) */
     uint32_t gpr[32], cr, lr, ctr, xer;
     Fpr fpr[32];
 } QuietSlot;
 
+/* A back edge's state, mixed to 64 bits. Each table keeps a running sum of
+ * these over every back edge it sees; the sum since a block's last pass is
+ * what the other back edges did in between. A loop that waits does the same
+ * every pass, inner loops and all, so that sum repeats too. The same block
+ * reached again with the same registers by a loop *around* it whose count is
+ * in memory -- a function called five times running by a caller that keeps
+ * its counter in a register the callee saves on the stack -- is not a wait:
+ * the caller's back edge, between the two, is a different state each time.
+ * (The sound library's frame, 0x80283478, does exactly that in an AI
+ * interrupt; taken for a wait, it moved the clock on in every AI block.) */
+static uint64_t quiet_state_hash(const CpuState* s)
+{
+    uint64_t h = (uint64_t)s->pc * 0x9E3779B97F4A7C15ull + s->cr + ((uint64_t)s->lr << 32) + s->ctr * 0xC2B2AE3D27D4EB4Full +
+                 ((uint64_t)s->xer << 17);
+    unsigned i;
+    for (i = 0; i < 32; i++) h += ((uint64_t)s->gpr[i] + 1u) * (0xD6E8FEB86659FD93ull + 2u * i);
+    h ^= h >> 33, h *= 0xFF51AFD7ED558CCDull, h ^= h >> 33, h *= 0xC4CEB9FE1A85EC53ull, h ^= h >> 33;
+    return h;
+}
+
+/* One back edge against its slot: 0 noted (the state is new), 1 the same
+ * state again, 2 a wait (the same state a third time running, with the same
+ * floats and the same pass in between as the last time). */
+static int quiet_match(QuietSlot* q, const CpuState* s, uint64_t* sum, int fresh)
+{
+    uint64_t f = quiet_state_hash(s), before = *sum;
+    *sum += f;
+    if (!fresh && q->seen && q->pc == s->pc && q->stores == gx_pipe_bytes() && q->cr == s->cr && q->lr == s->lr &&
+        q->ctr == s->ctr && q->xer == s->xer && !memcmp(q->gpr, s->gpr, sizeof q->gpr)) {
+        uint64_t pass = before - q->mark;
+        q->mark = *sum;
+        if (q->seen == 2 && pass == q->pass && !memcmp(q->fpr, s->fpr, sizeof q->fpr)) return 2;
+        if (q->seen == 2 && pass != q->pass) g_quiet_passes_differ++;
+        q->seen = 2;
+        q->pass = pass;
+        memcpy(q->fpr, s->fpr, sizeof q->fpr);
+        return 1;
+    }
+    q->pc = s->pc, q->seen = 1, q->stores = gx_pipe_bytes(), q->mark = *sum;
+    q->cr = s->cr, q->lr = s->lr, q->ctr = s->ctr, q->xer = s->xer;
+    memcpy(q->gpr, s->gpr, sizeof q->gpr);
+    return 0;
+}
+
 static QuietSlot g_quiet[QUIET_SLOTS];
 static unsigned long long g_quiet_run;
+static uint64_t g_quiet_sum;
 
 static void quiet_forget(void)
 {
@@ -777,7 +831,7 @@ static void quiet_wait(CpuState* s, int by_length)
         return;
     }
     clock_fixed_note_spin(0, by_length ? 4 : 2);
-    fixed_wait_skip(s, reads);
+    fixed_wait_skip(s, reads, &g_step_on);
     clock_fixed_take_due();
     deliver_and_reschedule(s);
 }
@@ -810,18 +864,9 @@ static void quiet_poll(CpuState* s)
         return;
     }
     q = &g_quiet[(s->pc >> 2) & (QUIET_SLOTS - 1u)];
-    if (q->seen && q->pc == s->pc && q->stores == gx_pipe_bytes() && q->cr == s->cr && q->lr == s->lr && q->ctr == s->ctr && q->xer == s->xer &&
-        !memcmp(q->gpr, s->gpr, sizeof q->gpr)) {
-        if (q->seen == 2 && !memcmp(q->fpr, s->fpr, sizeof q->fpr)) {
-            quiet_wait(s, 0);
-            return;
-        }
-        q->seen = 2;
-        memcpy(q->fpr, s->fpr, sizeof q->fpr);
-    } else {
-        q->pc = s->pc, q->seen = 1, q->stores = gx_pipe_bytes();
-        q->cr = s->cr, q->lr = s->lr, q->ctr = s->ctr, q->xer = s->xer;
-        memcpy(q->gpr, s->gpr, sizeof q->gpr);
+    if (quiet_match(q, s, &g_quiet_sum, 0) == 2) {
+        quiet_wait(s, 0);
+        return;
     }
     if (++g_quiet_run >= clock_fixed_spin()) quiet_wait(s, 1);
 }
@@ -839,6 +884,7 @@ static QuietSlot g_quiet_off[QUIET_SLOTS];
 static uint32_t g_quiet_off_epoch[QUIET_SLOTS], g_quiet_epoch = 1;
 static int g_quiet_off_used;
 static unsigned long long g_quiet_off_run;
+static uint64_t g_quiet_off_sum;
 
 static void quiet_off_forget(void)
 {
@@ -855,7 +901,7 @@ static void quiet_off_wait(CpuState* s, int by_length)
     g_quiet_off_waits++;
     quiet_off_forget();
     clock_fixed_note_spin(0, by_length ? 4 : 2);
-    fixed_wait_skip(s, reads);
+    fixed_wait_skip(s, reads, &g_step_off);
 }
 
 static void quiet_poll_off(CpuState* s)
@@ -863,19 +909,13 @@ static void quiet_poll_off(CpuState* s)
     unsigned k = (s->pc >> 2) & (QUIET_SLOTS - 1u);
     QuietSlot* q = &g_quiet_off[k];
     g_quiet_off_used = 1;
-    if (g_quiet_off_epoch[k] == g_quiet_epoch && q->seen && q->pc == s->pc && q->stores == gx_pipe_bytes() && q->cr == s->cr &&
-        q->lr == s->lr && q->ctr == s->ctr && q->xer == s->xer && !memcmp(q->gpr, s->gpr, sizeof q->gpr)) {
-        if (q->seen == 2 && !memcmp(q->fpr, s->fpr, sizeof q->fpr)) {
+    {
+        int fresh = g_quiet_off_epoch[k] != g_quiet_epoch;
+        g_quiet_off_epoch[k] = g_quiet_epoch;
+        if (quiet_match(q, s, &g_quiet_off_sum, fresh) == 2) {
             quiet_off_wait(s, 0);
             return;
         }
-        q->seen = 2;
-        memcpy(q->fpr, s->fpr, sizeof q->fpr);
-    } else {
-        g_quiet_off_epoch[k] = g_quiet_epoch;
-        q->pc = s->pc, q->seen = 1, q->stores = gx_pipe_bytes();
-        q->cr = s->cr, q->lr = s->lr, q->ctr = s->ctr, q->xer = s->xer;
-        memcpy(q->gpr, s->gpr, sizeof q->gpr);
     }
     if (++g_quiet_off_run >= clock_fixed_spin()) quiet_off_wait(s, 1);
 }
@@ -889,6 +929,7 @@ void irq_poll(CpuState* s)
     }
     if (g_clock_quiet) {
         quiet_off_forget();
+        g_step_off.pc = 0; /* a stretch with interrupts off is over: its loops were left */
         quiet_poll(s);
         return;
     }
@@ -952,8 +993,10 @@ void irq_report(void)
             if (g_clock_quiet_off)
                 fprintf(stderr, "[clock] free reads: reads cost no time; %llu of those waits with interrupts off, %llu stepped "
                                 "for a loop on the timebase, %llu to AI's next sample; %llu decrementer exceptions a second "
-                                "time at one instant, 8 ticks on\n",
-                        g_quiet_off_waits, g_wait_tb_steps, g_wait_ai_steps, (unsigned long long)g_dec_repeats);
+                                "time at one instant, 8 ticks on; %llu repeats not a wait, the back edges between them "
+                                "different\n",
+                        g_quiet_off_waits, g_wait_tb_steps, g_wait_ai_steps, (unsigned long long)g_dec_repeats,
+                        g_quiet_passes_differ);
         }
     }
 }

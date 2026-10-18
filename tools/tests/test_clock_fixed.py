@@ -121,6 +121,11 @@ static void wr32(CpuState* s, uint32_t a, uint32_t v)
     uint8_t* p = s->mem + (a & MEM_MASK);
     p[0] = (uint8_t)(v >> 24), p[1] = (uint8_t)(v >> 16), p[2] = (uint8_t)(v >> 8), p[3] = (uint8_t)v;
 }
+static uint32_t rd32(CpuState* s, uint32_t a)
+{
+    const uint8_t* p = s->mem + (a & MEM_MASK);
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
 
 int main(void)
 {
@@ -172,6 +177,27 @@ int main(void)
             s.pc = 0x80004000u;
             while ((s.gpr[4] = guest_timebase_lo(&s)) < a) passes++, irq_poll(&s);
             printf("until %llu: out at %u after %u passes\n", a, s.gpr[4], passes);
+        } else if (!strcmp(cmd, "nested") && scanf("%llu %llu", &a, &b) == 2) {
+            /* not a wait: a caller's loop that calls a function a times, its
+             * count kept in r31, which the callee saves on the stack and uses
+             * for itself -- so the callee's back edge (one pass of a loop
+             * of its own) has the same registers every call, and only the
+             * caller's has the count. The sound library's frame in an AI
+             * interrupt (0x80283478 calling 0x80269CA8 five times). b: with
+             * interrupts on (1) or off (0). Each call reads the timebase. */
+            unsigned long long i;
+            if (b) s.msr |= 0x8000u;
+            for (i = 0; i < a; i++) {
+                wr32(&s, 0x80100000u, (uint32_t)i); /* r31, saved */
+                s.gpr[31] = 0x1234u, s.gpr[3] = 0x100u;
+                s.gpr[4] = guest_timebase_lo(&s);
+                s.pc = 0x80005000u;
+                irq_poll(&s);
+                s.gpr[31] = rd32(&s, 0x80100000u) + 1u; /* restored, and counted */
+                s.pc = 0x80005100u;
+                irq_poll(&s);
+            }
+            s.msr &= ~0x8000u;
         } else if (!strcmp(cmd, "dec") && scanf("%llu %llu", &a, &b) == 2) {
             rearm = (unsigned)b;
             dec_write(&s, (uint32_t)a);
@@ -362,7 +388,7 @@ def test_free_an_elapsed_time_loop_is_stepped_and_ends_late_by_less_than_it_wait
     assert 1000 <= end < 2000, out
     assert end == 8 * (2**7 - 1), out  # 8 + 16 + ... + 512 = 1016: seven waits, the last at 1016
     # with a deadline nearer than the step, it stops there
-    out, _ = drive(driver, f"every 1010 0\nuntil 1000\n", {"FREE": "4194304"})
+    out, _ = drive(driver, "every 1010 0\nuntil 1000\n", {"FREE": "4194304"})
     assert "out at 1010" in out, out
 
 
@@ -382,3 +408,30 @@ def test_a_raised_line_runs_in_its_device_s_place(driver):
     lines = [x for x in out.splitlines() if x.startswith("handler")]
     assert [x.split()[1] for x in lines[:2]] == ["12", "5"], out
 
+
+
+@gnu
+@pytest.mark.parametrize("on", [0, 1])
+def test_free_a_function_called_again_by_a_loop_around_it_is_not_a_wait(driver, on):
+    # the crescent hang (2026-10-17): the sound library's frame calls one
+    # function five times in an AI interrupt, its count saved on the stack, so
+    # that function's back edge comes by with the same registers each call.
+    # Taken for a wait it moved the clock on in every AI block, the step for
+    # the timebase doubling from one block to the next, and the game ran at
+    # 241 retraces a frame until it stopped. The caller's back edge in
+    # between differs each time, so it is not a wait: no time moves.
+    out, err = drive(driver, f"nested 5 {on}\nnested 5 {on}\nnested 50 {on}\nregs\n", {"FREE": "4194304"})
+    assert out.splitlines()[-1].endswith(" now 0"), out
+    assert "0 waits found" in err, err
+    # the same pass every time is still a wait (an inner loop's in each pass)
+    out, err = drive(driver, "offwait 4\nregs\n", {"FREE": "4194304"})
+    assert out.splitlines()[0].endswith(f" now {VI}"), out
+
+
+@gnu
+def test_free_an_elapsed_time_loop_entered_again_is_stepped_from_8_again(driver):
+    # the step doubles while one loop waits; a stretch with interrupts on in
+    # between means the loop was left, and the next wait starts at 8 ticks
+    out, _ = drive(driver, "until 1000\nbusy 1\nuntil 2000\n", {"FREE": "4194304"})
+    ends = [int(x.split(" out at ")[1].split()[0]) for x in out.splitlines() if x.startswith("until")]
+    assert ends == [1016, 2032], out  # 1016 + 8 + 16 + ... + 512, not 1016 + 1024

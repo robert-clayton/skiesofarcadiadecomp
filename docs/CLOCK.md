@@ -47,8 +47,10 @@ the hardware.
      comes back to its block with every integer register, CR, LR, CTR and
      XER as that block's last pass left them, with nothing sent down the
      gather pipe since, twice running and with the floating registers the
-     same the second time, has gone round a loop that changed nothing it
-     holds. That is a loop waiting on what only an interrupt can change
+     same the second time, and the other back edges in between the same
+     both times (an inner loop's, a callee's; "A loop around a call is not
+     a wait" below), has gone round a loop that changed nothing it holds.
+     That is a loop waiting on what only an interrupt can change
      (the boot's disc-load loop at `0x8021A024`, the SDK's ARQ and DSP
      polls). Work moves a register every pass -- a pointer, a count, a value
      read -- so it is never cut however long it runs (the longest run in
@@ -78,7 +80,9 @@ the hardware.
      `while (OSGetTime() < t)` -- so it is stepped: 8 ticks, then twice as
      far each time the same loop is found waiting again, up to the next
      deadline. Such a loop ends late by less than it waited (8 + 16 + ... ),
-     the same on every run.
+     the same on every run. Each of the two tables has a step of its own,
+     and the one with interrupts off starts at 8 again once they are on
+     (the loop was left; before, a step outlived its loop).
    - **a decrementer exception a second time at one instant** first moves
      the clock 8 ticks. The OS's periodic alarm started at `OSGetTime()` has
      its fire time at its start until time has passed it, so with reads free
@@ -425,6 +429,76 @@ without either is identical to off. The sound set needs the two charges
 name; `FServices` has no hook for it yet. AISetDSPSampleRate also runs
 `__AI_SRC_INIT` when the rate changes (3,728 ticks); the plays above never
 change it after boot, so its charge is unmeasured.
+
+### A loop around a call is not a wait (2026-10-17, evening)
+
+**The hang.** With free reads the crescent check below stopped at frame
+3,684 (`[watchdog]`, rc 5) after 890,972 retraces, 241 a frame, and
+573,406 guest seconds: 1,534,587 waits with interrupts off, 828,712 of them
+stepped for the timebase. Under the real clock it ran to the end. The
+waits were all one back edge, `0x80269F40` in `0x80269CA8`, inside the AI
+interrupt: the sound library's frame (`0x80283478`) calls that function
+five times running and keeps its count in r31, which the callee saves on
+its stack and uses for itself. So the callee's back edge came by with the
+same registers on every call, and the third call was taken for a wait. The
+table with interrupts off lasts for the whole handler, so this happened in
+every AI block; and the timebase step outlived the loop (it doubled for as
+long as waits were found at that address), so each block soon moved the
+clock to the next deadline, which brought the next block. Nothing about the
+DVD: the backtrace's `DVDGetDriveStatus` was the interrupted thread.
+
+**The rule now.** Each table keeps a running sum of every back edge's state
+(the integer registers, CR, LR, CTR, XER and the address, mixed to 64
+bits; `quiet_state_hash`). The sum between two passes of a block is what
+the other back edges did meanwhile. A wait needs that sum to be the same
+for both of its repeated passes as well as the registers: a loop that
+waits does the same every pass, inner loops included, so it is found on
+the same pass as before; the caller's back edge in between is a different
+state each call, so a function called again is not. And each table has its
+own timebase step; the step for waits with interrupts off starts at 8 again
+when interrupts are on. `[clock] free reads` counts the repeats turned
+down ("repeats not a wait"). Tests: `test_clock_fixed.py`'s
+`..._called_again_by_a_loop_around_it_is_not_a_wait` (the pattern, with
+interrupts off and on) and `..._entered_again_is_stepped_from_8_again`.
+
+**Measured** (this tree; the combined host and the series of "Reads cost
+nothing", SOA_THREADS=4 unless said):
+
+| run | before (bd9bc7f) | now |
+|---|---|---|
+| crescent (below) | rc 5 at frame 3,684, 241.85 retraces a frame | 3,900 frames, 2.09 a frame, 135.9 guest s, 12 s |
+| opening, 6,000, off and on | waits with interrupts off: 5,095 | 37; the same 6,000 hashes, PCM and ticks as before; on = off |
+| warps, 9,000, off and on | 5,087 | 37; on = off, 0 frames, PCM 19,510,080 samples, 12,347,100,000 ticks; against before, frames 4,173-4,801 and 17 retraces (the false waits had lost them) |
+| battle, 6,000, off and on | 4,543 | 37; on = off in PCM (13,053,760 samples) and every frame's tick; frames at SOA_THREADS=1 on = off, 0 of 6,000 (4,407 distinct); at 4, 3 to 9 frames from 4,591 on differ from run to run, off against off too (below) |
+
+So the false waits were in every run with free reads, about 5,000 of them,
+moving time in the warps; the crescent's pad found the scene where they
+fed on themselves.
+
+**Not the clock: the battle's pictures at four rasterizer threads.** Two
+battle runs with everything native at SOA_THREADS=4 differ from each other
+in 12 frames, and the translated run differs from a one-thread run in 3
+(4,614, 4,817, 5,125), while a traced pair agrees in every wait, every
+repeat turned down, every frame's tick and the PCM. The one-thread runs
+repeat and agree on and off. Something in `gxr.c`'s threaded path is not
+a function of the guest in that scene (open); the proofs above compare at
+one thread where the four disagree.
+
+The strict-host proof (next section) holds: runs A and B agree in all
+4,000 frame hashes (2,894 distinct), the globals, the call counts and the
+13,397 runs of the event; 4,000 held, 3,999 pads, none late or refused.
+
+**The crescent check** (manual; game data). The launcher (`gen/.../soa
+extracted`), `SOA_CLOCK=fixed`, a fresh copy of the secrets card,
+`SOA_PAD="1600:start,2050:start,2200:a,2500:a,2800:a,3100:a,3650:a,3800:a,3950:a"`,
+`SOA_FRAMES=3900`, headless and muted: it must reach frame 3,900 at about 2
+retraces a frame. Under strict mode, `STRICT_PAD` with the same presses
+gives `tools/strict_host.c` that script in place of its own; two strict
+runs (seed 1 at up to 0.3 ms, seed 2 at up to 3 ms with four rasterizer
+threads) agree in all 3,900 frame hashes (2,433 distinct), every frame's
+globals and the call counts (2,225 functions); 3,900 held, none late or
+refused. (Strict, bd9bc7f's rule did not hang on this script -- the host's
+5 ms event is a deadline that caps the step -- but made 3,610 false waits.)
 
 ## Deterministic runs under a host (strict mode)
 

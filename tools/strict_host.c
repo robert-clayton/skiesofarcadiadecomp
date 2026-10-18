@@ -6,6 +6,9 @@
  *
  *   strict_host GAME DISC ROOT SEED MAXDELAY_US strict|loose OUT
  *
+ * STRICT_PAD="frame:start|a,..." replaces the script below with those
+ * presses alone (docs/CLOCK.md: the crescent check).
+ *
  * GAME is libsoa_game.so of the build whose host runtime (recompile.py
  * --split --host) this is linked against; the run stops at SOA_FRAMES.
  *
@@ -68,9 +71,24 @@ static uint64_t fnv(uint64_t h, const uint8_t* p, size_t n)
 static void script(long f, SoaHostPad* p)
 {
     static const long starts[] = {1600, 1800, 2000, 2200, 2400, 2600, 2800, 3000, 3200};
+    const char* own = getenv("STRICT_PAD");
     unsigned k;
     memset(p, 0, sizeof *p);
     p->stick[0] = p->stick[1] = p->cstick[0] = p->cstick[1] = 128;
+    if (own) { /* STRICT_PAD="1600:start,2200:a,...": these alone, each held 10 frames, as SOA_PAD's are */
+        while (*own) {
+            char* end;
+            long at = strtol(own, &end, 10);
+            unsigned b = 0;
+            if (*end != ':') break;
+            own = end + 1;
+            if (!strncmp(own, "start", 5)) b = 0x1000, own += 5;
+            else if (*own == 'a') b = 0x0100, own += 1;
+            if (f >= at && f < at + 10) p->buttons |= (uint16_t)b;
+            if (*own == ',') own++;
+        }
+        return;
+    }
     for (k = 0; k < sizeof starts / sizeof starts[0]; k++) {
         if (f >= starts[k] && f < starts[k] + 10) p->buttons |= 0x1000;           /* START */
         if (f >= starts[k] + 40 && f < starts[k] + 50) p->buttons |= 0x0100;      /* A */
