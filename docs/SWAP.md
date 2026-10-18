@@ -161,10 +161,16 @@ script and card copy under `SOA_CLOCK=fixed`, once with the replacement set
 and once without, must give the same frame hashes and the same call counts
 but for what the answer replaces (its `translated` count, and the calls its
 translation made). The fixed clock's quiet rule makes that hold: ordinary
-code costs no guest time, so an answer that reads no clock or hardware moves
-nothing. docs/CLOCK.md, "Native answers and the clock", has the design and
-the runs: the 10 former `replace.c` functions and the six disc lookups
-answered over three scenes, 12,000 frames, no frame different.
+code costs no guest time, and since its free reads neither does a read of
+the clock or the hardware, so an answer moves nothing unless the
+translation it stands for waits on a device -- then it says how long, with
+`soa_host_charge`. docs/CLOCK.md, "Native answers and the clock" and "Reads
+cost nothing", has the design and the runs: the 10 former `replace.c`
+functions and the six disc lookups answered over three scenes, 12,000
+frames, no frame different (with 8 ticks a read; not re-run since); and
+the whole native platform (disc, sound,
+card, pad: 122 replacements) over 21,000 frames, no frame or sample
+different.
 
 ## Measurements (2026-10-17, this machine, gcc 16, `--optimize`)
 

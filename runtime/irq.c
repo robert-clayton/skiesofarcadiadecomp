@@ -121,7 +121,7 @@ static uint32_t ai_read(CpuState* s, uint32_t ea)
     switch (ea - 0xCC006C00u) {
     case 0: return g_ai_cr;
     case 4: return g_ai_vr;
-    case 8: return (uint32_t)((tb_now(s) - g_ai_scnt_base) * 16u / 13500u);
+    case 8: g_clock_wait_reads |= CLOCK_READ_AISCNT; return (uint32_t)((tb_now(s) - g_ai_scnt_base) * 16u / 13500u);
     case 12: return g_ai_it;
     default: return 0;
     }
@@ -184,6 +184,7 @@ void device_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v)
 static uint32_t g_dec_value;
 static uint64_t g_dec_set;
 static int g_dec_armed;
+static uint64_t g_dec_repeats; /* decrementer exceptions moved on 8 ticks: a second at one instant (quiet rule) */
 static uint64_t g_dec_count, g_dec_arms, g_di_count, g_pe_count, g_ar_count, g_dsp_count, g_aid_count, g_si_count,
     g_exi_count, g_exid_count;
 
@@ -198,6 +199,7 @@ void dec_write(CpuState* s, uint32_t v)
 uint32_t dec_read(CpuState* s)
 {
     uint64_t elapsed = tb_now(s) - g_dec_set;
+    g_clock_wait_reads |= CLOCK_READ_TB;
     return (uint32_t)((int64_t)g_dec_value - (int64_t)elapsed);
 }
 
@@ -456,10 +458,25 @@ static void run_events(CpuState* s, uint64_t now)
 extern volatile int g_record_armed;
 extern unsigned g_record_polls;
 
+/* A line native code raised: its handler, once (deliver_pending). */
+static void line_run(CpuState* s, unsigned n)
+{
+    uint32_t handler = interrupt_handler(s, n);
+    if (handler) { g_line_runs++; call_guest_handler(s, handler, n); }
+    else g_line_unhandled++;
+}
+#define LINE(n) (1u << (n))
+#define LINES_AT_DEVICES (LINE(IRQ_PI_PE_FINISH) | LINE(IRQ_PI_PE_TOKEN) | LINE(IRQ_DSP_DSP) | LINE(IRQ_DSP_AI) | \
+                          LINE(IRQ_DSP_ARAM) | LINE(IRQ_PI_DI) | LINE(IRQ_PI_VI) | LINE(IRQ_EXI_0_EXI) | LINE(IRQ_EXI_0_TC) | \
+                          LINE(IRQ_EXI_1_EXI) | LINE(IRQ_EXI_1_TC) | LINE(IRQ_EXI_2_EXI) | LINE(IRQ_EXI_2_TC) | LINE(IRQ_PI_SI))
+/* The device's own interrupt, or the line raised for it, or both: the
+ * handler runs once, as the OS's dispatcher runs it once for a cause. */
+#define TAKE(n) ((lines & LINE(n)) ? (lines &= ~LINE(n), 1) : 0)
+
 static void deliver_pending(CpuState* s)
 {
     uint64_t now;
-    uint32_t handler;
+    uint32_t handler, lines = 0;
 
     if (g_in_handler) return; /* a handler that idles must not nest deliveries */
     if (g_record_armed && g_record_polls++ < 4096u) return;
@@ -478,7 +495,20 @@ static void deliver_pending(CpuState* s)
          * that as an unhandled exception, which no shipping game relies on. */
         if (handler && handler != exception_handler(s, 1)) {
             g_dec_count++;
+            /* Reads cost nothing (the quiet rule's default), so an alarm the
+             * OS sets for the instant it fired -- a periodic alarm started at
+             * OSGetTime(), whose fire time is its start until time has moved
+             * past it -- would fire again at the same tick for ever. A second
+             * decrementer exception at one instant first moves the clock as
+             * far as one read used to (8 ticks), which is all the OS needs to
+             * see time pass. */
+            static uint64_t last = ~0ull;
+            if (g_clock_quiet_off && clock_fixed_now() == last) {
+                clock_fixed_skip_to(last + 8);
+                g_dec_repeats++;
+            }
             call_guest_handler(s, handler, EXC_DECREMENTER);
+            if (g_clock_quiet_off) last = clock_fixed_now();
         } else if (handler) {
             static int warned;
             if (!warned++) fprintf(stderr, "[irq] decrementer expired before its handler was installed\n");
@@ -487,32 +517,36 @@ static void deliver_pending(CpuState* s)
 
     /* Native events due by now, then the lines native code raised. */
     run_events(s, now);
+    /* A raised line is delivered where its device's interrupt is, in the
+     * same pass and the same order (PE, DSP, AI, ARAM, DI, VI, EXI, SI), so
+     * that a native device whose interrupt falls on the tick of another one
+     * -- a 5 ms AI block on a retrace, which the fixed clock makes common --
+     * runs its handler before or after the other exactly as the device model
+     * would. A number no device has (none the OS uses) goes first. */
     if (g_lines) {
-        uint32_t lines;
         unsigned n;
         plat_lock(&g_event_lock);
         lines = g_lines;
         g_lines = 0;
         plat_unlock(&g_event_lock);
         for (n = 0; n < 32; n++)
-            if ((lines >> n) & 1u) {
-                handler = interrupt_handler(s, n);
-                if (handler) { g_line_runs++; call_guest_handler(s, handler, n); }
-                else g_line_unhandled++;
-            }
+            if (((lines & ~LINES_AT_DEVICES) >> n) & 1u) line_run(s, n);
+        lines &= LINES_AT_DEVICES;
     }
 
     /* Pixel engine: a draw-done or token the command stream produced. */
     {
         unsigned due = gx_pe_irq_pending();
+        int ln = TAKE(IRQ_PI_PE_FINISH);
         if (due & 2) {
             handler = interrupt_handler(s, IRQ_PI_PE_FINISH);
             if (handler) { g_pe_count++; call_guest_handler(s, handler, IRQ_PI_PE_FINISH); }
-        }
+        } else if (ln) line_run(s, IRQ_PI_PE_FINISH);
+        ln = TAKE(IRQ_PI_PE_TOKEN);
         if (due & 1) {
             handler = interrupt_handler(s, IRQ_PI_PE_TOKEN);
             if (handler) { g_pe_count++; call_guest_handler(s, handler, IRQ_PI_PE_TOKEN); }
-        }
+        } else if (ln) line_run(s, IRQ_PI_PE_TOKEN);
     }
 
     /* Devices with commands in flight: finish the ones whose time is up. */
@@ -522,40 +556,42 @@ static void deliver_pending(CpuState* s)
     /* DSP: a mail from the microcode; AI: a DMA block finished playing. */
     dsp_poll(s);
     if (dsp_irq_pending()) {
+        TAKE(IRQ_DSP_DSP);
         handler = interrupt_handler(s, IRQ_DSP_DSP);
         if (handler) { g_dsp_count++; call_guest_handler(s, handler, IRQ_DSP_DSP); }
-    }
+    } else if (TAKE(IRQ_DSP_DSP)) line_run(s, IRQ_DSP_DSP);
     if (ai_dma_irq_pending()) {
+        TAKE(IRQ_DSP_AI);
         handler = interrupt_handler(s, IRQ_DSP_AI);
         if (handler) { g_aid_count++; call_guest_handler(s, handler, IRQ_DSP_AI); }
-    }
+    } else if (TAKE(IRQ_DSP_AI)) line_run(s, IRQ_DSP_AI);
 
     /* ARAM: a finished DMA the ARQ handler has not acknowledged. */
     if (aram_irq_pending()) {
+        TAKE(IRQ_DSP_ARAM);
         handler = interrupt_handler(s, IRQ_DSP_ARAM);
         if (handler) { g_ar_count++; call_guest_handler(s, handler, IRQ_DSP_ARAM); }
-    }
+    } else if (TAKE(IRQ_DSP_ARAM)) line_run(s, IRQ_DSP_ARAM);
 
     /* DVD: a finished transfer whose interrupt the handler has not acknowledged. */
     if (di_irq_pending()) {
+        TAKE(IRQ_PI_DI);
         handler = interrupt_handler(s, IRQ_PI_DI);
         if (handler) {
             g_di_count++;
             call_guest_handler(s, handler, IRQ_PI_DI);
         }
-    }
+    } else if (TAKE(IRQ_PI_DI)) line_run(s, IRQ_PI_DI);
 
     /* VI retrace at 60 Hz of guest time. */
-    if (now - g_vi_last >= VI_PERIOD_TICKS) {
-        handler = interrupt_handler(s, IRQ_PI_VI);
-        if (handler) {
-            g_vi_last = now;
-            g_vi_count++;
-            g_vi_pending = 1;
-            si_poll(); /* the controllers are polled once per field */
-            call_guest_handler(s, handler, IRQ_PI_VI);
-        }
-    }
+    if (now - g_vi_last >= VI_PERIOD_TICKS && (handler = interrupt_handler(s, IRQ_PI_VI)) != 0) {
+        TAKE(IRQ_PI_VI);
+        g_vi_last = now;
+        g_vi_count++;
+        g_vi_pending = 1;
+        si_poll(); /* the controllers are polled once per field */
+        call_guest_handler(s, handler, IRQ_PI_VI);
+    } else if (TAKE(IRQ_PI_VI)) line_run(s, IRQ_PI_VI);
 
     /* EXI: the device's own interrupt -- a memory card saying the program or
      * erase it was left with has finished -- and a completed transfer. The
@@ -578,13 +614,15 @@ static void deliver_pending(CpuState* s)
             unsigned ran = 0;
             for (ch = 0; ch < 3; ch++) {
                 if ((exi_exi_irq_pending() >> ch) & 1) {
+                    TAKE(exi[ch]);
                     handler = interrupt_handler(s, exi[ch]);
                     if (handler) { g_exid_count++; call_guest_handler(s, handler, exi[ch]); ran = 1; }
-                }
+                } else if (TAKE(exi[ch])) line_run(s, exi[ch]), ran = 1;
                 if ((exi_irq_pending() >> ch) & 1) {
+                    TAKE(tc[ch]);
                     handler = interrupt_handler(s, tc[ch]);
                     if (handler) { g_exi_count++; call_guest_handler(s, handler, tc[ch]); ran = 1; }
-                }
+                } else if (TAKE(tc[ch])) line_run(s, tc[ch]), ran = 1;
             }
             if (!ran) break;
         }
@@ -592,9 +630,10 @@ static void deliver_pending(CpuState* s)
 
     /* SI: a direct transfer completed, or polled data is waiting. */
     if (si_irq_pending()) {
+        TAKE(IRQ_PI_SI);
         handler = interrupt_handler(s, IRQ_PI_SI);
         if (handler) { g_si_count++; call_guest_handler(s, handler, IRQ_PI_SI); }
-    }
+    } else if (TAKE(IRQ_PI_SI)) line_run(s, IRQ_PI_SI);
     if (g_pace) plat_yield();
 }
 
@@ -603,9 +642,9 @@ static void deliver_pending(CpuState* s)
  * decrementer, a disc, ARAM or AI DMA completion, a native event -- which
  * the next pass of the idle loop delivers. With none ahead (the VI handler
  * not yet installed, its deadline behind) a field's worth. */
-static void fixed_idle_skip(CpuState* s)
+static uint64_t next_deadline(uint64_t now)
 {
-    uint64_t now = tb_now(s), best = 0, t;
+    uint64_t best = 0, t;
     int any = 0;
 #define DUE(t) do { if ((t) > now && (!any || (t) < best)) best = (t), any = 1; } while (0)
     DUE(g_vi_last + VI_PERIOD_TICKS);
@@ -615,7 +654,37 @@ static void fixed_idle_skip(CpuState* s)
     if (dsp_next_due(&t)) DUE(t);
     if (event_next_due(&t)) DUE(t);
 #undef DUE
-    if (!any) best = now + VI_PERIOD_TICKS;
+    return any ? best : now + VI_PERIOD_TICKS;
+}
+
+static void fixed_idle_skip(CpuState* s)
+{
+    clock_fixed_skip_to(next_deadline(tb_now(s)));
+}
+
+/* A wait found by its state (below): to the next deadline, as the idle loop,
+ * but no further than the loop can see a change in what it read
+ * (clock.h's CLOCK_READ_*): AI's sample counter's next step; or, for the
+ * timebase, a step that starts at 8 ticks and doubles each time the same
+ * loop is found waiting again, so an elapsed-time loop ends late by less
+ * than it waited. */
+static uint32_t g_wait_pc;
+static uint64_t g_wait_step;
+static unsigned long long g_wait_tb_steps, g_wait_ai_steps, g_quiet_off_waits;
+static void fixed_wait_skip(CpuState* s, unsigned reads)
+{
+    uint64_t now = tb_now(s), best = next_deadline(now);
+    if (reads & CLOCK_READ_AISCNT) {
+        uint64_t c = (now - g_ai_scnt_base) * 16u / 13500u, next = g_ai_scnt_base + ((c + 1) * 13500u + 15u) / 16u;
+        if (next > now && next < best) best = next, g_wait_ai_steps++;
+    }
+    if (reads & CLOCK_READ_TB) {
+        g_wait_step = s->pc == g_wait_pc && g_wait_step && g_wait_step < (1ull << 40) ? g_wait_step * 2 : 8;
+        g_wait_pc = s->pc;
+        if (now + g_wait_step < best) best = now + g_wait_step, g_wait_tb_steps++;
+    } else {
+        g_wait_pc = 0;
+    }
     clock_fixed_skip_to(best);
 }
 
@@ -694,19 +763,21 @@ static unsigned long long g_quiet_run;
 static void quiet_forget(void)
 {
     unsigned k;
+    g_clock_wait_reads = 0;
     for (k = 0; k < QUIET_SLOTS; k++) g_quiet[k].seen = 0;
     g_quiet_run = 0;
 }
 
 static void quiet_wait(CpuState* s, int by_length)
 {
+    unsigned reads = g_clock_wait_reads;
     quiet_forget();
     if (deliver_and_reschedule(s)) {
         clock_fixed_note_spin(0, by_length ? 3 : 1);
         return;
     }
     clock_fixed_note_spin(0, by_length ? 4 : 2);
-    fixed_idle_skip(s);
+    fixed_wait_skip(s, reads);
     clock_fixed_take_due();
     deliver_and_reschedule(s);
 }
@@ -755,11 +826,69 @@ static void quiet_poll(CpuState* s)
     if (++g_quiet_run >= clock_fixed_spin()) quiet_wait(s, 1);
 }
 
+/* The same, with interrupts off (MSR[EE] clear, or inside a handler or an
+ * event): nothing can be delivered here, so a loop whose state repeats is
+ * waiting on a device's status or on the timebase -- ARAM's busy bit at boot,
+ * an mftb loop -- and only time can end it. Reads cost no time (the quiet
+ * rule's default, SOA_CLOCK_READ_TICKS=0), so the clock goes to the next
+ * deadline, where the device's status changes, and the loop reads it. What
+ * came due waits for the first delivery point with interrupts on. A table of
+ * its own, good for one stretch with interrupts off: the next back edge with
+ * them on starts a new one (an epoch, so nothing is cleared). */
+static QuietSlot g_quiet_off[QUIET_SLOTS];
+static uint32_t g_quiet_off_epoch[QUIET_SLOTS], g_quiet_epoch = 1;
+static int g_quiet_off_used;
+static unsigned long long g_quiet_off_run;
+
+static void quiet_off_forget(void)
+{
+    if (!g_quiet_off_used) return;
+    g_quiet_off_used = 0;
+    g_quiet_off_run = 0;
+    g_quiet_epoch++;
+}
+
+static void quiet_off_wait(CpuState* s, int by_length)
+{
+    unsigned reads = g_clock_wait_reads;
+    g_clock_wait_reads = 0;
+    g_quiet_off_waits++;
+    quiet_off_forget();
+    clock_fixed_note_spin(0, by_length ? 4 : 2);
+    fixed_wait_skip(s, reads);
+}
+
+static void quiet_poll_off(CpuState* s)
+{
+    unsigned k = (s->pc >> 2) & (QUIET_SLOTS - 1u);
+    QuietSlot* q = &g_quiet_off[k];
+    g_quiet_off_used = 1;
+    if (g_quiet_off_epoch[k] == g_quiet_epoch && q->seen && q->pc == s->pc && q->stores == gx_pipe_bytes() && q->cr == s->cr &&
+        q->lr == s->lr && q->ctr == s->ctr && q->xer == s->xer && !memcmp(q->gpr, s->gpr, sizeof q->gpr)) {
+        if (q->seen == 2 && !memcmp(q->fpr, s->fpr, sizeof q->fpr)) {
+            quiet_off_wait(s, 0);
+            return;
+        }
+        q->seen = 2;
+        memcpy(q->fpr, s->fpr, sizeof q->fpr);
+    } else {
+        g_quiet_off_epoch[k] = g_quiet_epoch;
+        q->pc = s->pc, q->seen = 1, q->stores = gx_pipe_bytes();
+        q->cr = s->cr, q->lr = s->lr, q->ctr = s->ctr, q->xer = s->xer;
+        memcpy(q->gpr, s->gpr, sizeof q->gpr);
+    }
+    if (++g_quiet_off_run >= clock_fixed_spin()) quiet_off_wait(s, 1);
+}
+
 void irq_poll(CpuState* s)
 {
     static unsigned n;
-    if (!(s->msr & 0x8000u) || g_in_handler) return; /* MSR[EE] clear, or nested */
+    if (!(s->msr & 0x8000u) || g_in_handler) { /* MSR[EE] clear, or nested */
+        if (g_clock_quiet && g_clock_quiet_off) quiet_poll_off(s);
+        return;
+    }
     if (g_clock_quiet) {
+        quiet_off_forget();
         quiet_poll(s);
         return;
     }
@@ -820,8 +949,21 @@ void irq_report(void)
                             "(%llu went to the next deadline), %llu by %llu back edges with nothing due (%llu); the longest "
                             "run of back edges that ended at something due was %llu\n",
                     w[1] + w[2], w[2], w[3] + w[4], clock_fixed_spin(), w[4], longest);
+            if (g_clock_quiet_off)
+                fprintf(stderr, "[clock] free reads: reads cost no time; %llu of those waits with interrupts off, %llu stepped "
+                                "for a loop on the timebase, %llu to AI's next sample; %llu decrementer exceptions a second "
+                                "time at one instant, 8 ticks on\n",
+                        g_quiet_off_waits, g_wait_tb_steps, g_wait_ai_steps, (unsigned long long)g_dec_repeats);
         }
     }
+}
+
+/* soa_host_charge: an answer that stands for a device wait moves the fixed
+ * clock that far (docs/CLOCK.md); the real clock's own time is the guest's. */
+int irq_charge(uint64_t ticks)
+{
+    if (!clock_fixed() || !ticks) return 0;
+    return clock_fixed_skip_to(clock_fixed_now() + ticks);
 }
 
 uint64_t irq_retrace_count(void)

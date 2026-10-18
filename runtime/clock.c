@@ -187,6 +187,8 @@ static uint32_t g_fx_rtc = 31622400u; /* 2001-01-01 00:00:00, in seconds since 2
  * that skips a translation moves nothing a run can see. irq.c reads these
  * two at every back edge, so they are plain globals, not calls. */
 int g_clock_quiet;
+int g_clock_quiet_off; /* reads cost nothing too: irq.c finds waits with interrupts off as well */
+unsigned g_clock_wait_reads; /* CLOCK_READ_*: what the guest read since irq.c last looked for a wait */
 volatile int g_clock_due;
 void (*g_clock_due_fn)(int on);
 
@@ -215,6 +217,7 @@ void clock_fixed_configure(uint64_t read_ticks, uint64_t poll_ticks, uint32_t rt
     g_fx_poll = poll_ticks;
     g_fx_rtc = rtc_seconds;
     g_clock_quiet = poll_ticks == 0;
+    g_clock_quiet_off = g_clock_quiet && read_ticks == 0;
     due();
 }
 
@@ -305,6 +308,8 @@ void clock_reset(void)
     g_fx_reads = g_fx_polls = g_fx_skips = 0;
     g_fx_rtc = 31622400u;
     g_clock_quiet = 0;
+    g_clock_quiet_off = 0;
+    g_clock_wait_reads = 0;
     g_clock_due = 0;
     g_clock_due_fn = NULL;
     g_fx_spin = 4194304, g_fx_spin_max = 0;

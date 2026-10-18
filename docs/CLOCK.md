@@ -25,17 +25,18 @@ A host sets the same with `soa_host_set_clock(SOA_HOST_CLOCK_FIXED)` before
 
 The unit is the timebase tick, and the clock is a counter of them
 (`clock_fixed_now`). By default (the *quiet rule*, since 2026-10-17's
-"Native answers and the clock" below) two things move it, and nothing else
-does: no instruction the guest runs costs time by itself.
+"Native answers and the clock" below, with *free reads* since the same
+day's "Reads cost nothing") only the guest's waits move it: no instruction
+the guest runs costs time by itself, and neither does a read of the clock or
+the hardware.
 
-1. **A read the guest makes.** Each `mftb` (the timebase's low word) and
-   each hardware register read moves it `SOA_CLOCK_READ_TICKS` (default 8)
-   after it has answered. After, so `mftbu; mftb; mftbu` (OSGetTime) agrees
-   on the high word; and hardware reads count because the SDK polls a
-   device's status with interrupts off (ARAM's DMA busy bit at boot) and
-   must see its deadline come. `mftbu` alone moves nothing. The device
-   models' own reads of the timebase (`guest_time_device`) move nothing
-   either, so their polling costs no guest time.
+1. **A read the guest makes** costs `SOA_CLOCK_READ_TICKS`: 0 by default,
+   8 under the old rule (below). With 8 under the quiet rule (the rule of
+   the morning of 17 Oct, kept as a switch) each `mftb` and hardware read
+   moves the clock 8 ticks after it has answered, so a poll loop sees its
+   deadline come by reading; with 0 a poll loop is a wait like any other
+   (next item). `mftbu` alone never moves it, nor do the device models' own
+   reads of the timebase (`guest_time_device`).
 2. **A wait.** The clock jumps to the earliest deadline ahead -- the next
    retrace, the decrementer, a disc, ARAM or AI DMA completion, a native
    event -- when the guest waits and nothing is due:
@@ -59,6 +60,31 @@ does: no instruction the guest runs costs time by itself.
    In each case what is pending is delivered first, and the clock moves
    only when nothing was.
 
+   With free reads three more cases, since a poll no longer moves time by
+   reading:
+
+   - **a wait with interrupts off** (MSR[EE] clear, or inside a handler or
+     an event): found by its state the same way, from a table of its own
+     that lasts until the next back edge with interrupts on. Nothing can be
+     delivered there, so the clock goes to the next deadline and what came
+     due waits for the first delivery point with interrupts on. This is the
+     ARAM size probe at boot (`__ARChecksize`, a DMA's busy bit, 15 waits of
+     2,089 ticks), the DSP's boot polls and AI's sample-rate calibration.
+   - **no further than the loop can see.** A wait that read AI's sample
+     counter goes to the counter's next step if that is sooner (it counts
+     every 843.75 ticks; `__AI_SRC_INIT` waits for its edges and times them
+     with OSGetTime). A wait that read the timebase (`mftb`, the
+     decrementer) has no deadline to go to -- an elapsed-time loop,
+     `while (OSGetTime() < t)` -- so it is stepped: 8 ticks, then twice as
+     far each time the same loop is found waiting again, up to the next
+     deadline. Such a loop ends late by less than it waited (8 + 16 + ... ),
+     the same on every run.
+   - **a decrementer exception a second time at one instant** first moves
+     the clock 8 ticks. The OS's periodic alarm started at `OSGetTime()` has
+     its fire time at its start until time has passed it, so with reads free
+     its handler would set it again for the instant it ran, for ever (the
+     boot's first frame did, 39 million times, before this).
+
 **Delivery points.** Under the quiet rule something *comes due* when the
 clock moves (a read, a skip), the guest writes the hardware, or native code
 adds an event or raises a line. The first point after that with interrupts
@@ -67,7 +93,12 @@ function (the swap guard: `SWAP_DUE` in every guard's byte, `runtime/quiet.c`).
 Nothing is delivered by a count of back edges. So a handler runs at a
 program point fixed by the reads and writes before it, not by how many
 instructions ran since -- which is what makes a native answer invisible
-(next section).
+(next section). Within one delivery a line native code raised
+(`soa_host_raise`) is taken where its device's interrupt is, in the
+device's order (PE, DSP, AI, ARAM, DI, VI, EXI, SI; under both clocks), and
+with the device's own pending it runs once: a native AI block that falls on
+a retrace runs before or after the retrace's handler as the device model's
+would.
 
 **The old rule** is kept: `SOA_CLOCK_POLL_TICKS=32` (any value above 0)
 makes every 16th back edge with interrupts enabled a delivery point that
@@ -160,6 +191,7 @@ The report adds, when used:
 [irq] native: N events run, late by at most T ticks (U us), M ticks on average; L raised lines delivered, K with no handler installed
 [clock] fixed: T ticks of guest time (S s): R timebase and hardware reads, P delivery points, I idle skips for J ticks
 [clock] quiet: back edges cost no time; W waits found by a loop's repeated state (X went to the next deadline), Y by N back edges with nothing due (Z); the longest run of back edges that ended at something due was L
+[clock] free reads: reads cost no time; O of those waits with interrupts off, T stepped for a loop on the timebase, A to AI's next sample; D decrementer exceptions a second time at one instant, 8 ticks on
 ```
 
 (`P delivery points` counts the old rule's; it is 0 under the quiet rule.)
@@ -265,10 +297,12 @@ hardware reads: unchanged), `mftb` waits (reads: unchanged), the boot's
 disc-load loop and the SDK's polls (found as waits: 2,650 in the opening,
 none by length).
 
-**What a swap must still do to be invisible.** Read no timebase and no
-hardware register, write no hardware register (those are time and device
-semantics, and a native device is expected to change them). Answers that do
-can say so in a later ABI (`call->charge`), if one ever needs to.
+**What a swap must still do to be invisible.** Under the morning's rule
+(8 ticks a read): read no timebase and no hardware register, write no
+hardware register. With free reads (below, "Reads cost nothing") only the
+last part is left, and one more: where the translation it stands for
+*waits on a device* -- polls a status bit or the timebase until the
+hardware is done -- the answer says how long, with `soa_host_charge`.
 
 **Measured** (2026-10-17, this tree, `gen/linux-host`'s game library with a
 host runtime built from it and a scratch host program; headless, muted,
@@ -305,6 +339,92 @@ were before the call while the translation leaves its own: a loop around a
 call can repeat its state on a different pass. Leaving the volatile
 registers out of the state was tried and is wrong: work in a leaf loop
 keeps its count there, and the opening went to 932 retraces a frame.
+
+## Reads cost nothing (2026-10-17, afternoon)
+
+**The problem.** The quiet rule made ordinary code free but kept 8 ticks a
+read, and the native platform sets read far less than the SDK they replace:
+before frame 2 the translated sound SDK made 13,881 hardware and timebase
+reads, the native set 976. So with sound native the boot's load ended a
+retrace sooner, and the disc and the pad hid the same effect with per-swap
+work (a charge per elided read; "clock parity", an OSGetTick per read the
+native pad leaves out). soa-ue5's layer1-sound.md, layer1-pad.md and
+layer1-disc.md, "Under the quiet clock".
+
+**The rule.** Reads cost nothing (`SOA_CLOCK_READ_TICKS` is 0 under the
+quiet rule; 8 is still there to ask for). A poll is then a wait like any
+other, found by its state, with three additions ("What moves the fixed
+clock" above): waits with interrupts off are found too and go to the next
+deadline; a wait goes no further than what it read can show (AI's next
+sample; a timebase loop is stepped 8, 16, 32 ... ticks); and a second
+decrementer exception at one instant moves the clock 8 ticks. Raised lines
+are taken at their device's place in a delivery. Every polling pattern in
+the runs below ends: the boot's ARAM probe and DSP polls (waits with
+interrupts off), `__AI_SRC_INIT` (AI's sample edges, then an elapsed-time
+loop), the boot's disc-load loop and the SDK's polls (as before), and the
+OS's periodic alarm started at `OSGetTime()` (the decrementer rule; without
+it the first frame never ended).
+
+**What is left to a swap.** Not its reads: what the translation it stands
+for *waits for*. The native sound set's AIInit and ARInit skip the SDK's
+two boot probes, which wait on the hardware: `__ARChecksize` (15 ARAM DMAs,
+2,089 ticks each under the ARAM model, 31,335) and `__AI_SRC_INIT` (AI's
+sample-rate calibration, 3,728 ticks a call under this rule, twice from
+AIInit). Without them the native boot is 38,791 ticks shorter, a periodic
+alarm set just after starts at another phase, and 471 of the opening's
+first 1,000 frames differ (from 427). That is time semantics, not read
+accounting, so the answer says it: `soa_host_charge(ticks)` (soa_host.h,
+within ABI 24, resolved by name), from inside the answer. With 31,335 for
+ARInit and 7,456 for AIInit the set is invisible (below). No other swap
+needs one.
+
+**Measured** (2026-10-17, this tree's host runtime and game library, built
+with `recompile.py --cc gcc --split --host --no-decomp`; soa-ue5's combined
+scratch host: the disc's 5 lookups and 9 reads, sound's 46, the card's,
+the pad's 42, 122 replacements; headless, muted -- the PCM goes only to a
+file -- `SOA_RENDER=1 SOA_HASH=1`, `SOA_COUNT_CALLS`, fresh card copies,
+seed not pinned). "On" is everything native with **no disc charge and no
+pad parity**, sound's two boot charges; "off" is everything translated.
+
+| run | frames | frames differing | PCM samples | guest ticks, on and off | retraces a frame | wall s off / on |
+|---|---:|---|---|---|---:|---|
+| opening (bench pad, blank card) | 6,000 | 0 | 13,002,560, identical | 8,228,925,000 | 2.03 | 135 / 137 |
+| warps (final-boss card, 8 pokes) | 9,000 | 0 (5,885 distinct) | 19,528,320, identical | 12,358,575,000 | 2.03 | 231 / 215 |
+| battle (final-boss card, battle pokes) | 6,000 | 0 (3,931 distinct) | 13,149,760, identical | 8,322,075,000 | 2.05 | 115 / 116 |
+
+Each frame's guest tick is the same on and off too. Hardware and timebase
+reads in the opening: 1,529,658 off, 778,386 on. Call counts differ in 126
+to 137 functions outside the replaced set: the callees of the replaced SDK
+functions (calls made inside an answered call are not subtracted here).
+Each swap alone against off over the opening's first 1,000 frames: disc,
+card and pad 0 frames differing, the same PCM and ticks; sound uncharged
+471 (from frame 427), charged 0 (also over 3,000 frames, PCM identical).
+The off runs of two builds of this tree (before and after the line order)
+gave the same 6,000 and 9,000 hashes. Under the morning's rule the same
+everything-on run differed in 4,237 of the opening's 6,000 frames. The 16-answer runs of
+"Native answers and the clock" (camera, walk, ship, scan, the disc's
+lookups) were not re-run with free reads; their disc lookups are part of
+the set above.
+
+Without rendering, the launcher's opening, 6,000 frames: 2.03 retraces a
+frame and 23.5 s with free reads, 2.03 and 22.8 s with 8 ticks a read;
+guest time 203.150 and 203.167 s. 7,750 waits found (2,650 with 8-tick
+reads), 0 by length.
+
+**The real clock** is untouched by the rule: everything above runs only
+under `SOA_CLOCK=fixed` with free reads, except the place of a raised line
+in a delivery, which applies to both clocks and changes nothing for a run
+that raises none. The launcher's opening at `SOA_SPEED=30`, 3,000 frames:
+8.81 retraces a frame, 26.9 s, frametime p50 7.7 ms, p99 24.0 ms (load
+average 21; compare the table above).
+
+**For soa-ue5's plugin.** The pad's clock parity (`bClockParity`) and the
+disc's `FGuestCost` charge are no longer needed under this runtime: on
+without either is identical to off. The sound set needs the two charges
+(ARInit 31,335 ticks, AIInit 7,456), through `soa_host_charge` resolved by
+name; `FServices` has no hook for it yet. AISetDSPSampleRate also runs
+`__AI_SRC_INIT` when the rate changes (3,728 ticks); the plays above never
+change it after boot, so its charge is unmeasured.
 
 ## Deterministic runs under a host (strict mode)
 

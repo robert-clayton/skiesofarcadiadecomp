@@ -340,7 +340,8 @@ static int fixed_setup(void)
     if (done || !src || strcmp(src, "fixed")) return g_clock_fixed;
     done = 1;
     {
-        unsigned long long rd = env_ull("SOA_CLOCK_READ_TICKS", 8), poll = env_ull("SOA_CLOCK_POLL_TICKS", 0);
+        unsigned long long poll = env_ull("SOA_CLOCK_POLL_TICKS", 0);
+        unsigned long long rd = env_ull("SOA_CLOCK_READ_TICKS", poll ? 8 : 0);
         unsigned long long rtc = env_ull("SOA_CLOCK_RTC", 31622400ull), spin = env_ull("SOA_CLOCK_SPIN", 4194304);
         clock_fixed_configure(rd, poll, (uint32_t)rtc);
         clock_fixed_set_spin(spin);
@@ -576,7 +577,10 @@ uint32_t guest_timebase_lo(CpuState* s)
     v = g_seed_on && s->pc == 0x8023851Cu ? seed_pin(s->lr, v) : v;
     RECORD_NOTE(s, 2, 0, v);
     /* after the answer, so mftbu, mftb, mftbu (OSGetTime) agree on the high word */
-    if (g_clock_fixed && !g_tb_device) clock_fixed_after_read();
+    if (g_clock_fixed && !g_tb_device) {
+        clock_fixed_after_read();
+        g_clock_wait_reads |= CLOCK_READ_TB;
+    }
     return v;
 }
 uint32_t guest_timebase_hi(CpuState* s)

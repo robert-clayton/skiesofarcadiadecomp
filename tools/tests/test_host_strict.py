@@ -64,6 +64,7 @@ uint64_t hle_guest_ticks(void) { return 0; }
 int irq_event_add(uint64_t due, uint64_t period, void* fn, void* user, void* extra) { (void)due, (void)period, (void)fn, (void)user, (void)extra; return 1; }
 int irq_event_cancel(int id) { (void)id; return 1; }
 int irq_raise(unsigned n) { (void)n; return 1; }
+int irq_charge(uint64_t ticks) { (void)ticks; return 0; }
 int mod_call_guest(void) { return 0; }
 void ninja_set_feed(const void* f) { (void)f; }
 void si_set_motor_sink(void* fn) { (void)fn; }

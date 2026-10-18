@@ -50,6 +50,15 @@ void clock_fixed_stats(unsigned long long* reads, unsigned long long* polls, uns
  * edges with nothing due) has what is pending delivered, and with nothing,
  * guest time goes to the next deadline, as in the idle loop. */
 extern int g_clock_quiet;        /* 1: the quiet rule is on */
+extern int g_clock_quiet_off;    /* 1: and reads are free, so waits with interrupts off are found too */
+/* What a wait read, so that the clock goes no further than the loop can see:
+ * the timebase (mftb, the decrementer) changes every tick and has no
+ * deadline, so a wait that read it is stepped (8 ticks, then twice as far each
+ * time it is found again, up to the next deadline); AI's sample counter
+ * changes every 843.75 ticks, so a wait that read it goes to its next change. */
+#define CLOCK_READ_TB 1u
+#define CLOCK_READ_AISCNT 2u
+extern unsigned g_clock_wait_reads;
 extern volatile int g_clock_due; /* something may be due: the next delivery point delivers */
 void clock_fixed_set_spin(unsigned long long back_edges); /* SOA_CLOCK_SPIN */
 unsigned long long clock_fixed_spin(void);

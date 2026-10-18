@@ -781,6 +781,18 @@ SOA_HOST_API int soa_host_schedule(uint64_t at, uint64_t period, SoaHostEvent fn
 SOA_HOST_API int soa_host_cancel(int id);
 SOA_HOST_API int soa_host_raise(unsigned number);
 
+/* Within ABI 24, a function to resolve by name (a runtime before it has
+ * none). Under the fixed clock a guest read of the clock or the hardware
+ * costs no time (docs/CLOCK.md), so a native answer moves nothing -- unless
+ * the translation it stands for waits on a device: an SDK probe that polls a
+ * status bit or the timebase until the hardware is done. Such an answer says
+ * how long the wait was: soa_host_charge, from the guest's thread (inside an
+ * answer or an event), moves guest time on `ticks`, and what came due is
+ * delivered at the next delivery point. It returns 1 when the clock moved,
+ * and 0 under the real clock (where the host's own time is the guest's), from
+ * another thread, or for 0 ticks. */
+SOA_HOST_API int soa_host_charge(uint64_t ticks);
+
 /* ---- Strict mode: a run that repeats under a host (within ABI 24; docs/CLOCK.md) ----
  *
  * The fixed clock makes the guest repeat; what a host does from its own

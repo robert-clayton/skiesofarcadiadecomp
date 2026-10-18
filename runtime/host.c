@@ -788,6 +788,12 @@ int soa_host_raise(unsigned number)
     return strict_refuses() ? 0 : irq_raise(number);
 }
 
+int soa_host_charge(uint64_t ticks)
+{
+    /* the guest's thread only: an answer, or an event (docs/CLOCK.md) */
+    return t_guest ? irq_charge(ticks) : 0;
+}
+
 int soa_host_replace(uint32_t address, SoaHostAnswer fn, void* user)
 {
     return swap_set(address, fn ? host_swap : NULL, (SwapFn)fn, user);

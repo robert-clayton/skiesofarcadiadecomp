@@ -94,14 +94,19 @@ uint32_t mmio_read32(CpuState* s, uint32_t ea) { (void)s, (void)ea; return 0; } 
 
 /* the timebase: hle.c's, under the fixed-step clock */
 uint64_t guest_time_device(CpuState* s) { (void)s; return clock_fixed_now(); }
-uint32_t guest_timebase_lo(CpuState* s) { uint32_t v = (uint32_t)clock_fixed_now(); (void)s; clock_fixed_after_read(); return v; }
+uint32_t guest_timebase_lo(CpuState* s) { uint32_t v = (uint32_t)clock_fixed_now(); (void)s; clock_fixed_after_read(); g_clock_wait_reads |= CLOCK_READ_TB; return v; }
 uint32_t guest_timebase_hi(CpuState* s) { (void)s; return (uint32_t)(clock_fixed_now() >> 32); }
 
-/* the guest: a handler is its number, logged with the tick */
+/* the guest: a handler is its number, logged with the tick; the
+ * decrementer's ("9") sets it again for the instant it ran while `rearm`
+ * lasts, as the OS's does for a periodic alarm whose start is now */
+void dec_write(CpuState* s, uint32_t v);
+static unsigned rearm;
 void dispatch(CpuState* s, uint32_t addr)
 {
     printf("handler %X r3 %u at %llu\n", addr, s->gpr[3], (unsigned long long)clock_fixed_now());
     s->gpr[3] = 0xDEAD; /* clobbered, as a handler may */
+    if (addr == 0x9u && rearm) rearm--, dec_write(s, 0);
 }
 static void event(CpuState* s, void* user, void (*extra)(void), uint64_t due, uint64_t now)
 {
@@ -124,7 +129,10 @@ int main(void)
     unsigned long long a, b, ids[64];
     unsigned n = 0;
     s.mem = (uint8_t*)calloc(1, MEM_IMAGE_SIZE);
-    if (getenv("QUIET")) { /* the quiet rule (poll ticks 0), with a short spin limit */
+    if (getenv("FREE")) { /* the quiet rule with free reads (the default), and a short spin limit */
+        clock_fixed_configure(0, 0, 0);
+        clock_fixed_set_spin(strtoull(getenv("FREE"), NULL, 10));
+    } else if (getenv("QUIET")) { /* the quiet rule (poll ticks 0) with 8 ticks a read, and a short spin limit */
         clock_fixed_configure(8, 0, 0);
         clock_fixed_set_spin(strtoull(getenv("QUIET"), NULL, 10));
     } else {
@@ -132,6 +140,8 @@ int main(void)
     }
     wr32(&s, 0x80003040u + 4 * 24, 0x24u); /* the OS's VI handler: "24" */
     wr32(&s, 0x80003040u + 4 * 5, 0x5u);   /* AI's: "5" */
+    wr32(&s, 0x80003000u + 4 * 8, 0x9u);   /* the decrementer's: "9" */
+    wr32(&s, 0x80003040u + 4 * 18, 0x12u); /* PE token's: "12" */
     s.gpr[3] = 77, s.gpr[31] = 31;
     while (scanf("%15s", cmd) == 1) {
         if (!strcmp(cmd, "idle") && scanf("%llu", &a) == 1) {
@@ -152,6 +162,19 @@ int main(void)
             s.pc = 0x80002000u;
             while (a--) s.gpr[5]++, irq_poll(&s);
             s.msr &= ~0x8000u;
+        } else if (!strcmp(cmd, "offwait") && scanf("%llu", &a) == 1) {
+            /* a loop with interrupts off that changes no register: polling a status bit */
+            s.pc = 0x80003000u;
+            while (a--) irq_poll(&s);
+        } else if (!strcmp(cmd, "until") && scanf("%llu", &a) == 1) {
+            /* interrupts off, mftb until the timebase reaches a: the read is kept in r4 */
+            unsigned passes = 0;
+            s.pc = 0x80004000u;
+            while ((s.gpr[4] = guest_timebase_lo(&s)) < a) passes++, irq_poll(&s);
+            printf("until %llu: out at %u after %u passes\n", a, s.gpr[4], passes);
+        } else if (!strcmp(cmd, "dec") && scanf("%llu %llu", &a, &b) == 2) {
+            rearm = (unsigned)b;
+            dec_write(&s, (uint32_t)a);
         } else if (!strcmp(cmd, "read")) {
             guest_timebase_lo(&s);
         } else if (!strcmp(cmd, "every") && scanf("%llu %llu", &a, &b) == 2) {
@@ -306,3 +329,56 @@ def test_quiet_the_same_drive_gives_the_same_run(driver):
     b, eb = drive(driver, script, {"QUIET": "4096"})
     assert a == b and ea == eb
     assert "[clock] quiet:" in ea
+
+
+# ---- reads cost nothing (the quiet rule's default since 2026-10-17) ----
+
+
+@gnu
+def test_free_reads_move_nothing(driver):
+    out, err = drive(driver, "read\nread\nwork 100\nread\nregs\n", {"FREE": "4194304"})
+    assert out.splitlines()[-1].endswith(" now 0"), out
+    assert "0 waits found" in err, err
+
+
+@gnu
+def test_free_a_poll_with_interrupts_off_goes_to_the_deadline_and_delivers_later(driver):
+    # nothing can be delivered with interrupts off: the third pass goes to the
+    # retrace's tick, and the retrace is delivered at the first back edge with
+    # them on, not before
+    out, err = drive(driver, "offwait 4\nregs\nbusy 1\nregs\n", {"FREE": "4194304"})
+    lines = out.splitlines()
+    assert lines[0] == f"r3 77 r31 31 now {VI}", out
+    assert lines[1] == f"handler 24 r3 24 at {VI}", out
+    assert "1 waits found by a loop's repeated state (1 went to the next deadline)" in err, err
+
+
+@gnu
+def test_free_an_elapsed_time_loop_is_stepped_and_ends_late_by_less_than_it_waited(driver):
+    # 8, 16, 32, ... ticks a wait, so a loop on mftb for 1000 ticks ends by 2000
+    out, _ = drive(driver, "until 1000\nregs\n", {"FREE": "4194304"})
+    line = next(x for x in out.splitlines() if x.startswith("until"))
+    end = int(line.split(" out at ")[1].split()[0])
+    assert 1000 <= end < 2000, out
+    assert end == 8 * (2**7 - 1), out  # 8 + 16 + ... + 512 = 1016: seven waits, the last at 1016
+    # with a deadline nearer than the step, it stops there
+    out, _ = drive(driver, f"every 1010 0\nuntil 1000\n", {"FREE": "4194304"})
+    assert "out at 1010" in out, out
+
+
+@gnu
+def test_free_a_decrementer_set_for_the_instant_it_fired_moves_time_on(driver):
+    # the OS's periodic alarm started at now: fired, set again for now, three
+    # times; each second exception at one instant moves the clock 8 ticks
+    out, _ = drive(driver, "dec 0 3\nidle 1\nidle 1\nidle 1\nidle 1\nregs\n", {"FREE": "4194304"})
+    fired = [int(x.split(" at ")[1]) for x in out.splitlines() if x.startswith("handler 9")]
+    assert fired == [0, 8, 16, 24], out
+
+
+@gnu
+def test_a_raised_line_runs_in_its_device_s_place(driver):
+    # the device order of a delivery: PE before AI, whatever the numbers
+    out, _ = drive(driver, "raise 5\nraise 18\nidle 1\n")
+    lines = [x for x in out.splitlines() if x.startswith("handler")]
+    assert [x.split()[1] for x in lines[:2]] == ["12", "5"], out
+

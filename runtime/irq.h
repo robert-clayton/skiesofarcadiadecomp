@@ -42,6 +42,7 @@ int irq_event_cancel(int id);
  * pending: at the next delivery point the game's handler in that slot is
  * called with it, once however many times it was raised. 0 for a bad number. */
 int irq_raise(unsigned number);
+int irq_charge(uint64_t ticks); /* soa_host_charge: the fixed clock on `ticks` (the guest's thread) */
 /* Guest ticks now, as the devices read them, on the guest's thread (it moves
  * nothing under the fixed-step clock). From another thread, hle_guest_ticks. */
 uint64_t irq_guest_ticks(struct CpuState* s);
