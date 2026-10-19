@@ -273,3 +273,224 @@ def test_a_translated_function_is_answered_in_each_way_and_counted(tmp_path):
     ]
     # each of the 1000 that named no function said so once the table came
     assert run.stderr.count("not a function of the game's") == 1000
+
+
+# ---- the exact call (soa_host_game_exact; docs/SWAP.md "Exact calls") ----
+#
+# CALLEE2 returns a float in f1 and leaves what a callee leaves: r5, r6 and
+# r12, CTR, CR0, XER's carry, and f31 saved by its prologue as CodeWarrior
+# saves a paired-single register (stfd, then psq_st of both halves as singles,
+# GQR 0), used for a pair, and put back by its epilogue (psq_l, then lfd): the
+# first half exact, the second rounded to a single.
+
+
+def _d(op, rt, ra, d):
+    return (op << 26) | (rt << 21) | (ra << 16) | (d & 0xFFFF)
+
+
+def _psq(op, fs, ra, d):  # W=0, GQR 0
+    return (op << 26) | (fs << 21) | (ra << 16) | (d & 0xFFF)
+
+
+def _a(op, xo, d, a, b):
+    return (op << 26) | (d << 21) | (a << 16) | (b << 11) | (xo << 1)
+
+
+MTCTR_R5 = (31 << 26) | (5 << 21) | (9 << 16) | (467 << 1)
+CALLEE2_WORDS = [
+    _d(37, 1, 1, -32),  # stwu r1,-32(r1)
+    _d(54, 31, 1, 16),  # stfd f31,16(r1)
+    _psq(60, 31, 1, 24),  # psq_st f31,24(r1),0,0
+    _a(4, 21, 31, 1, 2),  # ps_add f31,f1,f2
+    _a(63, 21, 1, 1, 2),  # fadd f1,f1,f2
+    addi(5, 0, 5),  # li r5,5
+    addi(12, 0, 12),  # li r12,12
+    MTCTR_R5,
+    _d(11, 0, 5, 3),  # cmpwi r5,3
+    _d(12, 6, 5, -1),  # addic r6,r5,-1 (carries)
+    _psq(56, 31, 1, 24),  # psq_l f31,24(r1),0,0
+    _d(50, 31, 1, 16),  # lfd f31,16(r1)
+    addi(1, 1, 32),
+    BLR,
+]
+# CALLER: bl CALLEE2; blr     CALLEE2 at BASE + 8
+EXACT_WORDS = [bl(8), BLR, *CALLEE2_WORDS]
+CALLEE2 = BASE + 8
+
+EXACT_MAIN = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "functions.h"
+#include "soa_game.h"
+#include "swap.h"
+#include "mod.h"
+
+const SoaGame* soa_game_table;
+uint8_t mmio_read8(CpuState* s, uint32_t ea) { (void)s; (void)ea; return 0; }
+uint16_t mmio_read16(CpuState* s, uint32_t ea) { (void)s; (void)ea; return 0; }
+uint32_t mmio_read32(CpuState* s, uint32_t ea) { (void)s; (void)ea; return 0; }
+uint64_t mmio_read64(CpuState* s, uint32_t ea) { (void)s; (void)ea; return 0; }
+void mmio_write8(CpuState* s, uint32_t ea, uint8_t v) { (void)s; (void)ea; (void)v; }
+void mmio_write16(CpuState* s, uint32_t ea, uint16_t v) { (void)s; (void)ea; (void)v; }
+void mmio_write32(CpuState* s, uint32_t ea, uint32_t v) { (void)s; (void)ea; (void)v; }
+void mmio_write64(CpuState* s, uint32_t ea, uint64_t v) { (void)s; (void)ea; (void)v; }
+void gx_pipe_write(CpuState* s, unsigned size, uint64_t v) { (void)s; (void)size; (void)v; }
+uint32_t g_watch_addr, g_watch_len;
+void watch_hit(CpuState* s, uint32_t ea, unsigned size, uint64_t v) { (void)s; (void)ea; (void)size; (void)v; }
+void hle_on_report(void (*fn)(void)) { (void)fn; }
+void guest_trap(CpuState* s, uint32_t pc) { (void)s; printf("trap %08X\n", pc); }
+
+static double answer_f1;
+static int handler(CpuState* s, uint32_t address, SwapFn fn, void* user, int after)
+{
+    (void)address; (void)fn; (void)user; (void)after;
+    s->fpr[1].ps0 = s->fpr[1].ps1 = answer_f1;
+    return SWAP_ANSWERED;
+}
+static unsigned taken;
+static void take(CpuState* s) { (void)s; taken++; swap_due(0); }
+
+/* the state before every call: patterns in what the callee changes */
+static void set(CpuState* s)
+{
+    unsigned k;
+    for (k = 0; k < 32; k++) s->gpr[k] = 0xA0A00000u + k;
+    for (k = 0; k < 32; k++) s->fpr[k].ps0 = s->fpr[k].ps1 = 1000.0 + k;
+    s->gpr[1] = 0x80001000u;
+    s->gpr[2] = 0x80350000u;
+    s->gpr[13] = 0x8034E720u;
+    s->fpr[1].ps0 = s->fpr[1].ps1 = 1.5;
+    s->fpr[2].ps0 = s->fpr[2].ps1 = 0.25;
+    s->fpr[31].ps0 = 0.1;
+    s->fpr[31].ps1 = 0.3; /* no single: psq_st rounds it */
+    s->cr = 0x00000000u; s->xer = 0; s->ctr = 0xC0C0C0C0u; s->lr = 0x11111111u;
+    s->fpscr = 0; s->msr = 0x8000u; s->pc = 0x22222222u;
+}
+
+static void show(const char* what, CpuState* s)
+{
+    printf("%s r1 %08X r3 %08X r5 %08X r6 %08X r12 %08X r31 %08X lr %08X ctr %08X cr %08X xer %08X "
+           "f1 %.17g f2 %.17g f31 %.17g %.17g%s\n", what, s->gpr[1], s->gpr[3], s->gpr[5], s->gpr[6], s->gpr[12],
+           s->gpr[31], s->lr, s->ctr, s->cr, s->xer, s->fpr[1].ps0, s->fpr[2].ps0, s->fpr[31].ps0, s->fpr[31].ps1,
+           s->fpr[31].ps1 == (double)(float)0.3 ? " (a single)" : "");
+}
+
+int main(void)
+{
+    static CpuState s, t;
+    uint32_t r3 = 0;
+    double f1 = 0;
+    char why[160];
+    int ok;
+    s.mem = (uint8_t*)calloc(1, MEM_MASK + 1u + 0x10000u);
+    soa_game_table = soa_game();
+    swap_attach();
+
+    /* the game call (mod_call_guest), as it has always been: f1 taken, every register put back */
+    set(&s);
+    t = s;
+    ok = mod_call_guest(&s, CALLEE2_ADDR, NULL, 0, NULL, 0, &r3, &f1, why, sizeof why);
+    printf("game %d f1 %.17g unchanged %d\n", ok, f1, !memcmp(&s, &t, sizeof s));
+
+    /* the exact call: nothing put back */
+    set(&s);
+    ok = swap_call_exact(&s, CALLEE2_ADDR, 0x80003344u, 0);
+    show("exact", &s);
+    printf("exact %d\n", ok);
+
+    /* lr 0 leaves LR as it is */
+    set(&s);
+    swap_call_exact(&s, CALLEE2_ADDR, 0, 0);
+    printf("lr kept %08X\n", s.lr);
+
+    /* refused: not a function; nothing changed */
+    set(&s);
+    t = s;
+    ok = swap_call_exact(&s, 0x80000000u, 0x80003344u, 0);
+    printf("refused %d unchanged %d\n", ok, !memcmp(&s, &t, sizeof s));
+
+    /* a replaced function: the replacement answers, or the translation with original */
+    swap_set(CALLEE2_ADDR, handler, NULL, NULL);
+    answer_f1 = 99.0;
+    set(&s);
+    swap_call_exact(&s, CALLEE2_ADDR, 0x80003344u, 0);
+    printf("replaced f1 %g r5 %08X\n", s.fpr[1].ps0, s.gpr[5]);
+    set(&s);
+    swap_call_exact(&s, CALLEE2_ADDR, 0x80003344u, 1);
+    printf("original f1 %g r5 %08X\n", s.fpr[1].ps0, s.gpr[5]);
+    printf("answers %llu\n", (unsigned long long)g_swap_answers);
+    swap_set(CALLEE2_ADDR, NULL, NULL, NULL);
+
+    /* the quiet rule's due bit: an exact call's entry takes it as the game's own call does */
+    swap_due_handler(take);
+    swap_due(1);
+    set(&s);
+    swap_call_exact(&s, CALLEE2_ADDR, 0x80003344u, 0);
+    printf("due taken %u flags %u %u\n", taken, soa_game()->swap[0], soa_game()->swap[1]);
+    set(&s);
+    swap_due(1);
+    mod_call_guest(&s, CALLEE2_ADDR, NULL, 0, NULL, 0, &r3, &f1, why, sizeof why);
+    printf("game due taken %u flags %u %u\n", taken, soa_game()->swap[0], soa_game()->swap[1]);
+    return 0;
+}
+"""
+
+
+@gnu
+def test_an_exact_call_leaves_what_the_callee_left_and_the_game_call_does_not(tmp_path):
+    dol = make_dol(EXACT_WORDS)
+    fns, _ = cfg.build_iterative(dol)
+    assert sorted(fns) == [CALLER, CALLEE2]
+    em = Emitter(dol, fns, cfg.find_jump_tables(dol), swap=True)
+    (tmp_path / "functions.h").write_text(em.prototypes(), encoding="utf-8")
+    (tmp_path / "dispatch.c").write_text(em.dispatch_c(), encoding="utf-8")
+    body = ['#include "functions.h"', *(em.function_c(fns[a]) for a in sorted(fns))]
+    (tmp_path / "chunk.c").write_text("\n".join(body) + "\n", encoding="utf-8")
+    (tmp_path / "disc_sys.c").write_text(embed.disc_sys_c(None), encoding="utf-8")
+    (tmp_path / "game_table.c").write_text(
+        seam.game_table_c(seam.Seam((), (), ()), set(), fns, "abi=1", functions=fns), encoding="utf-8"
+    )
+    (tmp_path / "main.c").write_text(EXACT_MAIN.replace("CALLEE2_ADDR", f"0x{CALLEE2:08X}u"), encoding="utf-8")
+    proc = toolchain.cc(
+        [
+            *PROFILE.cflags,
+            "/DSOA_SPLIT=1",
+            f"/I{RUNTIME}",
+            f"/I{tmp_path}",
+            f"/Fe{tmp_path / 't'}",
+            "main.c",
+            "chunk.c",
+            "dispatch.c",
+            "game_table.c",
+            "disc_sys.c",
+            str(RUNTIME / "swap.c"),
+            str(RUNTIME / "mod.c"),  # the game call itself, mod_call_guest; the rest of mod.c is left out
+            *PROFILE.linker,
+            "-ffunction-sections",
+            "-fdata-sections",
+            "-Wl,--gc-sections",
+        ],
+        tmp_path,
+        PROFILE,
+    )
+    assert proc.returncode == 0, (proc.stdout or "") + (proc.stderr or "")
+    run = subprocess.run([str(tmp_path / "t")], capture_output=True, text=True, timeout=30)
+    assert run.returncode == 0, run.stdout + run.stderr
+    out = run.stdout.splitlines()
+    assert out == [
+        # the game call: f1's 1.75 taken, and the state exactly as it was
+        "game 1 f1 1.75 unchanged 1",
+        # the exact call: f1 1.75; r5 5, r6 4 and r12 12; CTR 5; CR0 "greater" (4); XER's carry; LR as given;
+        # r1, r31 and f2 as they were; f31's first half put back exactly and its second as a single
+        "exact r1 80001000 r3 A0A00003 r5 00000005 r6 00000004 r12 0000000C r31 A0A0001F lr 80003344 "
+        "ctr 00000005 cr 40000000 xer 20000000 f1 1.75 f2 0.25 f31 0.10000000000000001 0.30000001192092896 (a single)",
+        "exact 1",
+        "lr kept 11111111",
+        "refused 0 unchanged 1",
+        "replaced f1 99 r5 A0A00005",  # the replacement answered: r5 as it was
+        "original f1 1.75 r5 00000005",  # SOA_HOST_EXACT_ORIGINAL: the translation, replacement or not
+        "answers 1",  # counted for the quiet rule as any answer is
+        "due taken 1 flags 0 0",
+        "game due taken 2 flags 0 0",
+    ]

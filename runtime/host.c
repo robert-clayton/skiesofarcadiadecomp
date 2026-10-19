@@ -702,6 +702,36 @@ static void host_original(SoaHostCall* call)
     call->fpr[0] = s->fpr[1].ps0;
 }
 
+/* An exact call (soa_host_game_exact): the translation's own call, nothing
+ * put back. t_exact says the answer running now made one, so host_swap puts
+ * its LR back after it as the function's epilogue would. */
+static PLAT_THREAD_LOCAL int t_exact;
+
+int soa_host_game_exact(SoaHostCall* call, uint32_t address, uint32_t lr, unsigned flags)
+{
+    CpuState* s;
+    if (!call || !call->runtime || !t_guest || (flags & ~SOA_HOST_EXACT_ORIGINAL)) return 0;
+    s = (CpuState*)call->runtime;
+    if (s->gpr[2] != 0x80350000u || s->gpr[13] != 0x8034E720u) return 0;
+    if (!swap_call_exact(s, address, lr, (flags & SOA_HOST_EXACT_ORIGINAL) != 0)) return 0;
+    t_exact = 1;
+    return 1;
+}
+
+int soa_host_special(SoaHostCall* call, SoaHostSpecial* get, const SoaHostSpecial* set)
+{
+    CpuState* s;
+    if (!call || !call->runtime || !t_guest) return 0;
+    s = (CpuState*)call->runtime;
+    if (get) {
+        get->cr = s->cr; get->xer = s->xer; get->lr = s->lr; get->ctr = s->ctr; get->fpscr = s->fpscr;
+    }
+    if (set) {
+        s->cr = set->cr; s->xer = set->xer; s->lr = set->lr; s->ctr = set->ctr; s->fpscr = set->fpscr;
+    }
+    return 1;
+}
+
 static void host_no_original(SoaHostCall* call)
 {
     (void)call; /* an event answers no function of the game's */
@@ -712,7 +742,8 @@ static int host_swap(CpuState* s, uint32_t address, SwapFn fnp, void* user, int 
     SoaHostAnswer fn = (SoaHostAnswer)fnp;
     SoaHostCall c;
     unsigned r;
-    int how;
+    int how, exact = t_exact;
+    uint32_t lr = s->lr;
     t_guest = 1;
     c.address = address;
     c.after = after ? 1u : 0u;
@@ -729,7 +760,10 @@ static int host_swap(CpuState* s, uint32_t address, SwapFn fnp, void* user, int 
     (void)sizeof(char[sizeof(Fpr) == sizeof(SoaHostPair) && offsetof(Fpr, ps1) == offsetof(SoaHostPair, ps1) ? 1 : -1]);
     c.original = host_original;
     c.game_original = host_call_game_original;
+    t_exact = 0;
     how = fn(user, &c);
+    if (t_exact) s->lr = lr; /* as the function's epilogue leaves it */
+    t_exact = exact;
     if (after) return SWAP_GAMES;
     if (how == SOA_HOST_ANSWERED) {
         s->gpr[3] = c.gpr[0];
@@ -760,6 +794,7 @@ static void host_event(CpuState* s, void* user, void (*extra)(void), uint64_t du
     SoaHostEvent fn = (SoaHostEvent)extra;
     SoaHostCall c;
     unsigned r;
+    int exact;
     t_guest = 1;
     memset(&c, 0, sizeof c);
     c.mem = s->mem;
@@ -774,7 +809,9 @@ static void host_event(CpuState* s, void* user, void (*extra)(void), uint64_t du
     c.f = (SoaHostPair*)s->fpr;
     c.original = host_no_original;
     c.game_original = host_call_game_original;
+    exact = t_exact; /* the event's registers are put back whole (irq.c) */
     fn(user, &c, due, now);
+    t_exact = exact;
 }
 
 int soa_host_schedule(uint64_t at, uint64_t period, SoaHostEvent fn, void* user)

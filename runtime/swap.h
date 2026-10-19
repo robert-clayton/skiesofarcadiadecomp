@@ -83,6 +83,15 @@ int swap_original(CpuState* s, uint32_t address);
 int swap_call_original(CpuState* s, uint32_t address, const uint32_t* ints, uint32_t n_ints, const double* floats,
                        uint32_t n_floats, uint32_t* r3, double* f1, char* why, size_t cap);
 
+/* Calls a function of the game's from native code as the translation's own
+ * call does, and puts nothing back (soa_host_game_exact, docs/SWAP.md): the
+ * arguments are what the caller left in the live registers, LR is `lr` at the
+ * call unless that is 0, and the state after is the callee's -- r3, r4 and f1,
+ * the volatile registers, CR, CTR, XER, the GQRs and FPSCR, and both halves of
+ * every FPR as its epilogue left them. `original`: its translation even if it
+ * is replaced, as swap_call_original. 0 when address starts no function. */
+int swap_call_exact(CpuState* s, uint32_t address, uint32_t lr, int original);
+
 /* After a host build has loaded the game library (host.c): the requests
  * kept until then are applied. */
 void swap_attach(void);

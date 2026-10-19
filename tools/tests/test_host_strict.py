@@ -72,6 +72,7 @@ void si_set_motor_window(int open) { (void)open; }
 void skip_request(unsigned f, unsigned s) { (void)f, (void)s; }
 int soa_load_game(const char* path, char* why, size_t cap) { (void)path, (void)why, (void)cap; return 0; }
 void swap_attach(void) {}
+int swap_call_exact(void) { return 0; }
 int swap_call_original(void) { return 0; }
 void swap_count(int on) { (void)on; }
 unsigned swap_counts(void* out, unsigned max) { (void)out, (void)max; return 0; }

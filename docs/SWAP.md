@@ -117,7 +117,7 @@ cooperatively).
   if the guest's memory repeats as well as the registers (docs/CLOCK.md, "A
   native answer is not a wait").
 
-## What the host gets (`soa_host.h`, ABI 23; 24 adds the clock and events)
+## What the host gets (`soa_host.h`, ABI 23; 24 adds the clock and events, and exact calls)
 
 `SoaHostCall` keeps its ABI 22 layout. These fields are appended at the end:
 
@@ -132,6 +132,130 @@ cooperatively).
 The rest is unchanged: `mem`, `sp`, copies of r3–r10 and f1–f8, `frame`,
 `game`. `soa_host_replace` returns 1 for any translated function's entry and
 0 for anything else.
+
+### Exact calls (within ABI 24)
+
+`game` and `game_original` call a function the way `mod_call_guest` does:
+every register saved, the call made, every register put back, r3 handed
+over. That is right for a callee whose answer is r3 and memory, and wrong
+for code that goes on using what its callee left in registers. A native
+answer could not get, after a call into the game:
+
+- **f1**, from a function that returns a float (ship battle `0x801559BC`'s
+  script command, the NPC look-at helpers, Ninja's use of MSL's sine);
+- **the volatile registers**: sprintf stores r3-r10 into its frame, so a
+  stack-exact caller needs what the previous callee left in r6-r10 (map
+  load `0x801015AC`, battle `0x80030280`); likewise f0-f13, CR, CTR, XER;
+- **the second halves of f14-f31**: CodeWarrior's prologue saves a
+  register it uses for pairs with `stfd` and `psq_st` and its epilogue puts
+  it back with `psq_l` and `lfd`, so the first half comes back exact and the
+  second rounded to a single. A later `psq_st` stores that half (effects
+  `0x800B88F8`, `0x80226984`; Ninja `0x80291CF8`, after PSMTXConcat).
+
+Two functions, resolved by name like strict mode and save states (a runtime
+before them has neither, and nothing else in the header changed):
+
+- `int soa_host_game_exact(call, address, lr, flags)`: calls `address` as
+  the translation's own `bl` does, on the live registers, and puts nothing
+  back. The arguments are what the host has written into `call->r[3..10]`
+  and `call->f[1..8]` (both halves), r1 is the stack the callee's frame goes
+  under, and LR is `lr` at the call (the call site's return address, which a
+  callee that keeps LR stores at r1 + 4), or left as it is when `lr` is 0.
+  Afterwards `call->r` and `call->f` hold exactly what the translation has
+  after its `bl`. `SOA_HOST_EXACT_ORIGINAL` calls the translation even where
+  a replacement is set, as `game_original`. It returns 0 when refused: off
+  the game's thread, not a function of this program, an unknown flag, or r2
+  and r13 not the game's small-data bases.
+- `int soa_host_special(call, get, set)`: reads CR, XER, LR, CTR and FPSCR
+  into a `SoaHostSpecial`, then writes them from `set` if given. With it a
+  host reads the CR, CTR and XER an exact call left, and sets CR bit 6 the
+  way a call site does before calling a function with a variable argument
+  list (`crclr 6`: no float arguments in registers; sprintf's prologue
+  tests it to decide whether to store f1-f8).
+
+After an exact call the callee's state is the game's: an answer reads its
+results and puts back what its own code would have, as the translation's
+epilogue does (soa-ue5's `GuestFrame` does this for r14-r31 and f14-f31).
+The runtime does one thing for it: when an answer made an exact call, LR is
+put back as the answer found it once the answer returns, as every
+function's epilogue leaves it. `SOA_HOST_ANSWERED` still writes r3 and f1
+from `gpr[0]` and `fpr[0]`; `SOA_HOST_ANSWERED_LIVE` keeps everything the
+callee left. An exact call from an event is safe too: irq.c puts all of an
+event's registers back.
+
+A port of a function that calls, say, a float function and then PSMTXConcat
+goes from
+
+```c
+c->game(c, 0x80262A10, args, 1, &r3);  /* f1: lost */
+```
+
+to
+
+```c
+c->f[1].ps0 = c->f[1].ps1 = x;          /* the arguments, as the call site leaves them */
+c->r[1] = sp;                           /* the port's own frame, if it makes one */
+soa_host_game_exact(c, 0x80262A10, site + 4, 0);
+double y = c->f[1].ps0;                 /* and r3, r4, f0-f13, CR... as the callee left them */
+```
+
+and, for PSMTXConcat's leftovers, it no longer needs to set f14, f15 and
+f31's second halves by hand: they are what the call left. The runtime's own
+calls are unchanged: `game`, `game_original`, `original`, mods'
+`call_guest` and the self test's `mod_call_guest` still put every register
+back.
+
+The clock. An exact call reaches its callee through `dispatch`, as `game`
+does: its calls meet the swap guards, `SWAP_DUE` is taken at the first entry
+as for any call, and answers it reaches are counted in `g_swap_answers`. The
+quiet rule's wait detection (docs/CLOCK.md) is untouched by it. Since an
+exact call leaves the registers as the translation would, a loop around an
+answer that uses one shows the quiet rule's back edges the registers the
+translation would show them, where with `game` it showed the registers from
+before the call.
+
+Tests: `tools/tests/test_swap.py`
+(`test_an_exact_call_leaves_what_the_callee_left_and_the_game_call_does_not`:
+a translated callee that returns f1, changes r5, r6, r12, CTR, CR0 and XER's
+carry and saves f31 with `stfd`/`psq_st`, held to `mod_call_guest`, which
+puts everything back, and to the exact call, which does not; a replaced
+callee, `SOA_HOST_EXACT_ORIGINAL`, a refusal, and the due bit taken), and
+`tools/exact_host.c`, which holds every exact call to the translation on the
+game's own calls of a float function.
+
+**Measured** (2026-10-19, a host runtime built from this tree, headless,
+muted, `SOA_CLOCK=fixed`, card copies).
+
+- *Nothing else moved.* soa-ue5's combined registry host (its committed
+  `Tools/disc/battle_swap_progress_host.cpp` and every owner at soa-ue5
+  8e6b16f: 2,284 bindings, Battle 711, Effect 141, Map 101 among them),
+  built once and linked against this runtime and against b611017's, over the
+  progress counter's opening (blank card, 6,000 frames) and towns
+  (final-boss card, 5,000 frames) routes with `SOA_RENDER=1 SOA_HASH=1`:
+  every frame hash the same (6,000 and 5,000), every call count the same
+  (1,649 and 1,879 functions), and the clock's lines the same (2,655 and
+  2,940 waits found by a loop's repeated state).
+- *f1 and the rest come back exact.* `tools/exact_host.c` with MSL's cosf
+  (`0x80262A34`), cos (`0x802622D8`) and the kernel under them
+  (`0x80260D70`) replaced, over the same two routes: 4,970,311, 15,022,549
+  and 34,449,478 calls in the opening (counted to the last whole second),
+  4,075,876, 12,302,942 and 23,137,248 in towns, and not one exact call
+  left any register other than the translation's: f1, r0-r31, f0-f31 both
+  halves, CR, XER, LR, CTR and FPSCR. Through `game` f1 was the
+  translation's on none of them (it is put back). The calls are many more
+  than in the game's own run (82,725 cosf in the opening; the same guest
+  time, twice the timebase and hardware reads): with replacements on these
+  functions the run went another way, which exact_host does not try to
+  prevent (the quiet rule treats a repeated pass with an answer in it as
+  possible work, docs/CLOCK.md; not looked into further). What it checks is
+  each call. The look-at helper `0x80091040`,
+  which turns its subject a step a call, in towns with `EXACT_MEMORY=1`
+  (RAM put back before each run, and the exact call's memory held to the
+  translation's): 1,695 calls (of the run's 1,701), no register and no
+  byte of memory different; through `game`, f1 was not the translation's
+  on 1,533 of them. (Without the memory put back, the exact call, run
+  second, turned its subject from where the first run left it, and 927
+  differed.)
 
 **The progress counter.** `soa_host_functions(&native)`,
 `soa_host_count_calls(on)` (on also zeroes the counts) and
@@ -226,6 +350,15 @@ The checks:
   guest. The byte guard is portable C.
 
 ## What changed (and what to rebuild)
+
+- **Within host ABI 24** (2026-10-19): exact calls,
+  `soa_host_game_exact` and `soa_host_special` with `SoaHostSpecial` and
+  `SOA_HOST_EXACT_ORIGINAL`, added after the rest of the header (above,
+  "Exact calls"). Nothing before them changed, so the ABI number did not: a
+  plugin built against 24 runs on this runtime unchanged and looks the two
+  functions up by name to use them; on an older runtime the lookup fails and
+  the port keeps handing back. `host_swap` puts LR back after an answer only
+  when that answer made an exact call. A runtime-only change: `--link`.
 
 - **2026-10-18, no ABI change**: `soa_swap_enter` counts every call a
   replacement answers (`g_swap_answers`, swap.h), and the quiet clock checks

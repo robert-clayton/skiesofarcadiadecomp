@@ -306,6 +306,15 @@ int swap_call_original(CpuState* s, uint32_t address, const uint32_t* ints, uint
     return ok;
 }
 
+int swap_call_exact(CpuState* s, uint32_t address, uint32_t lr, int original)
+{
+    if (!dispatch_known(address)) return 0;
+    if (lr) s->lr = lr;
+    if (original) return swap_original(s, address);
+    dispatch(s, address);
+    return 1;
+}
+
 int soa_swap_enter(CpuState* s, uint32_t i)
 {
     const SoaGame* g = g_game;

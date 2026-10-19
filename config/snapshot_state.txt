@@ -587,6 +587,7 @@ host  g_white  scratch
 host  g_write_lock  scratch
 host  g_writes  saved  # writes queued for a frame end not yet come
 host  name  config
+host  t_exact  scratch  # set only while an answer runs; 0 at a frame start
 host  t_guest  scratch
 
 irq  g_ai_cr  saved

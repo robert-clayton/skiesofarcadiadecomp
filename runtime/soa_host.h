@@ -624,7 +624,9 @@ typedef struct SoaHostCall {
     /* ABI 20. A function of the game's, called by the host from inside its
      * answer, on the game's thread: its arguments in r3 on (eight at most),
      * what it returns in *r3. Every register is put back after, so the
-     * game sees nothing of the call but what the function did to memory.
+     * game sees nothing of the call but what the function did to memory
+     * (soa_host_game_exact, at the end of this header, leaves them as the
+     * function left them: f1, the volatile registers, the pairs' halves).
      * 0 when it is refused (not the start of a function of this program).
      * For what only the game's own code can do: a block of its heap. */
     int (*game)(struct SoaHostCall* call, uint32_t address, const uint32_t* args, unsigned n, uint32_t* r3);
@@ -890,6 +892,59 @@ SOA_HOST_API int soa_host_resume_event(int id, SoaHostEvent fn, void* user);
 SOA_HOST_API void soa_host_set_snapshot_hook(void (*fn)(void* user), void* user);
 SOA_HOST_API int soa_host_snapshot_put(const char* name, const void* data, size_t bytes);
 SOA_HOST_API long soa_host_snapshot_get(const char* name, void* out, size_t max);
+
+/* ---- Exact calls into the game (within ABI 24; docs/SWAP.md) ----
+ *
+ * Functions only, to resolve by name: a runtime before them has none, and
+ * nothing above changes. `game` puts every register back after the call, so
+ * an answer sees only r3 (and the function's work in memory). An answer that
+ * stands for code which goes on using what its callee left in the registers
+ * -- f1 from a function that returns a float, r5-r12 for a following sprintf
+ * that stores them, f0-f13, CR, CTR, XER, the second halves of f14-f31 that a
+ * paired-single callee's psq_st/psq_l saves leave as singles -- calls it
+ * exactly instead:
+ *
+ * soa_host_game_exact(call, address, lr, flags) calls the function at address
+ * as the translation's own `bl` does, on the game's live registers (call->r,
+ * call->f) and with nothing put back. The arguments are whatever the host has
+ * put in r3 to r10 and f1 to f8 (both halves: f[k].ps0 and f[k].ps1), and r1
+ * is the stack the callee's frame goes under. LR is `lr` at the call -- the
+ * return address the game's call site leaves there, which a callee that keeps
+ * LR saves at r1 + 4 -- or as it is when lr is 0. After it every register is
+ * as the callee left it, as the translation has it after its `bl`: r3, r4 and
+ * f1 its results, r0, r5-r12, f0, f2-f13, CR, CTR, XER, FPSCR and the GQRs
+ * whatever it left there, r1, r2, r13-r31 and the first halves of f14-f31 as
+ * its epilogue put them back, and the second halves of f14-f31 as its
+ * epilogue left them (a psq_l of a psq_st's single: the half rounded to a
+ * single; one it never saved, as it left it). SOA_HOST_EXACT_ORIGINAL calls
+ * the function's translation even where a replacement is set for it, as
+ * `game_original`. Returns 1, or 0 when refused: not on the game's thread in
+ * an answer or event, an address that starts no function of this program, an
+ * unknown flag, or r2 and r13 not the game's small-data bases (80350000,
+ * 8034E720). The callee may sleep the thread, as with `game`.
+ *
+ * What it leaves is the game's state from then on: the answer reads the
+ * results from call->r and call->f and puts back what its own code would
+ * have, as the translation's epilogue does. The runtime does one thing for
+ * it: when an answer has made an exact call, LR is put back as the answer
+ * found it once the answer returns, as every function's epilogue leaves it.
+ * An answer that returns SOA_HOST_ANSWERED still has r3 and f1 set from gpr[0]
+ * and fpr[0]; SOA_HOST_ANSWERED_LIVE keeps what the callee left.
+ *
+ * soa_host_special(call, get, set) reads the game's CR, XER, LR, CTR and FPSCR
+ * into *get (if not null) and then, if set is not null, writes all five from
+ * *set (read them first and change what is wanted) -- for a callee that reads CR (a call with a variable argument list: the
+ * caller's crclr 6 says no float arguments were passed in registers) and for
+ * reading what an exact call left. 1, or 0 off the game's thread.
+ *
+ * Calls an exact call makes meet the replacements and the fixed clock's quiet
+ * rule just as `game`'s do: it changes neither. */
+#define SOA_HOST_EXACT_ORIGINAL 1u
+typedef struct {
+    uint32_t cr, xer, lr, ctr, fpscr;
+} SoaHostSpecial;
+SOA_HOST_API int soa_host_game_exact(SoaHostCall* call, uint32_t address, uint32_t lr, unsigned flags);
+SOA_HOST_API int soa_host_special(SoaHostCall* call, SoaHostSpecial* get, const SoaHostSpecial* set);
 
 #ifdef __cplusplus
 }
