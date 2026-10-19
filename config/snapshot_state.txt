@@ -621,6 +621,22 @@ irq  g_irq_jmp  scratch  # a delivery's, dead between them
 irq  g_line_runs  saved
 irq  g_line_unhandled  saved
 irq  g_lines  saved
+irq  g_mw_bad  report  # the memory hash's check (SOA_CLOCK_MEMORY=check)
+irq  g_mw_check  config  # SOA_CLOCK_MEMORY, read at the start of every run
+irq  g_mw_hashes  report
+irq  g_mw_how  scratch  # the memory hash's units and the kernel's write watch of them: made again from MEM1 at the first hash of every run, resumed or not (the hash is of the bytes alone)
+irq  g_mw_listed  scratch  # the check's lists, filled and used within one hash
+irq  g_mw_mem  scratch
+irq  g_mw_missed  report
+irq  g_mw_pagemap  scratch
+irq  g_mw_shown  report
+irq  g_mw_stale  scratch
+irq  g_mw_sum  scratch
+irq  g_mw_term  scratch
+irq  g_mw_uffd  scratch
+irq  g_mw_units  report
+irq  g_mw_wholes  report
+irq  g_mw_why  report
 irq  g_nevents  saved
 irq  g_nrebind  config  # soa_host_resume_event's, before the start
 irq  g_pace  config

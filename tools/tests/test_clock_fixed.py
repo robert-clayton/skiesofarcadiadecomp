@@ -46,6 +46,8 @@ DRIVER = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include "cpu.h"
 #include "clock.h"
 #include "irq.h"
@@ -72,6 +74,7 @@ int gx_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v) { (void)s, (vo
 unsigned gx_pe_irq_pending(void) { return 0; }
 void gx_report(void) {}
 uint64_t gx_pipe_bytes(void) { return 0; }
+void gxr_memory_hazard(void) {} /* no rasterizer: no copy landing */
 int aram_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out) { (void)s, (void)ea, (void)size, (void)out; return 0; }
 int aram_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v) { (void)s, (void)ea, (void)size, (void)v; return 0; }
 int aram_irq_pending(void) { return 0; }
@@ -137,7 +140,14 @@ int main(void)
     char cmd[16];
     unsigned long long a, b, ids[64];
     unsigned n = 0;
+    int fd[2];
     s.mem = (uint8_t*)calloc(1, MEM_IMAGE_SIZE);
+    if (getenv("ALIGNED")) { /* page-aligned, as main.c's image is: the kernel can watch it */
+        void* m = mmap(NULL, MEM_IMAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (m == MAP_FAILED) return 3;
+        free(s.mem), s.mem = (uint8_t*)m;
+    }
+    if (pipe(fd)) return 3;
     if (getenv("FREE")) { /* the quiet rule with free reads (the default), and a short spin limit */
         clock_fixed_configure(0, 0, 0);
         clock_fixed_set_spin(strtoull(getenv("FREE"), NULL, 10));
@@ -208,13 +218,21 @@ int main(void)
              * `while (...) dispatch(&pc, 1)`. The answer puts back every
              * register, so each pass comes to the back edge with the same
              * state; b & 1: the answer did work (the cursor in memory moves),
-             * or only read (a status poll); b & 2: interrupts on */
+             * or only read (a status poll); b & 2: interrupts on; b & 4: the
+             * cursor is moved by the kernel (a read() into guest memory, as a
+             * disc read's is); b & 8: the answer writes the cursor with the
+             * value it has (memory as it was: still a wait) */
             unsigned long long i;
             if (b & 2) s.msr |= 0x8000u;
             s.gpr[3] = 0x80200000u, s.gpr[4] = 1u, s.gpr[31] = 0x31u;
             for (i = 0; i < a; i++) {
                 answers++;
-                if (b & 1) wr32(&s, 0x80200000u, rd32(&s, 0x80200000u) + 4u);
+                if ((b & 5) == 5) {
+                    uint32_t v = rd32(&s, 0x80200000u) + 4u;
+                    uint8_t w[4] = {(uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v};
+                    if (write(fd[1], w, 4) != 4 || read(fd[0], s.mem + (0x80200000u & MEM_MASK), 4) != 4) return 3;
+                } else if (b & 1) wr32(&s, 0x80200000u, rd32(&s, 0x80200000u) + 4u);
+                if (b & 8) wr32(&s, 0x80200000u, rd32(&s, 0x80200000u));
                 s.pc = 0x80006000u;
                 irq_poll(&s);
             }
@@ -481,3 +499,33 @@ def test_free_a_loop_around_a_native_answer_that_did_work_is_not_a_wait(driver, 
     # and a run that answers nothing is judged as before
     out, err = drive(driver, "offwait 4\nwait 4\nregs\n", {"FREE": "4194304"})
     assert out.splitlines()[-1].endswith(f" now {2 * VI}"), out
+
+
+@gnu
+@pytest.mark.parametrize("on", [0, 2])
+def test_free_the_memory_hash_reads_only_what_was_written(driver, on):
+    # the rule above hashes MEM1 on every repeated pass with an answer in it;
+    # 24 MB a time, it was most of a run with hundreds of answers set (the
+    # towns route: 585,339 hashes). Under Linux the kernel lists the pages
+    # written since the last hash and only those are read again; the verdicts
+    # are the whole hash's, whoever wrote: the answer, the kernel (a read()
+    # into guest memory), or nobody new (the same value written again).
+    watched = {"FREE": "4194304", "ALIGNED": "1"}
+    for env in (watched, dict(watched, SOA_CLOCK_MEMORY="whole"), dict(watched, SOA_CLOCK_MEMORY="check"), {"FREE": "4194304"}):
+        for b, cursor, now in ((1, 200, 0), (5, 200, 0), (0, 0, VI), (8, 0, VI), (9, 200, 0)):
+            n = 50 if b & 1 else 4
+            out, err = drive(driver, f"answered {n} {on | b}\nregs\n", env)
+            assert f"cursor {cursor}" in out, (env, b, out)
+            assert out.splitlines()[-1].endswith(f" now {now}"), (env, b, out)
+            if env.get("SOA_CLOCK_MEMORY") == "check":
+                assert "checked against the whole hash: 0 different, 0 units changed that the kernel had not listed" in err, err
+            if env.get("SOA_CLOCK_MEMORY") == "whole":
+                assert "every unit every time (SOA_CLOCK_MEMORY=whole)" in err, err
+            if "ALIGNED" not in env:
+                assert "every unit every time (the image is not in whole pages)" in err, err
+    # where the kernel can (Linux 6.7 on, userfaultfd allowed), it does
+    out, err = drive(driver, f"answered 50 {on | 1}\nregs\n", watched)
+    if sys.platform.startswith("linux") and "no userfaultfd" not in err and "no asynchronous" not in err:
+        assert "(the kernel's write watch): " in err, err
+        units = int(err.split("(the kernel's write watch): ")[1].split()[0])
+        assert units < 200, err  # a unit or two a pass, not 6,144

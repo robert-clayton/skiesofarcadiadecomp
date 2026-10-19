@@ -524,7 +524,9 @@ r0 and r4 as the translation does; every other swap could meet the same.
 (`g_swap_answers`: `SWAP_ANSWERED`, and `SWAP_BOTH`'s, whose handler runs
 after the translation), and quiet.c hands irq.c the count. A back edge
 whose registers repeat, in a pass with an answer in it, also hashes the
-guest's memory (MEM1, 24 MB, at the back edge), and the pass is a repeat
+guest's memory (MEM1, 24 MB, at the back edge; since the evening, only
+the parts written since the last hash are read again: "Hashing only what
+was written" below), and the pass is a repeat
 that can make a wait only if memory is as the last pass left it too. So:
 
 - a loop whose answer wrote anything (the dispatcher's cursor) is not a
@@ -583,6 +585,118 @@ register as it found it), the flight scene of its `script_swap_run.py
 
 The same as the plugin's own fix gave (13,100 of 13,100), with no help from
 the plugin. The 279 hashes cost nothing measurable there.
+
+### Hashing only what was written (2026-10-18, evening)
+
+**The problem.** The rule above hashes all of MEM1 -- 24 MB, 1.02 ms here --
+on every repeated pass with an answer in it, and with every engine-free
+owner installed (soa-ue5's progress counter: 746 to 860 bindings, battle and
+people answers by the million) that is most of a run. The counter's towns
+segment (final-boss card, seven warps, 25,900 frames, `SOA_THREADS=1`,
+`SOA_RENDER=0`, call counting on): 585,339 hashes, 778 s, against 156 s on
+08b4f4b's runtime with the same host and the same game library -- 597 s of
+the 622 s more is the hash (585,339 x 1.02 ms). Not the swap guard's
+count, not the trampolines, not save states: those are in both runs, and
+call counting costs 10 s of the 166 below.
+
+**The fix.** The hash is now of 4 KB units, each unit's 64 bits mixed with
+its index and the terms summed (`irq.c`, `quiet_memory_hash`), so only the
+units written since the last hash have to be read again. Under Linux the
+kernel keeps that list: MEM1 is registered with a userfaultfd
+(`UFFD_USER_MODE_ONLY`, so no privilege) for *asynchronous* write
+protection (`UFFD_FEATURE_WP_ASYNC`, Linux 6.7 on), where a write to a
+protected page just clears its protection in the kernel, with no signal and
+no handler; `PAGEMAP_SCAN` with `PM_SCAN_WP_MATCHING` returns the pages
+written since and protects them again in one call. Every write is in the
+list whoever makes it -- translated code, a native answer through
+`SoaHostCall::mem`, a device model's copy, a `read()` into guest memory (the
+kernel's own write), another thread -- so nothing has to report its stores,
+and a unit written with the values it had hashes as before. The verdict is
+the whole hash's: memory as the last pass left it, byte for byte, to 64
+bits. Real waits are found on the same passes, and an answer that did work
+is no wait, exactly as before.
+
+Where the kernel cannot keep the list -- another OS, a kernel before 6.7, a
+sandbox without userfaultfd, an image not in whole pages -- every unit is
+hashed every time: the same value, the old cost. `SOA_CLOCK_MEMORY=whole`
+asks for that; `SOA_CLOCK_MEMORY=check` does both at every hash and counts
+any difference (the whole hash's value is then used). The report adds
+
+```
+[clock] memory: H hashes of MEM1, the 4 KB units written since the last hashed again (the kernel's write watch): U units, W whole hashes
+```
+
+or `every unit every time (why)`, and with the check `; checked against the
+whole hash: N different`. The value is not the old hash's (a sum of unit
+terms, not one chain), so a snapshot taken by a runtime before this holds
+loop states whose memory hash this one would not give again -- the one kind
+of change docs/SNAPSHOT.md says no check sees: take such snapshots again.
+Tests: `test_clock_fixed.py`'s
+`..._the_memory_hash_reads_only_what_was_written` (with interrupts on and
+off; page-aligned memory, as main.c's: an answer that moves a cursor,
+by a store or by the kernel's `read()`, is no wait; one that reads, or
+writes the value back, is; the same under `whole` and `check`, which finds
+no difference; and under Linux the watch is used and reads a unit or two a
+pass, not 6,144).
+
+**Measured** (the counter's towns segment as above: soa-ue5's
+progress host, every engine-free owner through the registry, 158 functions
+answered; this machine, load 3 to 10):
+
+| runtime | wall s | hashes | units of 4 KB hashed again | call counts, clock line, peeks |
+|---|---:|---:|---:|---|
+| 08b4f4b (no memory check) | 155.7 | 0 | -- | the same as below in every function |
+| 4edff76 (whole MEM1 each time) | 777.9 | 585,339 | 3.6 billion | |
+| this tree | 166.3 (160 as finally built) | 585,339 | 10,461,987 (18 a hash), and 1 whole | the same as 4edff76's, byte for byte |
+| this tree, call counting off | 155.8 | 585,339 | 10,461,988 | |
+
+(The units differ by one between runs: another thread wrote a page in one
+of them at a different moment; the hash of what is there does not.) The
+kernel's part is 5.2 s of the 166.
+
+**A writer on another thread.** With rendering on, a copy to texture
+(GXCopyTex) is written into MEM1 by a rasterizer worker while the guest runs
+on, so a hash could fall while one was landing and see memory change between
+two passes of a loop that only polls: the warps (below) have a disc poll
+around the native DVDGetDriveStatus at `0x801D168C`. With the whole hash
+taking a millisecond the copy had nearly always landed by the next pass (2
+passes turned down at 4edff76, run after run); with the cheap one the guest
+went round up to 100 times while it landed, and the number moved from run to
+run (100, 5, 3; the check mode's differences were all units the kernel
+listed after its scan, in a 64 KB copy at `0x80361000`: written by the
+worker after the scan, none missed). Frames, ticks and PCM never moved --
+a turned-down pass is found a pass later at the same guest time -- but the
+poll loop's call counts did. So every copy queued into MEM1 now lands before
+the hash (`gxr_memory_hazard`: the producer waits for the newest pending copy,
+the report's `clock` wait; none when nothing is queued, so a run without
+rendering never waits), and what is hashed is what the guest's commands have
+made. The warps then have 0 passes turned down, and their two at 4edff76 were
+this race too: the poll loop is now found waiting on the pass its registers
+first say so, 2 calls fewer in each of its three functions than at 4edff76
+(so 137 functions' counts differ off against on outside the answers, where
+4edff76 had 139: those two now agree with the translation's).
+
+**Proved** (this tree; the combined host of "Reads cost nothing", 122
+replacements, `SOA_THREADS=1`, `SOA_RENDER=1 SOA_HASH=1`, muted, card copies):
+
+| run | frames, on against off | PCM, guest ticks, every frame's tick | on, against 4edff76's rule (5fc3c17) | hashes; units read again | wall s on (5fc3c17) |
+|---|---|---|---|---|---:|
+| opening | 0 of 6,000 differ | identical (13,002,560 samples) | 0 frames; counts identical | 22,433; 1,478,023 | 320 (372) |
+| warps | 0 of 9,000 | identical (19,510,080) | 0 frames; counts but the poll loop's 3 x 2 | 21,013, 0 turned down; 1,546,770 | 620 (731) |
+| battle | 0 of 6,000 | identical (13,053,760) | 0 frames; counts identical | 17,530; 933,268 | 330 (372) |
+
+The warps again with `SOA_CLOCK_MEMORY=check`: 0 differences, every count
+the same as the plain run. soa-ue5's flight scene with the script swap
+without its r0/r4 workaround (`script_swap_run.py --flight`, 13,100 frames):
+13,100 of 13,100 frames and the fixed-clock totals agree on against off and
+against 5fc3c17's off run; 11,036 waits, 279 hashes, 228 turned down, as at
+5fc3c17; 471 s against 715. A snapshot (the progress host with every owner
+but Audio, DiscRead and Card -- they schedule events with heap data -- on
+the towns route, taken at 4,000 and resumed in a fresh process to 5,000):
+1,000 of 1,000 frames, the clock line, the waits, the answer and turned-down
+counts and the card are the uninterrupted run's; the call counts are too but
+for one VI function (`0x8023F91C`, 9,994 against 9,998), which 4edff76's
+runtime gives the same way (its A and this tree's A are identical).
 
 ## Save states and the clock (2026-10-18)
 

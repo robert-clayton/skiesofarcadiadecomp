@@ -1540,11 +1540,12 @@ enum {
     W_HOOK,        /* wait: SOA_PEEK, SOA_POKE or a mod touching one */
     W_TOKEN,       /* wait: a draw token, which says the copies before it are done */
     W_LANDED,      /* wait: any of the above, for a copy run but not yet in guest RAM (lands_late, V7) */
+    W_CLOCK,       /* wait: the fixed clock's memory check, before it hashes MEM1 (irq.c) */
     W_COUNT
 };
 static const char* const g_wait_name[W_COUNT] = {
     "external", "arena", "graveyard", "copy list", "gate", "copy-first", "copy-before", "copy-after",
-    "drawdone", "hash/png", "ring", "hazard", "tlut", "source", "hook", "token", "landed"};
+    "drawdone", "hash/png", "ring", "hazard", "tlut", "source", "hook", "token", "landed", "clock"};
 static uint64_t g_wait_n[W_COUNT], g_wait_ticks[W_COUNT]; /* producer only; read by the report */
 
 static DrawCmd* g_queue;
@@ -2966,6 +2967,14 @@ void gxr_texture_hazard(uint32_t addr, uint32_t bytes)
 void gxr_source_hazard(uint32_t addr, uint32_t bytes)
 {
     gxr_ram_hazard(addr, bytes, W_SRC);
+}
+
+/* The fixed clock's memory check (irq.c, docs/CLOCK.md) hashes MEM1: every
+ * copy queued so far lands first, so what it hashes is what the guest's
+ * commands have made, not how far a worker has got. */
+void gxr_memory_hazard(void)
+{
+    gxr_ram_hazard(0, MEM1_SIZE, W_CLOCK);
 }
 
 void gxr_hook_hazard(uint32_t addr, uint32_t bytes)

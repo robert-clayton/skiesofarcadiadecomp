@@ -60,6 +60,7 @@ void gxr_flush(void);
 void gxr_texture_hazard(uint32_t addr, uint32_t bytes);
 void gxr_source_hazard(uint32_t addr, uint32_t bytes);
 void gxr_hook_hazard(uint32_t addr, uint32_t bytes);
+void gxr_memory_hazard(void); /* every queued copy into MEM1 landed: before irq.c's memory hash */
 /* Frame pairs (PLAN-60FPS-MODS H10): RECORD keeps each draw's key and
  * positions as frame F's and makes them the frame before at the screen copy;
  * LERP moves each draw matched in the frame before to (1-t)*F + t*F+1 and

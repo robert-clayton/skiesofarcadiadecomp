@@ -806,18 +806,43 @@ static uint64_t quiet_state_hash(const CpuState* s)
  * swap.c counts the answers; quiet.c hands irq.c the count. */
 static const volatile uint64_t* g_answers;
 static unsigned long long g_quiet_answer_passes, g_quiet_answer_work;
+static void mw_reset(void);
 
 void irq_quiet_answers(const volatile uint64_t* count)
 {
     g_answers = count;
+    mw_reset();
 }
 
-static uint64_t quiet_memory_hash(const CpuState* s)
+/* The hash is of 4 KB units, each mixed with its index and the terms summed,
+ * so a unit written since the last hash is all that has to be read again:
+ * under Linux the kernel keeps the list (userfaultfd's asynchronous write
+ * protection, read and re-armed with PAGEMAP_SCAN), every write counted
+ * whoever makes it -- translated code, a native answer, a device model's
+ * copy, a read() into guest memory, another thread. A unit written with the
+ * values it had hashes as before, so the rule is the same rule: memory as
+ * the last pass left it, byte for byte, to the hash's 64 bits. Where the
+ * kernel cannot keep the list (another OS, a kernel before 6.7, memory not
+ * page-aligned) or SOA_CLOCK_MEMORY=whole, every unit is hashed every time,
+ * the same value the slow way; SOA_CLOCK_MEMORY=check does both and counts
+ * any disagreement (the faster's value is then not used). */
+#define MW_UNIT 4096u
+#define MW_UNITS (MEM1_SIZE / MW_UNIT)
+static uint64_t g_mw_term[MW_UNITS]; /* each unit's term in g_mw_sum, as last hashed */
+static uint64_t g_mw_sum;            /* the sum of the terms: MEM1's hash */
+static const uint8_t* g_mw_mem;      /* the image the terms are of (watched) */
+static int g_mw_how;                 /* 0 not yet set up this run, 1 watched by the kernel, 2 whole every time */
+static int g_mw_check;               /* SOA_CLOCK_MEMORY=check */
+static const char* g_mw_why;         /* why not watched */
+static unsigned long long g_mw_hashes, g_mw_units, g_mw_wholes, g_mw_bad, g_mw_missed;
+static uint8_t g_mw_stale[MW_UNITS], g_mw_listed[MW_UNITS]; /* the check's, when it finds a difference */
+static unsigned g_mw_shown;
+
+static uint64_t mw_term(const uint8_t* p, uint32_t unit)
 {
-    const uint8_t* p = s->mem;
-    uint64_t a = 0x243F6A8885A308D3ull, b = 0x13198A2E03707344ull, c = 0xA4093822299F31D0ull, d = 0x082EFA98EC4E6C89ull;
+    uint64_t a = 0x243F6A8885A308D3ull ^ unit, b = 0x13198A2E03707344ull, c = 0xA4093822299F31D0ull, d = 0x082EFA98EC4E6C89ull;
     size_t i;
-    for (i = 0; i + 32u <= MEM1_SIZE; i += 32u) {
+    for (i = 0; i < MW_UNIT; i += 32u) {
         uint64_t w[4];
         memcpy(w, p + i, sizeof w);
         a = (a ^ w[0]) * 0x9E3779B97F4A7C15ull;
@@ -826,7 +851,186 @@ static uint64_t quiet_memory_hash(const CpuState* s)
         d = (d ^ w[3]) * 0xD6E8FEB86659FD93ull;
         a ^= a >> 29, b ^= b >> 31, c ^= c >> 27, d ^= d >> 33;
     }
-    return a ^ (b * 3u) ^ (c * 5u) ^ (d * 7u);
+    a ^= (b * 3u) ^ (c * 5u) ^ (d * 7u) ^ ((uint64_t)unit << 40);
+    a ^= a >> 33, a *= 0xFF51AFD7ED558CCDull, a ^= a >> 33, a *= 0xC4CEB9FE1A85EC53ull, a ^= a >> 33;
+    return a;
+}
+
+static uint64_t mw_whole(const uint8_t* mem, int keep)
+{
+    uint64_t sum = 0;
+    uint32_t u;
+    for (u = 0; u < MW_UNITS; u++) {
+        uint64_t t = mw_term(mem + (size_t)u * MW_UNIT, u);
+        if (keep) g_mw_term[u] = t;
+        sum += t;
+    }
+    g_mw_wholes++;
+    return sum;
+}
+
+#if defined(__linux__)
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <linux/userfaultfd.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+#if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC) && defined(UFFD_FEATURE_WP_UNPOPULATED) && \
+    defined(UFFD_USER_MODE_ONLY) && defined(SYS_userfaultfd)
+#define MW_WATCH 1
+static int g_mw_uffd = -1, g_mw_pagemap = -1;
+
+static void mw_close(void)
+{
+    if (g_mw_pagemap >= 0) close(g_mw_pagemap);
+    if (g_mw_uffd >= 0) close(g_mw_uffd); /* the last reference: the range is unregistered with it */
+    g_mw_pagemap = g_mw_uffd = -1;
+}
+
+/* The units written since the last call, hashed again; 0 if the kernel would
+ * not say (the watch is then given up). The scan write-protects again what it
+ * reports before this reads it, so a write from now on is in the next list. */
+static int mw_rescan(const uint8_t* mem, uint8_t* listed)
+{
+    struct page_region r[256];
+    uint64_t start = (uintptr_t)mem, end = start + MEM1_SIZE;
+    while (start < end) {
+        struct pm_scan_arg a;
+        long n, k;
+        memset(&a, 0, sizeof a);
+        a.size = sizeof a;
+        a.flags = PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC;
+        a.start = start, a.end = end;
+        a.vec = (uintptr_t)r, a.vec_len = sizeof r / sizeof r[0];
+        a.category_mask = PAGE_IS_WRITTEN, a.return_mask = PAGE_IS_WRITTEN;
+        n = ioctl(g_mw_pagemap, PAGEMAP_SCAN, &a);
+        if (n < 0) return 0;
+        for (k = 0; k < n; k++) {
+            uint32_t u = (uint32_t)((r[k].start - (uintptr_t)mem) / MW_UNIT), last = (uint32_t)((r[k].end - (uintptr_t)mem + MW_UNIT - 1u) / MW_UNIT);
+            if (last > MW_UNITS) last = MW_UNITS;
+            for (; u < last; u++) {
+                uint64_t t = mw_term(mem + (size_t)u * MW_UNIT, u);
+                if (listed) listed[u] = 1;
+                g_mw_sum += t - g_mw_term[u];
+                g_mw_term[u] = t;
+                g_mw_units++;
+            }
+        }
+        if (a.walk_end <= start) return 0;
+        start = a.walk_end;
+    }
+    return 1;
+}
+
+static const char* mw_watch(const uint8_t* mem)
+{
+    long page = sysconf(_SC_PAGESIZE);
+    struct uffdio_api api;
+    struct uffdio_register reg;
+    struct uffdio_writeprotect wp;
+    if (page <= 0 || page % MW_UNIT || MEM1_SIZE % (unsigned long)page || (uintptr_t)mem % (unsigned long)page)
+        return "the image is not in whole pages";
+    g_mw_uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
+    if (g_mw_uffd < 0) return "no userfaultfd";
+    memset(&api, 0, sizeof api);
+    api.api = UFFD_API;
+    api.features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED;
+    if (ioctl(g_mw_uffd, UFFDIO_API, &api) || (api.features & (UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED)) !=
+                                                 (UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED))
+        return "no asynchronous write protection";
+    memset(&reg, 0, sizeof reg);
+    reg.range.start = (uintptr_t)mem, reg.range.len = MEM1_SIZE;
+    reg.mode = UFFDIO_REGISTER_MODE_WP;
+    if (ioctl(g_mw_uffd, UFFDIO_REGISTER, &reg)) return "the image cannot be registered";
+    memset(&wp, 0, sizeof wp);
+    wp.range = reg.range;
+    wp.mode = UFFDIO_WRITEPROTECT_MODE_WP;
+    if (ioctl(g_mw_uffd, UFFDIO_WRITEPROTECT, &wp)) return "the image cannot be write-protected";
+    g_mw_pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+    if (g_mw_pagemap < 0) return "no /proc/self/pagemap";
+    if (!mw_rescan(mem, NULL)) return "no PAGEMAP_SCAN";
+    return NULL;
+}
+#else
+#define MW_WATCH 0
+static void mw_close(void) {}
+static int mw_rescan(const uint8_t* mem, uint8_t* listed) { (void)mem, (void)listed; return 0; }
+static const char* mw_watch(const uint8_t* mem) { (void)mem; return "not watched on this platform"; }
+#endif
+
+/* A new run (quiet.c, through irq_quiet_answers): the image may be a new one. */
+static void mw_reset(void)
+{
+    const char* e = getenv("SOA_CLOCK_MEMORY");
+    mw_close();
+    g_mw_mem = NULL;
+    g_mw_how = 0;
+    g_mw_why = NULL;
+    g_mw_check = e && !strcmp(e, "check");
+    if (e && !strcmp(e, "whole")) g_mw_how = 2, g_mw_why = "SOA_CLOCK_MEMORY=whole";
+    g_mw_hashes = g_mw_units = g_mw_wholes = g_mw_bad = g_mw_missed = 0;
+    g_mw_shown = 0;
+}
+
+void gxr_memory_hazard(void); /* gxr.c: every copy the rasterizer has queued into MEM1 landed */
+
+static uint64_t quiet_memory_hash(const CpuState* s)
+{
+    uint64_t h;
+    g_mw_hashes++;
+    /* A copy to texture is written into MEM1 by a rasterizer worker, while the
+     * guest runs on: hashed while one is landing, memory would change between
+     * two passes by how far the worker had got (a disc poll around a native
+     * DVDGetDriveStatus in the warps, 100 passes turned down in one run and 3
+     * in the next). The guest's commands decide what lands; let it land. */
+    gxr_memory_hazard();
+    if (g_mw_how == 1 && s->mem != g_mw_mem) { /* another image: watch it afresh */
+        mw_close();
+        g_mw_how = 0;
+    }
+    if (g_mw_how == 0) {
+        g_mw_why = mw_watch(s->mem);
+        if (g_mw_why) {
+            mw_close();
+            g_mw_how = 2;
+        } else {
+            g_mw_how = 1, g_mw_mem = s->mem;
+            g_mw_sum = mw_whole(s->mem, 1); /* after the protection: a write from here on is listed */
+            g_mw_units = 0;
+            if (!g_mw_check) return g_mw_sum;
+        }
+    }
+    if (g_mw_how == 1 && !mw_rescan(s->mem, NULL)) { /* the kernel stopped saying: whole from now on */
+        mw_close();
+        g_mw_how = 2, g_mw_why = "PAGEMAP_SCAN failed";
+    }
+    if (g_mw_how == 2) return mw_whole(s->mem, 0);
+    h = g_mw_sum;
+    if (g_mw_check) {
+        uint64_t w = mw_whole(s->mem, 0);
+        if (w != h) {
+            /* Which units, and has the kernel listed them since (written after the scan, by another thread) or not
+             * (a write it missed)? Then the terms are made right, so the next check is a check of its own. */
+            uint32_t u;
+            g_mw_bad++, h = w;
+            for (u = 0; u < MW_UNITS; u++) g_mw_stale[u] = mw_term(s->mem + (size_t)u * MW_UNIT, u) != g_mw_term[u];
+            memset(g_mw_listed, 0, sizeof g_mw_listed);
+            if (g_mw_how == 1) mw_rescan(s->mem, g_mw_listed);
+            for (u = 0; u < MW_UNITS; u++) {
+                uint64_t t;
+                if (!g_mw_stale[u]) continue;
+                if (!g_mw_listed[u]) g_mw_missed++;
+                if (g_mw_shown < 16)
+                    g_mw_shown++, fprintf(stderr, "[clock] memory check: hash %llu, the unit at %08X had changed, %s\n", g_mw_hashes,
+                                     0x80000000u + u * MW_UNIT, g_mw_listed[u] ? "listed by the kernel since" : "not listed by the kernel");
+                t = mw_term(s->mem + (size_t)u * MW_UNIT, u);
+                g_mw_sum += t - g_mw_term[u], g_mw_term[u] = t;
+            }
+        }
+    }
+    return h;
 }
 
 /* One back edge against its slot: 0 noted (the state is new), 1 the same
@@ -1059,6 +1263,18 @@ void irq_report(void)
                 fprintf(stderr, "[clock] answers: %llu repeated passes had a native answer in them (memory hashed); "
                                 "%llu of them would have been a wait but the answer had changed memory\n",
                         g_quiet_answer_passes, g_quiet_answer_work);
+            if (g_mw_hashes) {
+                fprintf(stderr, "[clock] memory: %llu hashes of MEM1, ", g_mw_hashes);
+                if (g_mw_how == 1)
+                    fprintf(stderr, "the 4 KB units written since the last hashed again (the kernel's write watch): %llu units, "
+                                    "%llu whole hashes", g_mw_units, g_mw_wholes);
+                else
+                    fprintf(stderr, "every unit every time (%s)", g_mw_why ? g_mw_why : "not watched");
+                if (g_mw_check)
+                    fprintf(stderr, "; checked against the whole hash: %llu different, %llu units changed that the kernel had not listed",
+                            g_mw_bad, g_mw_missed);
+                fputc('\n', stderr);
+            }
         }
     }
 }
