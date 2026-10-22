@@ -159,6 +159,18 @@ typedef struct {
     char module[64];
 } SnapPtr;
 
+/* SOA_RESUME_FOREIGN (snapshot.h): -1 not read yet */
+static int g_foreign = -1;
+
+int snapshot_foreign(void)
+{
+    if (g_foreign < 0) {
+        const char* e = getenv("SOA_RESUME_FOREIGN");
+        g_foreign = e && *e && strcmp(e, "0") != 0;
+    }
+    return g_foreign;
+}
+
 static void op_pointer(Snap* sn, void** p, int* ok)
 {
     SnapPtr r;
@@ -175,6 +187,12 @@ static void op_pointer(Snap* sn, void** p, int* ok)
     r.module[sizeof r.module - 1] = '\0';
     if (r.kind == 0) {
         *p = NULL;
+    } else if (r.kind == 1 && snapshot_foreign() && !strcmp(r.module, "<program>")) {
+        /* a foreign resume: the host's program may be another build, so an
+         * offset into it names nothing; what lies there the host gives back
+         * (soa_host_resume_event) or the resume is refused */
+        *p = NULL;
+        if (ok) *ok = 0;
     } else if (r.kind == 1) {
         *p = plat_module_addr(r.module, (uintptr_t)r.off);
         if (ok) *ok = *p != NULL;
@@ -772,6 +790,10 @@ int snapshot_precheck(char* why, size_t cap)
     const char* rec = game_record();
     if (snapshot_resume_env(why, cap)) return 1;
     if (!snapshot_resuming()) return 0;
+    if (snapshot_foreign() && (!getenv("SOA_CLOCK") || strcmp(getenv("SOA_CLOCK"), "fixed") != 0)) {
+        snprintf(why, cap, "SOA_RESUME_FOREIGN is for headless check runs on the fixed clock (SOA_CLOCK=fixed)");
+        return 1;
+    }
     if (*rec && !strstr(rec, "resume=801DCB84")) {
         snprintf(why, cap, "the game library was built without its resume point (config/resumepoints.txt): rebuild it");
         return 1;

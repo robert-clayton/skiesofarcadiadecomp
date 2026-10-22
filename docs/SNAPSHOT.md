@@ -186,6 +186,45 @@ starts. `tools/strict_host.c` keeps its event count and hash that way, so a
 resumed run's last line is the whole run's (`STRICT_SNAPSHOT=F:path`,
 `STRICT_RESUME=path`).
 
+## A resume under another binding set (check runs only)
+
+A resume continues one run, so the replacements must be the snapshot's.
+A headless off/on pair (soa-ue5's `docs/check-speedups.md`, "Resumed
+pairs") wants the opposite: one snapshot taken shortly before the frames a
+check looks at, and both sides -- the bindings under test handed back, and
+answered -- started from it. `SOA_RESUME_FOREIGN=1` allows that, for check
+runs only: nothing in the game, the launcher's normal path or the Unreal
+plugin sets it, and a resume with it is refused unless `SOA_CLOCK=fixed`,
+and under strict host mode (`soa_host_strict`, Unreal's deterministic
+path). With it:
+
+- **the replacements may differ** (`swaps`): the counts of the snapshot's
+  replacements not set here, of those set here it did not have, and of those
+  answered from another place or program are printed, not refused. Which of
+  them may differ is the host's to decide: only it knows which of its
+  answers keep state outside guest memory. (soa-ue5's pair host refuses a
+  difference in any owner that does, by name.)
+- **nothing in the host's program is found again by offset**: a pointer of
+  the snapshot's into `<program>` (an event's function, its data, its
+  caller's function) loads as not found, since the resuming host may be
+  another build where the same offset is other code. An event there must be
+  given back with `soa_host_resume_event`, or the resume is refused (the
+  `events` check). Pointers into the game and runtime libraries, which the
+  `build` record and the section sizes hold to this build, come back as
+  before.
+- **the call counts start at the resume** (`swap`): the snapshot's were
+  counted under the other binding set. The quiet rule's answer count is
+  still the snapshot's (`irq.c` compares it pass by pass, so only its change
+  matters).
+
+Everything else is as for any resume: the guest's memory and registers,
+every device, the clock and the quiet rule's tables are the snapshot's. At
+the safe point no answer is running (the host's C stack is `__start` and
+main), so no answer's own or exact-call frame is in flight to carry over.
+What this does not check: that the two binding sets would have reached the
+same state by the snapshot's frame -- that is what a pair from power-on
+checks, and the reason a resumed pair checks only the frames after it.
+
 ## Proof
 
 Run A from power-on to N+M; run B1 from power-on taking a snapshot at N

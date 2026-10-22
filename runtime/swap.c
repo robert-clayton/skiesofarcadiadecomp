@@ -548,7 +548,8 @@ void swap_env(void)
 void swap_list_snap(Snap* sn)
 {
     const SoaGame* g;
-    uint32_t n, count, i, hooked = 0, missing = 0, extra = 0, first_missing = 0, first_extra = 0;
+    uint32_t n, count, i, hooked = 0, missing = 0, extra = 0, first_missing = 0, first_extra = 0, moved = 0, unfound = 0;
+    int foreign = snapshot_foreign();
     plat_lock(&g_lock);
     g = ready_locked();
     count = g ? g->count : 0u;
@@ -596,7 +597,9 @@ void swap_list_snap(Snap* sn)
                 plat_lock(&g_lock);
                 w = g_swap[i];
                 plat_unlock(&g_lock);
-                if (ok_h && ok_f && (h != (void*)w.handler || f != (void*)w.fn) && !snap_dry(sn))
+                if (!ok_h || !ok_f) unfound++;
+                else if (h != (void*)w.handler || f != (void*)w.fn) moved++;
+                if (ok_h && ok_f && (h != (void*)w.handler || f != (void*)w.fn) && !snap_dry(sn) && !foreign)
                     fprintf(stderr, "[snapshot] %08X is replaced by another function than when the snapshot was taken (a "
                                     "rebuilt host?)\n", g->address[i]);
             }
@@ -607,6 +610,16 @@ void swap_list_snap(Snap* sn)
             if (!want[i] && have && !extra++) first_extra = g->address[i];
         }
         free(want);
+    }
+    if (!snap_failed(sn) && foreign) {
+        /* a check run's resume under another binding set (snapshot.h): the
+         * host holds what of its own carries over and refuses the rest */
+        if (!snap_dry(sn))
+            fprintf(stderr, "[snapshot] SOA_RESUME_FOREIGN: %u of the snapshot's replacements are not set here (the first "
+                            "%08X), %u set here are not the snapshot's (the first %08X); %u answered by other code, %u not "
+                            "compared (in the host's program, which may be another build)\n",
+                    missing, first_missing, extra, first_extra, moved, unfound);
+        return;
     }
     if (!snap_failed(sn) && (missing || extra))
         snap_fail(sn, "the replacements are not the snapshot's: %u of its are not set (the first %08X), %u are set that it did "
@@ -630,7 +643,8 @@ void swap_snap(Snap* sn)
         snap_buffer(sn, &a, &ab);
         snap_buffer(sn, &t, &tb);
         if (snap_loading(sn)) {
-            if (!snap_failed(sn) && g_counting && cb == bytes && ab == bytes && tb == bytes) {
+            /* a foreign resume (snapshot.h): another binding set's counts are not this run's; they start here */
+            if (!snap_failed(sn) && g_counting && cb == bytes && ab == bytes && tb == bytes && !snapshot_foreign()) {
                 memcpy(g_calls, c, bytes); /* counted from the start of the run this one continues */
                 memcpy(g_answered, a, bytes);
                 memcpy(g_translated, t, bytes);
@@ -642,5 +656,7 @@ void swap_snap(Snap* sn)
         g_swap_answers = answers;
         if (g_counting && !counting)
             fprintf(stderr, "[snapshot] the snapshot was taken without counting calls: the counts start at the resume\n");
+        else if (g_counting && snapshot_foreign() && !snap_dry(sn))
+            fprintf(stderr, "[snapshot] SOA_RESUME_FOREIGN: the call counts start at the resume\n");
     }
 }

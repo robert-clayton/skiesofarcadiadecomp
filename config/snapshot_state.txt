@@ -903,6 +903,7 @@ snapshot  SECTIONS  config
 snapshot  g_env_failed  config  # SOA_RESUME, read once at the start
 snapshot  g_env_read  config
 snapshot  g_env_why  config
+snapshot  g_foreign  config  # SOA_RESUME_FOREIGN, read once
 snapshot  g_at  config  # SOA_SNAPSHOT_AT, read again: a resumed run takes the ones still ahead
 snapshot  g_host_hook  config
 snapshot  g_host_hook_user  config

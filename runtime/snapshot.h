@@ -110,5 +110,13 @@ void snapshot_set_host_hook(void (*fn)(void* user), void* user);
  * game library has the resume point, and the replacements and events the
  * snapshot was taken with are here again. 0, or nonzero and why. */
 int snapshot_precheck(char* why, size_t cap);
+/* SOA_RESUME_FOREIGN=1, for check runs only (docs/SNAPSHOT.md, "A resume
+ * under another binding set"): the replacements of the resumed run may be
+ * other than the snapshot's (the host decides what of its own carries over
+ * and refuses the rest), nothing in the host's program is found again by
+ * offset (it may be another build: an event there is given back by the host
+ * or refused), and call counts start at the resume. Read once; honoured only
+ * on the fixed clock. 1 when on. */
+int snapshot_foreign(void);
 
 #endif

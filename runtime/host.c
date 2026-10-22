@@ -71,6 +71,8 @@ unsigned soa_host_abi(void)
     return SOA_HOST_ABI;
 }
 
+static int g_strict; /* strict mode (below) */
+
 int soa_host_start(const SoaHostStart* start, char* why, size_t cap)
 {
     PlatThread t;
@@ -96,6 +98,12 @@ int soa_host_start(const SoaHostStart* start, char* why, size_t cap)
     /* A resumed run (soa_host_resume, SOA_RESUME): the game library has the
      * resume point and the host has set the snapshot's replacements and given
      * its events back, or nothing starts (docs/SNAPSHOT.md). */
+    /* SOA_RESUME_FOREIGN is for headless check runs (snapshot.h): never under strict mode, Unreal's deterministic
+     * path, which holds its own owners' switches to the snapshot's and must continue one run */
+    if (snapshot_resuming() && snapshot_foreign() && g_strict) {
+        snprintf(why, cap, "SOA_RESUME_FOREIGN is for headless check runs, not strict mode");
+        goto refused;
+    }
     if (snapshot_precheck(why, cap) != 0) goto refused;
     /* The switches the run reads, set as soa.ini's are: only where the
      * environment has not set them already. */
