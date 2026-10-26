@@ -101,6 +101,7 @@ unsigned g_record_polls;
 static void (*g_report)(void);
 static uint32_t g_tb = 1000;
 void hle_on_report(void (*fn)(void)) { g_report = fn; }
+int snapshot_foreign(void) { return 0; } /* snapshot.c's: no resume here */
 uint64_t irq_delivered_count(unsigned n) { (void)n; return 0; }
 uint64_t threads_switch_count(void) { return 0; }
 unsigned gx_frame_count(void) { return 42; }

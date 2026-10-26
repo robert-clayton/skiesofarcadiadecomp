@@ -124,6 +124,7 @@ unsigned g_record_polls;
 static void (*g_report[8])(void);
 static unsigned g_nreport;
 void hle_on_report(void (*fn)(void)) { if (g_nreport < 8) g_report[g_nreport++] = fn; }
+int snapshot_foreign(void) { return 0; } /* snapshot.c's: no resume here */
 void hle_report(void) {}
 uint64_t irq_delivered_count(unsigned n) { (void)n; return 0; }
 uint64_t threads_switch_count(void) { return 0; }
