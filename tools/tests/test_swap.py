@@ -126,6 +126,7 @@ int mod_call_guest(CpuState* s, uint32_t addr, const uint32_t* ints, uint32_t n_
 }
 void hle_on_report(void (*fn)(void)) { (void)fn; }
 void guest_trap(CpuState* s, uint32_t pc) { (void)s; printf("trap %08X\n", pc); }
+int snapshot_foreign(void) { return 0; } /* snapshot.c's: no resume here */
 
 static int handler(CpuState* s, uint32_t address, SwapFn fn, void* user, int after)
 {

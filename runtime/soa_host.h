@@ -946,6 +946,44 @@ typedef struct {
 SOA_HOST_API int soa_host_game_exact(SoaHostCall* call, uint32_t address, uint32_t lr, unsigned flags);
 SOA_HOST_API int soa_host_special(SoaHostCall* call, SoaHostSpecial* get, const SoaHostSpecial* set);
 
+/* ---- Interrupt delivery for a native answer's loops (within ABI 24; docs/SWAP.md) ----
+ *
+ * A function to resolve by name: a runtime before it has none, and nothing
+ * above changes. The translation polls for interrupts at every back edge of
+ * its loops (irq_poll): under the fixed clock's quiet rule that is where what
+ * has come due is delivered, and where a loop that waits on what only an
+ * interrupt can change is found by its repeated state and time moved on
+ * (docs/CLOCK.md, "What moves the fixed clock"). An answer that does a loop's
+ * work natively has neither, so a loop that waits on a flag an interrupt sets
+ * -- a DMA's callback, the memory card's busy state -- would spin for ever.
+ *
+ * soa_host_back_edge(call, pc, flags) is that back edge, on the game's thread
+ * inside an answer (or an event). With flags 0 it is the translation's own
+ * irq_poll on the live registers: the host first makes them what the
+ * translation has at that back edge (call->r, call->f, and CR, XER, LR, CTR
+ * through soa_host_special), and gives the block's address the translation
+ * keeps for it in `pc` (0: as it is, which is what a callee the answer called
+ * exactly left there -- the translation's too, when no block began since).
+ * Pending interrupts are then delivered there, in the same order and at the
+ * same guest time as the translation's, the wait finder sees the same state,
+ * and under the old rule the same back edge is counted. Every register comes
+ * back as it was, as after the translation's poll, unless a handler woke a
+ * thread that ran (the registers are then the thread's again when it is
+ * resumed, as for the translation). The host reads them back as it does after
+ * an exact call.
+ *
+ * SOA_HOST_EDGE_DUE is a back edge of a native loop whose registers are not
+ * the translation's (the wait finder would take its work for a wait): under
+ * the quiet rule what has come due is delivered and nothing more, otherwise as
+ * with 0. SOA_HOST_EDGE_ENTRY is the entry of a function of the game's that an
+ * answer runs natively instead of calling it: under the quiet rule what has
+ * come due is delivered, as every translated function's entry does, and
+ * otherwise nothing. Returns 1, or 0 when refused: not on the game's thread in
+ * an answer or event, or an unknown flag (or both). */
+#define SOA_HOST_EDGE_DUE 1u
+#define SOA_HOST_EDGE_ENTRY 2u
+SOA_HOST_API int soa_host_back_edge(SoaHostCall* call, uint32_t pc, unsigned flags);
+
 #ifdef __cplusplus
 }
 #endif

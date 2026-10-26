@@ -104,7 +104,12 @@ instructions ran since -- which is what makes a native answer invisible
 device's order (PE, DSP, AI, ARAM, DI, VI, EXI, SI; under both clocks), and
 with the device's own pending it runs once: a native AI block that falls on
 a retrace runs before or after the retrace's handler as the device model's
-would.
+would. A native answer that does a translated loop's work has no back edge of
+the translation's, so it calls one: `soa_host_back_edge` (docs/SWAP.md,
+"Interrupt delivery for native answers") is `irq_poll` on the registers the
+answer has made the translation's, with the block's address in `s->pc`, so
+a loop that waits on an interrupt is found and moves the clock as its
+translation does.
 
 **The old rule** is kept: `SOA_CLOCK_POLL_TICKS=32` (any value above 0)
 makes every 16th back edge with interrupts enabled a delivery point that

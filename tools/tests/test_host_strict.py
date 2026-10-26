@@ -93,6 +93,14 @@ int snapshot_host_put(const char* name, const void* data, size_t bytes) { (void)
 long snapshot_host_get(const char* name, void* out, size_t max) { (void)name, (void)out, (void)max; return -1; }
 void snapshot_set_host_hook(void (*fn)(void* user), void* user) { (void)fn, (void)user; }
 int irq_event_rebind(int id, void* fn, void* user, void* extra) { (void)id, (void)fn, (void)user, (void)extra; return 0; }
+int snapshot_foreign(void) { return 0; }
+/* the delivery points soa_host_back_edge hands a native answer's loop to: counted, with the pc they were given
+ * (test_host_back_edge.py reads them; nothing here calls them otherwise) */
+int g_clock_quiet;
+unsigned g_polls, g_quiet_entries;
+uint32_t g_poll_pc;
+void irq_poll(CpuState* s) { g_polls++, g_poll_pc = s->pc; }
+void irq_quiet_entry(CpuState* s) { g_quiet_entries++, g_poll_pc = s->pc; }
 
 int window_pad(uint16_t* buttons, uint8_t stick[2], uint8_t cstick[2], uint8_t trig[2]);
 int window_pad2(uint16_t* buttons, uint8_t stick[2], uint8_t cstick[2], uint8_t trig[2]);

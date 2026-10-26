@@ -117,7 +117,7 @@ cooperatively).
   if the guest's memory repeats as well as the registers (docs/CLOCK.md, "A
   native answer is not a wait").
 
-## What the host gets (`soa_host.h`, ABI 23; 24 adds the clock and events, and exact calls)
+## What the host gets (`soa_host.h`, ABI 23; 24 adds the clock and events, exact calls and native back edges)
 
 `SoaHostCall` keeps its ABI 22 layout. These fields are appended at the end:
 
@@ -257,6 +257,61 @@ muted, `SOA_CLOCK=fixed`, card copies).
   second, turned its subject from where the first run left it, and 927
   differed.)
 
+### Interrupt delivery for native answers (within ABI 24)
+
+The translation polls for interrupts at every back edge of its loops
+(`irq_poll(s)` before the backward `goto`). Under the fixed clock's quiet
+rule that is a delivery point -- what has come due since a read, a write or a
+clock move is delivered there -- and it is where the wait finder looks: a
+back edge whose registers, `s->pc` and the pass between come round the same
+is a loop waiting on what only an interrupt can change, and guest time goes
+to the next deadline (docs/CLOCK.md, "What moves the fixed clock"). An answer
+that does such a loop natively has neither: its back edge is a C++ `goto`.
+Its callees' entries still deliver (the swap guard's `SWAP_DUE`), so a loop
+that calls something gets what comes due; but nothing comes due inside a
+loop that only reads memory, and no wait is found. A loop on a word an
+interrupt sets -- an ARAM transfer's callback, the card's busy state -- spins
+for ever with the clock stopped. soa-ue5 met it answering the ARAM cache's
+fetch (its docs/layer3-scripts.md, "Round 7": every battle start stopped).
+
+`soa_host_back_edge(call, pc, flags)` is that back edge, for an answer on
+the game's thread (an answer or an event). With `flags` 0 it is `irq_poll`
+itself on the live registers: the host first makes them the translation's
+at that back edge (`call->r`, `call->f`, and CR, XER, LR, CTR with
+`soa_host_special`), `pc` is the block's address the translation keeps in
+`s->pc` there (it sets it at every block's label; 0 leaves `s->pc` as it is,
+which is right where a callee called exactly since the block began left its
+own there, as the translation's does), and the runtime calls `irq_poll`. So
+the delivery happens at the same program point, in the same order and at the
+same guest time; the wait finder sees the same state (every integer
+register, CR, LR, CTR, XER, the floats, `pc`, the pipe's byte count, the
+pass's sum and the answers' count, which the enclosing answer has not moved
+yet: `g_swap_answers` counts an answer when it returns); under the old rule
+(`SOA_CLOCK_POLL_TICKS`) the same back edge is counted; under the real clock
+it is the translation's every-16th delivery. A handler puts every register
+back, as for the translation; the host reads them back as after an exact
+call. Nothing is kept: no state, nothing in a save state.
+
+Two flags give a host the delivery points it had to find unexported symbols
+for (soa-ue5's script owner looked up `irq_quiet_entry` and `g_clock_quiet`
+in the library's symbol table): `SOA_HOST_EDGE_DUE`, a back edge of a native
+loop whose registers are not the translation's, so the wait finder must not
+see it (under the quiet rule `irq_quiet_entry`, what has come due and
+nothing more; `irq_poll` otherwise), and `SOA_HOST_EDGE_ENTRY`, the entry of
+a function of the game's the host runs natively instead of calling it
+(under the quiet rule `irq_quiet_entry`, as the swap guard's entry; nothing
+otherwise). 0 is returned for an unknown flag, both, no call or another
+thread, with nothing called.
+
+It is resolved by name, as the exact calls are: a runtime before it has
+none, and an answer that needs it hands its call back. `test_host_back_edge.py`
+holds `host.c`'s entry to the rule above (each flag under both rules, the
+pc given and kept, the refusals). soa-ue5 answers six functions with it
+(the ARAM fetch `0x8022ACA8`, the bank loader `0x8022A854` whole and the
+card's four waits): its docs/swap-bindings.md, "Interrupt delivery for
+native answers", has the headless pairs (frame hashes, guest time, PCM, card
+and pads the same as the translation's on HEAD's runtime).
+
 **The progress counter.** `soa_host_functions(&native)`,
 `soa_host_count_calls(on)` (on also zeroes the counts) and
 `soa_host_call_counts(out, max)` fill one `SoaHostCallCount` per function
@@ -350,6 +405,16 @@ The checks:
   guest. The byte guard is portable C.
 
 ## What changed (and what to rebuild)
+
+- **Within host ABI 24** (2026-10-25, branch native-irq): interrupt delivery
+  for native answers, `soa_host_back_edge` with `SOA_HOST_EDGE_DUE` and
+  `SOA_HOST_EDGE_ENTRY`, added after the rest of the header (above,
+  "Interrupt delivery for native answers"). Nothing before it changed, so the
+  ABI number did not; a plugin looks it up by name. `test_host_strict.py`'s
+  stand-ins gain `irq_poll`, `irq_quiet_entry` and `g_clock_quiet` (counted,
+  for the new test), and both it and `test_swap.py` the `snapshot_foreign`
+  stub that resume-foreign (430fbc1) left out of them (they failed to link
+  since). A runtime-only change: `--link` (the game library is byte-identical).
 
 - **Within host ABI 24** (2026-10-19): exact calls,
   `soa_host_game_exact` and `soa_host_special` with `SoaHostSpecial` and

@@ -24,6 +24,7 @@
 #include "mod.h"
 #include "swap.h"
 #include "irq.h"
+#include "clock.h"
 #include "snapshot.h"
 #include <fenv.h>
 #include <math.h>
@@ -736,6 +737,30 @@ int soa_host_special(SoaHostCall* call, SoaHostSpecial* get, const SoaHostSpecia
     }
     if (set) {
         s->cr = set->cr; s->xer = set->xer; s->lr = set->lr; s->ctr = set->ctr; s->fpscr = set->fpscr;
+    }
+    return 1;
+}
+
+/* A native answer's loop at its translation's back edge (soa_host_back_edge):
+ * the translation's own irq_poll, on the live registers the answer has made
+ * the translation's, with s->pc the block's address as the translation keeps
+ * it; or, for a native loop whose registers are not the translation's, the
+ * due events only (SOA_HOST_EDGE_DUE), or a function's entry entered natively
+ * (SOA_HOST_EDGE_ENTRY), as swap.c's guard delivers there. */
+int soa_host_back_edge(SoaHostCall* call, uint32_t pc, unsigned flags)
+{
+    CpuState* s;
+    if (!call || !call->runtime || !t_guest || (flags & ~(SOA_HOST_EDGE_DUE | SOA_HOST_EDGE_ENTRY)) ||
+        flags == (SOA_HOST_EDGE_DUE | SOA_HOST_EDGE_ENTRY))
+        return 0;
+    s = (CpuState*)call->runtime;
+    if (pc) s->pc = pc;
+    if (flags & SOA_HOST_EDGE_ENTRY) {
+        if (g_clock_quiet) irq_quiet_entry(s);
+    } else if ((flags & SOA_HOST_EDGE_DUE) && g_clock_quiet) {
+        irq_quiet_entry(s);
+    } else {
+        irq_poll(s);
     }
     return 1;
 }
