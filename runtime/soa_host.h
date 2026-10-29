@@ -984,6 +984,19 @@ SOA_HOST_API int soa_host_special(SoaHostCall* call, SoaHostSpecial* get, const 
 #define SOA_HOST_EDGE_ENTRY 2u
 SOA_HOST_API int soa_host_back_edge(SoaHostCall* call, uint32_t pc, unsigned flags);
 
+
+/* Graphics-register prototype: this deliberately adds no structure field and is
+ * optional by symbol lookup, like soa_host_back_edge. Only on the guest thread,
+ * before an answer, and only aligned CP/PE halfwords or PI FIFO words. PROBE
+ * checks the entire request without an access; a caller preflights before any
+ * RAM/pipe/OS side effect. Unknown flags/addresses/sizes leave Value unchanged.
+ * Reads and writes use the same mmio_* path as translated loads and stores,
+ * preserving the device model, accounting, recording and display-list hooks.
+ * This service neither changes gxData nor polls/charges the guest clock. */
+#define SOA_HOST_GX_WRITE 1u
+#define SOA_HOST_GX_PROBE 2u
+SOA_HOST_API int soa_host_gx_register(SoaHostCall* call, uint32_t address,
+                                     unsigned size, unsigned flags, uint64_t* value);
 #ifdef __cplusplus
 }
 #endif

@@ -102,6 +102,12 @@ uint32_t g_poll_pc;
 void irq_poll(CpuState* s) { g_polls++, g_poll_pc = s->pc; }
 void irq_quiet_entry(CpuState* s) { g_quiet_entries++, g_poll_pc = s->pc; }
 
+unsigned g_gx_reads, g_gx_writes;
+uint64_t g_gx_value;
+uint16_t mmio_read16(CpuState* s, uint32_t a) { (void)s; (void)a; ++g_gx_reads; return (uint16_t)g_gx_value; }
+uint32_t mmio_read32(CpuState* s, uint32_t a) { (void)s; (void)a; ++g_gx_reads; return (uint32_t)g_gx_value; }
+void mmio_write16(CpuState* s, uint32_t a, uint16_t v) { (void)s; (void)a; ++g_gx_writes; g_gx_value=v; }
+void mmio_write32(CpuState* s, uint32_t a, uint32_t v) { (void)s; (void)a; ++g_gx_writes; g_gx_value=v; }
 int window_pad(uint16_t* buttons, uint8_t stick[2], uint8_t cstick[2], uint8_t trig[2]);
 int window_pad2(uint16_t* buttons, uint8_t stick[2], uint8_t cstick[2], uint8_t trig[2]);
 void host_frame_end(CpuState* s, unsigned frame);
