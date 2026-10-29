@@ -14,7 +14,7 @@ def test_typed_register_service(tmp_path):
     assert out.returncode==0, out.stdout+out.stderr
     run=subprocess.run([str(exe)], capture_output=True,text=True,timeout=60)
     assert run.returncode==0,run.stdout+run.stderr
-    assert "75 valid registers, 75 reads, 75 writes" in run.stdout
+    assert "75 valid registers, 75 reads, 77 writes" in run.stdout
 
 @pytest.mark.skipif(not os.environ.get("SOA_TEST_GX_RUNTIME"), reason="requires a built GX runtime to test its real device model")
 def test_real_gx_model(tmp_path):

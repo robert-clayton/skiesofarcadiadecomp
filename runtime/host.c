@@ -742,27 +742,20 @@ int soa_host_special(SoaHostCall* call, SoaHostSpecial* get, const SoaHostSpecia
 }
 
 
+#include "gx_register.h"
+
 /* The typed MMIO boundary for native GX answers; no host-side register mirror. */
+int soa_host_gx_register_at(SoaHostCall* call, uint32_t address,
+                            unsigned size, unsigned flags, uint64_t* value, uint32_t pc)
+{
+    return gx_register_access(call, address, size, flags, value, pc, t_guest);
+}
+
+/* Compatibility for the original prototype; current CPU PC is already live. */
 int soa_host_gx_register(SoaHostCall* call, uint32_t address,
                          unsigned size, unsigned flags, uint64_t* value)
 {
-    CpuState* s;
-    const int half = size == 2 && !(address & 1u) &&
-        ((address >= 0xCC000000u && address < 0xCC000080u) ||
-         (address >= 0xCC001000u && address < 0xCC001010u));
-    const int word = size == 4 && !(address & 3u) &&
-        address >= 0xCC00300Cu && address <= 0xCC003014u;
-    if (!call || call->after || !call->runtime || !t_guest || !value ||
-        (flags & ~(SOA_HOST_GX_WRITE | SOA_HOST_GX_PROBE)) || (!half && !word)) return 0;
-    if (flags & SOA_HOST_GX_PROBE) return 1;
-    s = (CpuState*)call->runtime;
-    if (flags & SOA_HOST_GX_WRITE) {
-        if (half) mmio_write16(s, address, (uint16_t)*value);
-        else mmio_write32(s, address, (uint32_t)*value);
-    } else {
-        *value = half ? mmio_read16(s, address) : mmio_read32(s, address);
-    }
-    return 1;
+    return soa_host_gx_register_at(call, address, size, flags, value, 0);
 }
 
 /* A native answer's loop at its translation's back edge (soa_host_back_edge):

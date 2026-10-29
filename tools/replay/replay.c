@@ -173,6 +173,13 @@ static void store(CpuState* s, uint32_t kind, uint32_t ea, uint64_t v)
         g_hw_stores++;
         return;
     }
+    if (g_gx_on && kind >> 8 == 2 && ea >= 0xCC000000u && ea < 0xCC000080u)
+        g_gm.cp_mmio[(ea - 0xCC000000u) >> 1] = (uint16_t)v;
+    if (g_gx_on && kind >> 8 == 2 && ea >= 0xCC001000u && ea < 0xCC001010u) {
+        unsigned idx = (ea - 0xCC001000u) >> 1;
+        if (idx == 5) g_gm.pe_mmio[idx] = (g_gm.pe_mmio[idx] & 12u & ~(v & 12u)) | (v & 3u);
+        else g_gm.pe_mmio[idx] = (uint16_t)v;
+    }
     if (kind >> 8 == 4) gm_pi_store(s, ea, v);
     if (in && in->kind == kind && in->ea == ea) {
         g_input_at++;
@@ -214,6 +221,15 @@ MMIO(8, uint8_t)
 MMIO(16, uint16_t)
 MMIO(32, uint32_t)
 MMIO(64, uint64_t)
+/* Native FIFO candidates use exactly the live service's validation/forwarding.
+ * Replay is single-threaded; mmio_* above holds the recorded ledger in order. */
+#include "gx_register.h"
+EXPORT int soa_host_gx_register_at(SoaHostCall* call, uint32_t address,
+                                   unsigned size, unsigned flags, uint64_t* value, uint32_t pc)
+{
+    return gx_register_access(call, address, size, flags, value, pc, 1);
+}
+
 /* ---- GX: the pipe's bytes walked as gx.c's parse walks them ----
  * What the parse does to the state the image holds, and nothing else: no
  * drawing, no interrupt, no capture. gx_command_bytes (gx_state.h) is the
@@ -246,6 +262,9 @@ static size_t gm_parse(CpuState* s, const uint8_t* p, size_t len, int in_list)
         } else if (op == 0x61) {
             uint32_t v = be32_of(p + off + 1);
             g_gm.bp[v >> 24] = v & 0xFFFFFFu;
+            if (v >> 24 == 0x45 && (v & 2u)) g_gm.pe_mmio[5] |= 8u;
+            if (v >> 24 == 0x47 || v >> 24 == 0x48) g_gm.pe_mmio[7] = (uint16_t)v;
+            if (v >> 24 == 0x48) g_gm.pe_mmio[5] |= 4u;
         } else if (!(op == 0x00 || op == 0x48 || (op >= 0x80 && op < 0xC0)))
             g_gm_unknown++;
         off += need;
@@ -579,6 +598,7 @@ static int rec_open(Rec* r, const char* path)
  * memory is already pre[k]. */
 typedef struct {
     RecCallHead head;
+    uint32_t version;
     uint32_t* page;
     uint32_t* flags;
     uint32_t* post_n; /* its post bytes: 0 when the game's call left it as it was */
@@ -646,9 +666,10 @@ static int rec_next(Rec* r, size_t* at, Call* c)
     o += c->head.inputs * sizeof(RecInput);
     c->callees = (const RecCallee*)(r->data + o);
     o += c->head.callees * sizeof(RecCallee);
+    c->version = r->head.version;
     c->pipe = c->left = NULL;
     if (c->head.gx) {
-        const uint32_t img = (uint32_t)sizeof(GxImage);
+        const uint32_t img = r->head.version >= 3 ? (uint32_t)sizeof(GxImage) : (uint32_t)offsetof(GxImage, cp_mmio);
         if (o + (size_t)c->head.pipe_bytes + c->head.pipe_left + c->head.gx_pre_bytes + c->head.gx_post_bytes > *at + c->head.bytes ||
             c->head.pipe_left > GX_PIPE_CAP)
             return 0;
@@ -1165,12 +1186,15 @@ static int held(Hold* h, const Call* c, int original, uint32_t results, uint32_t
                 {"CP", offsetof(GxImage, cp), 0x100}, {"XF", offsetof(GxImage, xf), 0x1100}, {"BP", offsetof(GxImage, bp), 0x100},
                 {"PI FIFO", offsetof(GxImage, pi), 3}, {"display-list recording", offsetof(GxImage, dl_rec), 1},
                 {"bytes waiting", offsetof(GxImage, pipe_len), 1},
+                {"raw CP MMIO", offsetof(GxImage, cp_mmio), 0x40},
+                {"raw PE MMIO", offsetof(GxImage, pe_mmio), 8},
             };
             GxImage now = g_gm;
             unsigned k2, told = 0;
             now.pipe_len = (uint32_t)g_gm_len;
             memset(now.reserved, 0, sizeof now.reserved);
             for (k2 = 0; k2 < sizeof part / sizeof part[0]; k2++) {
+                if (c->version < 3 && part[k2].at >= offsetof(GxImage, cp_mmio)) continue;
                 const uint32_t* x = (const uint32_t*)((const uint8_t*)&now + part[k2].at);
                 const uint32_t* y = (const uint32_t*)((const uint8_t*)&c->gx_post + part[k2].at);
                 size_t r;

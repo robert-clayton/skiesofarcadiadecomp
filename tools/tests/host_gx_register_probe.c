@@ -6,11 +6,12 @@
 static unsigned reads, writes;
 static uint32_t expected;
 static unsigned expected_width;
+static uint32_t expected_pc;
 static uint64_t value;
-uint16_t mmio_read16(CpuState* s, uint32_t a) { (void)s; assert(a==expected && expected_width==2); ++reads; return (uint16_t)value; }
-uint32_t mmio_read32(CpuState* s, uint32_t a) { (void)s; assert(a==expected && expected_width==4); ++reads; return (uint32_t)value; }
-void mmio_write16(CpuState* s, uint32_t a, uint16_t v) { (void)s; assert(a==expected && expected_width==2); ++writes; value=v; }
-void mmio_write32(CpuState* s, uint32_t a, uint32_t v) { (void)s; assert(a==expected && expected_width==4); ++writes; value=v; }
+uint16_t mmio_read16(CpuState* s, uint32_t a) { assert(s->pc==expected_pc); assert(a==expected && expected_width==2); ++reads; return (uint16_t)value; }
+uint32_t mmio_read32(CpuState* s, uint32_t a) { assert(s->pc==expected_pc); assert(a==expected && expected_width==4); ++reads; return (uint32_t)value; }
+void mmio_write16(CpuState* s, uint32_t a, uint16_t v) { assert(s->pc==expected_pc); assert(a==expected && expected_width==2); ++writes; value=v; }
+void mmio_write32(CpuState* s, uint32_t a, uint32_t v) { assert(s->pc==expected_pc); assert(a==expected && expected_width==4); ++writes; value=v; }
 int main(void)
 {
     CpuState cpu={0}; SoaHostCall c={0}; c.runtime=&cpu; uint64_t v=0x123456789abcdef0ull;
@@ -34,6 +35,19 @@ int main(void)
     }
     assert(!soa_host_gx_register(&c,0xcc000002,4,0,&v));assert(!soa_host_gx_register(&c,0xcc00300c,2,0,&v));
     assert(!soa_host_gx_register(&c,0xcc000002,2,4,&v));assert(!soa_host_gx_register(&c,0xcc000002,2,0,NULL));
+    expected=0xcc000002;expected_width=2;cpu.pc=0x8024ca70;
+    expected_pc=cpu.pc;
+    unsigned before=reads+writes;uint64_t old=v;
+    assert(soa_host_gx_register_at(&c,expected,2,SOA_HOST_GX_PROBE,&v,0x8024ca90));
+    assert(cpu.pc==expected_pc&&v==old&&reads+writes==before);
+    const uint32_t bad_pc[]={1,0x7ffffffc,0x81800000,0x8024ca71};
+    for(unsigned k=0;k<sizeof bad_pc/sizeof *bad_pc;++k) {
+        assert(!soa_host_gx_register_at(&c,expected,2,0,&v,bad_pc[k]));
+        assert(cpu.pc==expected_pc&&v==old&&reads+writes==before);
+    }
+    expected_pc=0x8024ca90;assert(soa_host_gx_register_at(&c,expected,2,SOA_HOST_GX_WRITE,&v,expected_pc));
+    assert(cpu.pc==expected_pc&&writes+reads==before+1);
+    assert(soa_host_gx_register(&c,expected,2,SOA_HOST_GX_WRITE,&v));
     c.after=1;assert(!soa_host_gx_register(&c,0xcc000002,2,0,&v));
     printf("prototype: %u valid registers, %u reads, %u writes; all probe/refusal tests passed\n",cases,reads,writes);
 }

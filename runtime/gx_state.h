@@ -30,6 +30,8 @@ typedef struct {
     uint32_t dl_rec;     /* 1: recording a display list */
     uint32_t pipe_len;   /* bytes waiting for the rest of their command */
     uint32_t reserved[3];
+    uint32_t cp_mmio[0x40]; /* raw halfword bank, zero extended; recording version 3 */
+    uint32_t pe_mmio[8];
 } GxImage;
 
 /* gx.c: the image now, and the waiting bytes themselves (*len of them). */

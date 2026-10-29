@@ -992,11 +992,16 @@ SOA_HOST_API int soa_host_back_edge(SoaHostCall* call, uint32_t pc, unsigned fla
  * RAM/pipe/OS side effect. Unknown flags/addresses/sizes leave Value unchanged.
  * Reads and writes use the same mmio_* path as translated loads and stores,
  * preserving the device model, accounting, recording and display-list hooks.
- * This service neither changes gxData nor polls/charges the guest clock. */
+ * This service does not change gxData. The mmio wrappers retain their fixed-clock accounting. */
 #define SOA_HOST_GX_WRITE 1u
 #define SOA_HOST_GX_PROBE 2u
 SOA_HOST_API int soa_host_gx_register(SoaHostCall* call, uint32_t address,
                                      unsigned size, unsigned flags, uint64_t* value);
+/* With an optional translated block PC. Publish the port's GPR/FPR/special
+ * registers first; pc==0 keeps the PC an exact callee left. PROBE/refusal
+ * never changes PC, registers, clocks, the recorder or the device. */
+SOA_HOST_API int soa_host_gx_register_at(SoaHostCall* call, uint32_t address,
+                                        unsigned size, unsigned flags, uint64_t* value, uint32_t pc);
 #ifdef __cplusplus
 }
 #endif

@@ -73,7 +73,7 @@
 #include <stdint.h>
 
 #define REC_MAGIC "SOAREC\0\1"
-#define REC_VERSION 2u /* 2: the GX part (pipe bytes and GX state); 1 still read */
+#define REC_VERSION 3u /* 3: raw CP/PE banks; 2: pipe/GX state; 1 and 2 still read */
 #define REC_CALL_MAGIC 0x31435253u /* "SRC1" */
 
 /* A call's flags. */

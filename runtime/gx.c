@@ -717,6 +717,8 @@ void gx_image(GxImage* out)
     out->dl_rec = (uint32_t)g_dl_rec;
     out->pipe_len = (uint32_t)g_pipe_len;
     memset(out->reserved, 0, sizeof out->reserved);
+    for (unsigned i = 0; i < 0x40; ++i) out->cp_mmio[i] = g_cp_mmio[i];
+    for (unsigned i = 0; i < 8; ++i) out->pe_mmio[i] = g_pe_mmio[i];
 }
 
 const uint8_t* gx_pipe_left(uint32_t* len)

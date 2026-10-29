@@ -88,7 +88,7 @@ static uint8_t* g_pipe_log;
 static size_t g_pipe_n, g_pipe_cap;
 static uint8_t g_wait[GX_PIPE_CAP]; /* the bytes of a command not yet whole, at the call's entry */
 static uint32_t g_nwait;
-static int g_gx_part;
+static int g_gx_part, g_gx_access;
 
 static double now_s(void)
 {
@@ -156,6 +156,10 @@ static void on_fault(int sig, siginfo_t* si, void* uc)
 static void on_note(CpuState* s, int kind, uint32_t ea, uint64_t v)
 {
     if (!g_active || g_dropped) return;
+    if ((REC_KIND(kind) == REC_MMIO_STORE || REC_KIND(kind) == REC_IN_MMIO) &&
+        ((ea >= 0xCC000000u && ea < 0xCC000080u) ||
+         (ea >= 0xCC001000u && ea < 0xCC001010u) ||
+         (ea >= 0xCC00300Cu && ea <= 0xCC003014u))) g_gx_access = 1;
     if (REC_KIND(kind) == REC_MMIO_STORE && (ea & 0xFFFFFC00u) == 0xCC006000u) {
         /* the disc's interface: a read it starts goes through the kernel into memory. Open it all, and the
          * call is not kept */
@@ -217,6 +221,7 @@ static void begin(CpuState* s, Fn* f, uint64_t seen)
     g_irq0 = irq_total();
     g_switch0 = threads_switch_count();
     g_nin = g_ncallee = g_ntouched = 0;
+    g_gx_access = 0;
     g_flags = 0;
     g_dropped = 0;
     g_owner = pthread_self();
@@ -379,7 +384,7 @@ static void end(CpuState* s, Fn* f)
     g_record_pipe = NULL;
     gx_pipe_watch_changed();
     gx_image(&g_gx_post);
-    g_gx_part = g_pipe_n || memcmp(&g_gx_pre, &g_gx_post, sizeof g_gx_post) != 0;
+    g_gx_part = g_gx_access || g_pipe_n || memcmp(&g_gx_pre, &g_gx_post, sizeof g_gx_post) != 0;
     swap_trace(NULL);
     rec_regs_from(&g_head.out, s);
     if (irq_total() != g_irq0) g_flags |= REC_IRQ;
