@@ -232,6 +232,20 @@ void hle_report(void)
     fprintf(stderr, "[hle] %llu MMIO accesses over %u registers; %llu bytes to the gather pipe; "
             "%llu syscalls\n", (unsigned long long)total, distinct,
             (unsigned long long)gx_pipe_bytes(), (unsigned long long)g_syscalls);
+    /* Every device's total, the empty ones too: a device whose layer a host has taken over is held to 0 here
+     * (soa-ue5's U3 exit per device: "zero MMIO accesses to it"). */
+    {
+        static const char* const devices[] = {"CP", "PE", "VI", "PI", "MI", "DSP", "DI", "SI", "EXI", "AI", "GP"};
+        uint64_t by[sizeof devices / sizeof devices[0]] = {0};
+        unsigned d;
+        for (i = 0; i < MMIO_SLOTS; i++)
+            for (d = 0; d < sizeof devices / sizeof devices[0]; d++)
+                if (g_hits[i] && strcmp(peripheral(MMIO_BASE + i * 4), devices[d]) == 0) by[d] += g_hits[i];
+        fprintf(stderr, "[hle] by device:");
+        for (d = 0; d < sizeof devices / sizeof devices[0]; d++)
+            fprintf(stderr, "%s %s %llu", d ? "," : "", devices[d], (unsigned long long)by[d]);
+        fprintf(stderr, "\n");
+    }
     /* The busiest registers say what the guest is waiting on. */
     {
         uint32_t shown;

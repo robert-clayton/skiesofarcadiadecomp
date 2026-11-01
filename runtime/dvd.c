@@ -140,8 +140,26 @@ static void execute(CpuState* s)
     }
 }
 
+/* SOA_DVD=off (main.c): the model is off. Nothing should reach it -- the host answers the whole DVD interface --
+ * so an access is counted, its first few named, and answered with zero (a read) or dropped (a write); the report
+ * gives the count, which a check run holds to 0. */
+static int g_off;
+static uint64_t g_off_reads, g_off_writes;
+void dvd_set_off(void) { g_off = 1; }
+int dvd_is_off(void) { return g_off; }
+static int off_access(CpuState* s, const char* dir, uint32_t ea, unsigned size, uint64_t v)
+{
+    if (g_off_reads + g_off_writes < 8)
+        fprintf(stderr, "[dvd] off: %s %08X/%u = %llx at pc %08X lr %08X\n", dir, ea, size, (unsigned long long)v, s->pc,
+                s->lr);
+    if (dir[0] == 'r') g_off_reads++;
+    else g_off_writes++;
+    return 1;
+}
+
 int di_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out)
 {
+    if (ea >= DI_BASE && ea < DI_BASE + 0x40 && g_off) { *out = 0; return off_access(s, "read", ea, size, 0); }
     di_poll(s); /* the drive progresses whether or not interrupts are on */
     if (ea < DI_BASE || ea >= DI_BASE + 0x28 || size != 4) return 0;
     switch (ea - DI_BASE) {
@@ -163,6 +181,7 @@ int di_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out)
 int di_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v)
 {
     uint32_t w = (uint32_t)v;
+    if (ea >= DI_BASE && ea < DI_BASE + 0x40 && g_off) return off_access(s, "write", ea, size, v);
     if (ea < DI_BASE || ea >= DI_BASE + 0x28 || size != 4) return 0;
     switch (ea - DI_BASE) {
     case 0x00: /* masks are stored; interrupt bits are write-one-to-clear */
@@ -196,6 +215,11 @@ int di_irq_pending(void)
 
 void dvd_report(void)
 {
+    if (g_off) {
+        fprintf(stderr, "[dvd] off: %llu register reads, %llu register writes\n", (unsigned long long)g_off_reads,
+                (unsigned long long)g_off_writes);
+        return;
+    }
     fprintf(stderr, "[dvd] %llu reads, %llu bytes\n", (unsigned long long)g_reads,
             (unsigned long long)g_bytes);
     disc_report();

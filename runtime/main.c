@@ -11,6 +11,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "cpu.h"
 #include "disc.h"
+void dvd_set_off(void); /* dvd.c: SOA_DVD=off */
 #include "sha1.h"
 #include "gxr.h"
 #include "gxv.h"
@@ -1438,8 +1439,24 @@ int main(int argc, char** argv)
          * file table is not the build's. */
         char why[1024];
         int no_disc = getenv("SOA_SELFTEST") || (argc > 2 && strcmp(argv[1], "--replay") == 0);
+        /* SOA_DVD=off (soa-ue5's U3.1, docs/CLOCK.md has the clock's side): the drive's model (dvd.c) and the image
+         * reader are off. A host answers the game's whole DVD interface natively from its own files, so nothing
+         * here reads the disc: the executable, boot.bin and the file table are the build's own (I3), no image is
+         * opened, and any access to the drive's registers is counted and reported (dvd_report) instead of served. */
+        const char* dvd = getenv("SOA_DVD");
+        int dvd_off = dvd && strcmp(dvd, "off") == 0;
         disc_set_stop_hook(hle_report); /* a damaged store stops the run with its report (I5) */
         built_in = disc_builtin(why, sizeof why);
+        if (dvd_off && built_in != 1) {
+            fprintf(stderr, "[boot] SOA_DVD=off needs the build's own system files (I3), and this build has %s\n",
+                    built_in < 0 ? why : "none (--no-embed)");
+            return 1;
+        }
+        if (dvd_off) {
+            dvd_set_off();
+            no_disc = 1;
+            fprintf(stderr, "[disc] off (SOA_DVD=off): no image opened, the drive's model off; the host serves the files\n");
+        }
         if (built_in < 0 || (!(built_in && no_disc) && disc_open(dir, why, sizeof why) != 0) ||
             disc_system(&dol, &dol_size, &boot, &fst, &fst_size, why, sizeof why) != 0) {
             fprintf(stderr, "[boot] %s\n", why);
