@@ -312,6 +312,35 @@ card's four waits): its docs/swap-bindings.md, "Interrupt delivery for
 native answers", has the headless pairs (frame hashes, guest time, PCM, card
 and pads the same as the translation's on HEAD's runtime).
 
+### The OS service (within ABI 24)
+
+A native answer of the SDK's scheduler or clock meets the runtime where the
+translation does: at `mftb` and `mftbu`, which the fixed clock counts as
+reads of the timebase (its stepped skip for a loop that waits on the time),
+the seed pin and the recorder note; and at SelectThread's idle loop
+(`0x80237BA8`), whose hook is where a sleeping thread's interrupts are
+delivered and, with nothing delivered, where guest time goes to the next
+deadline. Neither is a function of the game's an answer could call exactly.
+
+`soa_host_os(call, op, pc, value)` makes them, for the answer `call` is and
+from inside it (the runtime keeps the running answer in `t_answer`, saved and
+restored round nested answers; an event, another answer's call, no call or
+another thread is refused with nothing done): `SOA_HOST_OS_TB_LO` and
+`SOA_HOST_OS_TB_HI` read the timebase's words into `*value` as the
+translation's `mftb` and `mftbu` read them, and `SOA_HOST_OS_IDLE` is one pass
+of the idle hook. `pc` is the block's address the translation keeps there (0
+leaves `s->pc` as it is); the host makes the live registers the
+translation's first, as for an exact call. `SOA_HOST_OS_VERSION` answers 1
+on any thread. Nothing is kept: no state, nothing in a save state.
+
+It is resolved by name, as the back edge is. soa-ue5's stage B uses it for
+its native frame in the scaffold (its docs/stage-b.md, step B2): the
+scheduler's idle pass, so a sleep is a wait of passes of this hook, and
+OSGetTick and OSGetTime. A prototype of the same service also parked and
+resumed SelectThread's thread natively; one guest thread never needs that
+(its operations 4 and 5 are left free). `test_host_os.py` holds `host.c`'s
+refusals.
+
 **The progress counter.** `soa_host_functions(&native)`,
 `soa_host_count_calls(on)` (on also zeroes the counts) and
 `soa_host_call_counts(out, max)` fill one `SoaHostCallCount` per function
@@ -405,6 +434,14 @@ The checks:
   guest. The byte guard is portable C.
 
 ## What changed (and what to rebuild)
+
+- **Within host ABI 24** (2026-11-03): the OS service, `soa_host_os` with
+  `SOA_HOST_OS_VERSION`, `SOA_HOST_OS_TB_LO`, `SOA_HOST_OS_TB_HI` and
+  `SOA_HOST_OS_IDLE`, added after the rest of the header (above, "The OS
+  service"); `host_swap` keeps the running answer in `t_answer`. Nothing
+  before it changed, so the ABI number did not. `test_host_strict.py`'s
+  stand-ins gain the idle hook and the timebase reads (counted, for the new
+  `test_host_os.py`). A runtime-only change: `--link`.
 
 - **Within host ABI 24** (2026-10-25, branch native-irq): interrupt delivery
   for native answers, `soa_host_back_edge` with `SOA_HOST_EDGE_DUE` and

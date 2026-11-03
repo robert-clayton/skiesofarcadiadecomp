@@ -101,6 +101,11 @@ unsigned g_polls, g_quiet_entries;
 uint32_t g_poll_pc;
 void irq_poll(CpuState* s) { g_polls++, g_poll_pc = s->pc; }
 void irq_quiet_entry(CpuState* s) { g_quiet_entries++, g_poll_pc = s->pc; }
+/* soa_host_os's runtime (irq.c, hle.c): counted, with the pc they were given */
+unsigned g_os_idles, g_os_tb;
+void hook_80237BA8(CpuState* s) { g_os_idles++, g_poll_pc = s->pc; }
+uint32_t guest_timebase_lo(CpuState* s) { g_os_tb++, g_poll_pc = s->pc; return 0x11112222u; }
+uint32_t guest_timebase_hi(CpuState* s) { g_os_tb++, g_poll_pc = s->pc; return 0x00000033u; }
 
 unsigned g_gx_reads, g_gx_writes;
 uint64_t g_gx_value;

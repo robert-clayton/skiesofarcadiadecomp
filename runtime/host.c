@@ -782,6 +782,39 @@ int soa_host_back_edge(SoaHostCall* call, uint32_t pc, unsigned flags)
     return 1;
 }
 
+/* ---- The OS service (soa_host_os; docs/SWAP.md "The OS service") ----
+ * t_answer is the answer running now (host_swap's call; NULL in an event or between answers), so a service an
+ * answer asks for is that answer's own. */
+static PLAT_THREAD_LOCAL SoaHostCall* t_answer;
+void hook_80237BA8(CpuState* s);
+uint32_t guest_timebase_lo(CpuState* s);
+uint32_t guest_timebase_hi(CpuState* s);
+
+int soa_host_os(SoaHostCall* call, unsigned op, uint32_t pc, uint64_t* value)
+{
+    CpuState* s;
+    if (op == SOA_HOST_OS_VERSION) {
+        if (value) *value = 1;
+        return 1;
+    }
+    if (!call || !call->runtime || !t_guest || call != t_answer) return 0;
+    s = (CpuState*)call->runtime;
+    switch (op) {
+    case SOA_HOST_OS_TB_LO:
+    case SOA_HOST_OS_TB_HI:
+        if (!value) return 0;
+        if (pc) s->pc = pc;
+        *value = op == SOA_HOST_OS_TB_LO ? guest_timebase_lo(s) : guest_timebase_hi(s);
+        return 1;
+    case SOA_HOST_OS_IDLE:
+        if (pc) s->pc = pc;
+        hook_80237BA8(s);
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static void host_no_original(SoaHostCall* call)
 {
     (void)call; /* an event answers no function of the game's */
@@ -811,9 +844,14 @@ static int host_swap(CpuState* s, uint32_t address, SwapFn fnp, void* user, int 
     c.original = host_original;
     c.game_original = host_call_game_original;
     t_exact = 0;
-    how = fn(user, &c);
-    if (t_exact) s->lr = lr; /* as the function's epilogue leaves it */
-    t_exact = exact;
+    {
+        SoaHostCall* outer = t_answer;
+        t_answer = &c;
+        how = fn(user, &c);
+        t_answer = outer;
+        if (t_exact) s->lr = lr; /* as the function's epilogue leaves it */
+        t_exact = exact;
+    }
     if (after) return SWAP_GAMES;
     if (how == SOA_HOST_ANSWERED) {
         s->gpr[3] = c.gpr[0];

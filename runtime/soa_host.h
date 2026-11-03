@@ -985,6 +985,30 @@ SOA_HOST_API int soa_host_special(SoaHostCall* call, SoaHostSpecial* get, const 
 SOA_HOST_API int soa_host_back_edge(SoaHostCall* call, uint32_t pc, unsigned flags);
 
 
+/* ---- The OS service (within ABI 24; docs/SWAP.md "The OS service") ----
+ *
+ * A function to resolve by name, as soa_host_back_edge: a runtime without it changes nothing, and an answer that
+ * needs it hands its call back before writing anything. Each operation is one the translation of an SDK OS function
+ * makes and that a native answer cannot make itself, done exactly as the translation does it, at the block address
+ * `pc` the translation keeps (0: as it is). Only on the game's thread, from inside the answer `call` is (not an
+ * event, not another answer's call); the host makes the live registers the translation's first, as for an exact
+ * call, and reads them back after.
+ *
+ *   SOA_HOST_OS_VERSION  *value = the service's version (1); any thread, call unused
+ *   SOA_HOST_OS_TB_LO    mftb: *value = the timebase's low word, read as the translation's mftb reads it (the seed
+ *                        pin at OSGetTick's pc, the recording's note, the fixed clock's read)
+ *   SOA_HOST_OS_TB_HI    mftbu: *value = the high word, likewise
+ *   SOA_HOST_OS_IDLE     one pass of SelectThread's idle loop (0x80237BA8): deliver, and under the fixed clock with
+ *                        nothing delivered move guest time to the next deadline, as the translation's hook does
+ *
+ * Returns 1, or 0 when refused. (Operations 4 and 5 are kept free: a prototype used them for SelectThread's park and
+ * resume, which a native scheduler on one thread never needs.) */
+#define SOA_HOST_OS_VERSION 0u
+#define SOA_HOST_OS_TB_LO 1u
+#define SOA_HOST_OS_TB_HI 2u
+#define SOA_HOST_OS_IDLE 3u
+SOA_HOST_API int soa_host_os(SoaHostCall* call, unsigned op, uint32_t pc, uint64_t* value);
+
 /* Graphics-register prototype: this deliberately adds no structure field and is
  * optional by symbol lookup, like soa_host_back_edge. Only on the guest thread,
  * before an answer, and only aligned CP/PE halfwords or PI FIFO words. PROBE
