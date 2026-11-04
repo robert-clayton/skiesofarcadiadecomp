@@ -606,6 +606,7 @@ irq  g_dec_repeats  saved
 irq  g_dec_set  saved
 irq  g_dec_value  saved
 irq  g_delivered  saved
+irq  g_delivery_seq  scratch  # deliver_pending's count; a snapshot is taken between deliveries
 irq  g_delivered_by_number  saved
 irq  g_di_count  saved
 irq  g_dsp_count  saved

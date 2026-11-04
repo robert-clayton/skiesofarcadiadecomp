@@ -914,6 +914,11 @@ int soa_host_schedule_quiet(uint64_t at, uint64_t period, SoaHostEvent fn, void*
     return irq_event_add_quiet(at, period, host_event, user, (void (*)(void))fn);
 }
 
+uint64_t soa_host_delivery(void)
+{
+    return irq_delivery_seq();
+}
+
 int soa_host_mark_due(void)
 {
     if (strict_refuses()) return 0;

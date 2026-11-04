@@ -810,6 +810,13 @@ SOA_HOST_API int soa_host_schedule_quiet(uint64_t at, uint64_t period, SoaHostEv
  * a line it now runs itself (the sound tick's DSP mail). 1, or 0 when refused (strict mode, a host thread). */
 SOA_HOST_API int soa_host_mark_due(void);
 
+/* Within ABI 24, by name. A quiet event (soa_host_schedule_quiet) added inside a delivery -- by an event, or by an
+ * answer a handler called -- is not run in that delivery but from the next, as the runtime's own decrementer, armed
+ * again by its handler, fires at the next delivery and not in the one that ran it (its step is once a delivery,
+ * before the events). soa_host_delivery is the delivery's number (counting from 1; 0 before the first), for a host
+ * that keeps its own queue to the same rule. */
+SOA_HOST_API uint64_t soa_host_delivery(void);
+
 /* ---- Strict mode: a run that repeats under a host (within ABI 24; docs/CLOCK.md) ----
  *
  * The fixed clock makes the guest repeat; what a host does from its own

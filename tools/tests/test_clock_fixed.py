@@ -123,6 +123,13 @@ static void event(CpuState* s, void* user, void (*extra)(void), uint64_t due, ui
     s->gpr[3] = 0xBEEF;
     s->gpr[31] = 0xBEEF;
 }
+/* an event whose run adds a quiet event due at once: it must wait for the next delivery */
+static void chain(CpuState* s, void* user, void (*extra)(void), uint64_t due, uint64_t now)
+{
+    (void)s, (void)user, (void)extra;
+    printf("chain due %llu at %llu\n", (unsigned long long)due, (unsigned long long)now);
+    irq_event_add_quiet(now, 0, event, (void*)"chained", NULL);
+}
 static void wr32(CpuState* s, uint32_t a, uint32_t v)
 {
     uint8_t* p = s->mem + (a & MEM_MASK);
@@ -250,6 +257,11 @@ int main(void)
             /* a deadline that is no news (irq_event_add_quiet): marks nothing due */
             ids[n] = (unsigned long long)irq_event_add_quiet(a, b, event, (void*)(b ? "quiet-tick" : "quiet-once"), NULL);
             printf("id %llu\n", ids[n]), n++;
+        } else if (!strcmp(cmd, "chain") && scanf("%llu", &a) == 1) {
+            ids[n] = (unsigned long long)irq_event_add(a, 0, chain, NULL, NULL);
+            printf("id %llu\n", ids[n]), n++;
+        } else if (!strcmp(cmd, "mark")) {
+            printf("mark\n");
         } else if (!strcmp(cmd, "cancel") && scanf("%llu", &a) == 1) {
             printf("cancel %d\n", irq_event_cancel((int)a));
         } else if (!strcmp(cmd, "raise") && scanf("%llu", &a) == 1) {
@@ -405,6 +417,15 @@ def test_quiet_a_deadline_that_is_no_news_is_delivered_at_the_next_wait(driver):
     assert out.count("event quiet-once") == 1, out
     out, _ = drive(driver, "work 1\nquiet 5000 0\nidle 3\nregs\n", {"QUIET": "4194304"})
     assert "event quiet-once due 5000 at 5000" in out, out
+
+
+@gnu
+def test_quiet_an_event_added_inside_a_delivery_waits_for_the_next(driver):
+    # as the decrementer armed again by its handler fires at the next delivery: a quiet event the run of another adds,
+    # due at once, is not run in the same delivery (the idle loop's next pass runs it, on the same tick)
+    out, _ = drive(driver, "work 1\nchain 5000\nidle 2\nmark\nidle 1\nregs\n", {"QUIET": "4194304"})
+    lines = [x for x in out.splitlines() if x.startswith(("chain", "event", "mark"))]
+    assert lines == ["chain due 5000 at 5000", "mark", "event chained due 5000 at 5000 ee 0"], out
 
 
 @gnu

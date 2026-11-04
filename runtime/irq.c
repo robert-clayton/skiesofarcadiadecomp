@@ -342,12 +342,17 @@ typedef struct {
     IrqEventFn fn;
     void* user;
     void (*extra)(void);
+    uint64_t seq; /* a quiet event added inside a delivery: that delivery's number (it waits for the next); else 0 */
 } IrqEvent;
 static IrqEvent g_events[IRQ_EVENTS];
 static PlatLock g_event_lock;
 static int g_event_next_id;
 static volatile int g_nevents; /* pending, so a delivery with none costs one test */
 static volatile uint32_t g_lines; /* raised and not yet delivered, a bit a number */
+/* deliver_pending's count, from 1. A quiet event added inside a delivery (by a handler or an event) is not run in it:
+ * the runtime's own decrementer, armed by its handler, fires at the next delivery, since its step comes once a
+ * delivery and before the events (deliver_pending). Not in a snapshot: one is taken between deliveries. */
+static uint64_t g_delivery_seq;
 static uint64_t g_event_runs, g_event_late_max, g_event_late_sum, g_line_runs, g_line_unhandled;
 
 static int event_add(uint64_t due, uint64_t period, IrqEventFn fn, void* user, void (*extra)(void), int mark)
@@ -365,6 +370,7 @@ static int event_add(uint64_t due, uint64_t period, IrqEventFn fn, void* user, v
             g_events[k].fn = fn;
             g_events[k].user = user;
             g_events[k].extra = extra;
+            g_events[k].seq = !mark && g_in_handler ? g_delivery_seq : 0;
             g_nevents++;
             break;
         }
@@ -409,6 +415,11 @@ int irq_raise(unsigned number)
     return 1;
 }
 
+uint64_t irq_delivery_seq(void)
+{
+    return g_delivery_seq;
+}
+
 uint64_t irq_guest_ticks(CpuState* s)
 {
     return tb_now(s);
@@ -450,7 +461,9 @@ static void run_events(CpuState* s, uint64_t now)
         IrqEvent e;
         plat_lock(&g_event_lock);
         for (k = 0; k < IRQ_EVENTS; k++)
-            if (g_events[k].id && g_events[k].due <= now && (best < 0 || g_events[k].due < g_events[best].due)) best = k;
+            if (g_events[k].id && g_events[k].due <= now && g_events[k].seq != g_delivery_seq &&
+                (best < 0 || g_events[k].due < g_events[best].due))
+                best = k;
         if (best >= 0) {
             e = g_events[best];
             if (e.period) g_events[best].due += e.period;
@@ -495,6 +508,7 @@ static void deliver_pending(CpuState* s)
     if (g_in_handler) return; /* a handler that idles must not nest deliveries */
     if (g_record_armed && g_record_polls++ < 4096u) return;
     now = tb_now(s);
+    g_delivery_seq++;
     if (g_pace < 0) {
         const char* env = getenv("SOA_PACE");
         g_pace = env && atoi(env) ? 1 : 0;
