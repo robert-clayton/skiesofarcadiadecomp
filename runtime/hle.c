@@ -597,9 +597,33 @@ uint32_t guest_timebase_lo(CpuState* s)
     }
     return v;
 }
+/* SOA_DATE_HIGH=n (soa-ue5's U3.2, its decision B-D6): the save's date. The guest's timebase starts at 0, which is
+ * 2000-01-01 00:00 on the console's calendar, so every save of a run is dated then plus its guest time (the game stamps
+ * a save with OSTicksToCalendarTime(OSGetTime()), 0x800073C0; it never reads the real-time clock). With n, the high
+ * word of the OSGetTime that stamp makes (pc 0x80238504, returning to 0x800073D8; OSGetTime answered natively reads
+ * here with the same pc and lr) is n more: 2^32 ticks (106.05 s) a unit since 2000-01-01, the real date a host in play
+ * mode gives (and logs, so the session replays). Every other read of the timebase is as without it -- the seeds, the
+ * waits, the alarms, the devices -- so the date enters the game's state only at the stamp. Not in a snapshot: the host
+ * holds a resume to it. Unset or 0: as before. */
+static uint32_t date_high(void)
+{
+    static int set;
+    static uint32_t high;
+    if (!set) {
+        const char* v = getenv("SOA_DATE_HIGH");
+        set = 1;
+        high = v && *v ? (uint32_t)strtoul(v, NULL, 0) : 0u;
+        if (high)
+            fprintf(stderr, "[clock] SOA_DATE_HIGH=%u: the save's stamp reads the calendar %.0f s past 2000-01-01 plus guest time\n",
+                    high, (double)high * 4294967296.0 / (double)TB_HZ);
+    }
+    return high;
+}
+
 uint32_t guest_timebase_hi(CpuState* s)
 {
     uint32_t v = (uint32_t)(timebase() >> 32);
+    if (s->pc == 0x80238504u && s->lr == 0x800073D8u) v += date_high(); /* the save's stamp (SOA_DATE_HIGH, above) */
     RECORD_NOTE(s, 3, 0, v);
     return v;
 }
