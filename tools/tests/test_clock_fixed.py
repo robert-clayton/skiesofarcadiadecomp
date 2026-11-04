@@ -246,6 +246,10 @@ int main(void)
         } else if (!strcmp(cmd, "every") && scanf("%llu %llu", &a, &b) == 2) {
             ids[n] = (unsigned long long)irq_event_add(a, b, event, (void*)(b ? "tick" : "once"), NULL);
             printf("id %llu\n", ids[n]), n++;
+        } else if (!strcmp(cmd, "quiet") && scanf("%llu %llu", &a, &b) == 2) {
+            /* a deadline that is no news (irq_event_add_quiet): marks nothing due */
+            ids[n] = (unsigned long long)irq_event_add_quiet(a, b, event, (void*)(b ? "quiet-tick" : "quiet-once"), NULL);
+            printf("id %llu\n", ids[n]), n++;
         } else if (!strcmp(cmd, "cancel") && scanf("%llu", &a) == 1) {
             printf("cancel %d\n", irq_event_cancel((int)a));
         } else if (!strcmp(cmd, "raise") && scanf("%llu", &a) == 1) {
@@ -386,6 +390,21 @@ def test_quiet_an_event_is_delivered_at_the_first_back_edge_after_it_comes_due(d
     out, _ = drive(driver, "every 20 0\nread\nread\nwork 5\nread\nwork 1\nregs\n", {"QUIET": "4194304"})
     assert "event once due 20 at 24 ee 0" in out, out
     assert out.count("event once") == 1
+
+
+@gnu
+def test_quiet_a_deadline_that_is_no_news_is_delivered_at_the_next_wait(driver):
+    # irq_event_add_quiet (soa_host_schedule_quiet): an event due at once that marks nothing due is not delivered at
+    # the next back edge, as one irq_event_add adds is, but at the next wait (the idle loop here), still on its tick;
+    # one due later is a deadline the idle loop goes to, as any event's
+    out, _ = drive(driver, "work 1\nevery 0 0\nwork 3\nregs\n", {"QUIET": "4194304"})
+    assert out.index("event once due 0 at 0") < out.index("r3 "), out
+    out, _ = drive(driver, "work 1\nquiet 0 0\nwork 3\nregs\nidle 1\nregs\n", {"QUIET": "4194304"})
+    first = out.index("r3 ")
+    assert out.index("event quiet-once due 0 at 0") > first, out
+    assert out.count("event quiet-once") == 1, out
+    out, _ = drive(driver, "work 1\nquiet 5000 0\nidle 3\nregs\n", {"QUIET": "4194304"})
+    assert "event quiet-once due 5000 at 5000" in out, out
 
 
 @gnu

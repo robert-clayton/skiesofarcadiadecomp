@@ -35,6 +35,8 @@ typedef void (*IrqEventFn)(struct CpuState* s, void* user, void (*extra)(void), 
  * function of the caller's carried along (host.c's: the host's own). Returns the
  * event's id, or 0 when the table is full or fn is NULL. */
 int irq_event_add(uint64_t due, uint64_t period, IrqEventFn fn, void* user, void (*extra)(void));
+/* The same, but not marked due for the quiet rule (a native retrace's or decrementer's deadline: irq.c). */
+int irq_event_add_quiet(uint64_t due, uint64_t period, IrqEventFn fn, void* user, void (*extra)(void));
 /* Cancel an event; 1 when it was pending. From inside its own run it stops
  * the next. */
 int irq_event_cancel(int id);

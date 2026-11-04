@@ -908,6 +908,12 @@ int soa_host_schedule(uint64_t at, uint64_t period, SoaHostEvent fn, void* user)
     return irq_event_add(at, period, host_event, user, (void (*)(void))fn);
 }
 
+int soa_host_schedule_quiet(uint64_t at, uint64_t period, SoaHostEvent fn, void* user)
+{
+    if (!fn || strict_refuses()) return 0;
+    return irq_event_add_quiet(at, period, host_event, user, (void (*)(void))fn);
+}
+
 int soa_host_cancel(int id)
 {
     return strict_refuses() ? 0 : irq_event_cancel(id);

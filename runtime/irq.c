@@ -350,7 +350,7 @@ static volatile int g_nevents; /* pending, so a delivery with none costs one tes
 static volatile uint32_t g_lines; /* raised and not yet delivered, a bit a number */
 static uint64_t g_event_runs, g_event_late_max, g_event_late_sum, g_line_runs, g_line_unhandled;
 
-int irq_event_add(uint64_t due, uint64_t period, IrqEventFn fn, void* user, void (*extra)(void))
+static int event_add(uint64_t due, uint64_t period, IrqEventFn fn, void* user, void (*extra)(void), int mark)
 {
     int k, id = 0;
     if (!fn) return 0;
@@ -369,8 +369,21 @@ int irq_event_add(uint64_t due, uint64_t period, IrqEventFn fn, void* user, void
             break;
         }
     plat_unlock(&g_event_lock);
-    if (id) clock_fixed_mark(); /* the quiet rule's next delivery point looks */
+    if (id && mark) clock_fixed_mark(); /* the quiet rule's next delivery point looks */
     return id;
+}
+
+int irq_event_add(uint64_t due, uint64_t period, IrqEventFn fn, void* user, void (*extra)(void))
+{
+    return event_add(due, period, fn, user, extra, 1);
+}
+
+/* A deadline that is no news: what the retrace and the decrementer are here (g_vi_last, dec_write mark nothing), for a
+ * host that keeps them itself. Due, it is delivered as any event; until then nothing is marked due, so the quiet rule's
+ * next delivery point does not look on its account. */
+int irq_event_add_quiet(uint64_t due, uint64_t period, IrqEventFn fn, void* user, void (*extra)(void))
+{
+    return event_add(due, period, fn, user, extra, 0);
 }
 
 int irq_event_cancel(int id)

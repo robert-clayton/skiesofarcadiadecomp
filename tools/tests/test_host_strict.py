@@ -62,6 +62,7 @@ const uint8_t* gxr_screen(int* w, int* h) { *w = *h = 0; return NULL; }
 void gxr_set_draw_export(const void* e) { (void)e; }
 uint64_t hle_guest_ticks(void) { return 0; }
 int irq_event_add(uint64_t due, uint64_t period, void* fn, void* user, void* extra) { (void)due, (void)period, (void)fn, (void)user, (void)extra; return 1; }
+int irq_event_add_quiet(uint64_t due, uint64_t period, void* fn, void* user, void* extra) { (void)due, (void)period, (void)fn, (void)user, (void)extra; return 1; }
 int irq_event_cancel(int id) { (void)id; return 1; }
 int irq_raise(unsigned n) { (void)n; return 1; }
 int irq_charge(uint64_t ticks) { (void)ticks; return 0; }

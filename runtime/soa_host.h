@@ -795,6 +795,14 @@ SOA_HOST_API int soa_host_raise(unsigned number);
  * another thread, or for 0 ticks. */
 SOA_HOST_API int soa_host_charge(uint64_t ticks);
 
+/* Within ABI 24, a function to resolve by name (a runtime before it has none). soa_host_schedule_quiet is
+ * soa_host_schedule for a deadline that is no news: under the fixed clock's quiet rule (docs/CLOCK.md) an event added
+ * marks something due, so the next delivery point with interrupts enabled delivers -- and a back edge that delivers
+ * forgets the loop states the wait finder keeps. The runtime's own retrace and decrementer mark nothing until they are
+ * due. A host that keeps those itself (stage B's native field and alarm list) schedules their events with this one, so
+ * every delivery point and every wait found is as it is with the runtime's. Due, the event runs as any other. */
+SOA_HOST_API int soa_host_schedule_quiet(uint64_t at, uint64_t period, SoaHostEvent fn, void* user);
+
 /* ---- Strict mode: a run that repeats under a host (within ABI 24; docs/CLOCK.md) ----
  *
  * The fixed clock makes the guest repeat; what a host does from its own

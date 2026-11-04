@@ -341,6 +341,20 @@ resumed SelectThread's thread natively; one guest thread never needs that
 (its operations 4 and 5 are left free). `test_host_os.py` holds `host.c`'s
 refusals.
 
+**A deadline that is no news.** Under the fixed clock's quiet rule an event
+that `soa_host_schedule` adds marks something due (`clock_fixed_mark`): the
+next delivery point with interrupts enabled delivers, and a back edge that
+delivers forgets the loop states the wait finder keeps (docs/CLOCK.md). The
+runtime's own retrace (`g_vi_last`) and decrementer (`dec_write`) mark
+nothing until they are due. `soa_host_schedule_quiet(at, period, fn, user)`
+is `soa_host_schedule` for a host that keeps those itself (soa-ue5's stage B,
+step B3: its native field and alarm list, and the memory card's ends, due at
+once but delivered at the next wait as the translated card's come): the
+event is a deadline as any other, and due it runs as any other, but adding
+it marks nothing (`irq_event_add_quiet`). Resolved by name.
+`test_clock_fixed.py` holds it to delivering at the next wait, not the next
+back edge.
+
 **The progress counter.** `soa_host_functions(&native)`,
 `soa_host_count_calls(on)` (on also zeroes the counts) and
 `soa_host_call_counts(out, max)` fill one `SoaHostCallCount` per function
@@ -434,6 +448,13 @@ The checks:
   guest. The byte guard is portable C.
 
 ## What changed (and what to rebuild)
+
+- **Within host ABI 24** (2026-11-03, branch stageb3): `soa_host_schedule_quiet`,
+  an event added without marking anything due for the quiet rule (above, "A
+  deadline that is no news"); `irq.c`'s `irq_event_add_quiet` beside
+  `irq_event_add`. Nothing before it changed, so the ABI number did not.
+  `test_host_strict.py`'s stand-ins gain `irq_event_add_quiet`;
+  `test_clock_fixed.py` a command and a test. A runtime-only change: `--link`.
 
 - **Within host ABI 24** (2026-11-03): the OS service, `soa_host_os` with
   `SOA_HOST_OS_VERSION`, `SOA_HOST_OS_TB_LO`, `SOA_HOST_OS_TB_HI` and
