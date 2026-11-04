@@ -36,6 +36,7 @@
 #endif
 
 uint64_t irq_retrace_count(void);
+int exi_is_off(void); /* SOA_EXI=off, below */
 
 #define EXI_BASE 0xCC006800u
 #define CSR_EXIINTMSK 0x0001u
@@ -171,7 +172,7 @@ static void card_dirty(uint32_t off, uint32_t len)
  * flushes; the file stays open so that costs a seek, not a 512 KB rewrite. */
 static void card_flush(void)
 {
-    if (!g_card || !g_card_dirty) return;
+    if (!g_card || !g_card_dirty || exi_is_off()) return;
     if (!g_card_file) {
         make_parents(g_card_path);
         g_card_file = fopen(g_card_path, "r+b");
@@ -533,10 +534,36 @@ static void transfer(CpuState* s, unsigned ch, Channel* c)
     if (card_verbose()) exi_log(ch, c, rw, pos, in0, (c->cr & 2) ? addr0 : g_card_addr);
 }
 
+/* SOA_EXI=off (soa-ue5's U3.2): the external interface's model is off. A host answers what the game still asks of
+ * it -- the memory card's API, SRAM and the clock, the IPL's ROM -- natively, so nothing should reach the registers:
+ * an access is counted, its first few named, and answered with zero (a read) or dropped (a write); the card's image
+ * is never opened, read or written, and SRAM is never made. The report gives the count, which a check run holds to
+ * 0 (and the [hle] report's EXI line with it). */
+static int g_off = -1;
+static uint64_t g_off_reads, g_off_writes;
+int exi_is_off(void)
+{
+    if (g_off < 0) {
+        const char* v = getenv("SOA_EXI");
+        g_off = v && strcmp(v, "off") == 0;
+        if (g_off) fprintf(stderr, "[exi] off (SOA_EXI=off): no card image opened, no SRAM; the host answers the card, SRAM, the clock and the ROM\n");
+    }
+    return g_off;
+}
+static int off_access(CpuState* s, const char* dir, uint32_t ea, unsigned size, uint64_t v)
+{
+    if (g_off_reads + g_off_writes < 8)
+        fprintf(stderr, "[exi] off: %s %08X/%u = %llx at pc %08X lr %08X\n", dir, ea, size, (unsigned long long)v, s->pc,
+                s->lr);
+    if (dir[0] == 'r') g_off_reads++;
+    else g_off_writes++;
+    return 1;
+}
+
 int exi_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out)
 {
     unsigned ch, reg;
-    (void)s;
+    if (ea >= EXI_BASE && ea < EXI_BASE + 0x40 && exi_is_off()) { *out = 0; return off_access(s, "read", ea, size, 0); }
     if (ea < EXI_BASE || ea >= EXI_BASE + 0x40 || size != 4) return 0;
     ch = (ea - EXI_BASE) / 0x14;
     reg = (ea - EXI_BASE) % 0x14;
@@ -556,6 +583,7 @@ int exi_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v)
     unsigned ch, reg;
     uint32_t w = (uint32_t)v;
     Channel* c;
+    if (ea >= EXI_BASE && ea < EXI_BASE + 0x40 && exi_is_off()) return off_access(s, "write", ea, size, v);
     if (ea < EXI_BASE || ea >= EXI_BASE + 0x40 || size != 4) return 0;
     ch = (ea - EXI_BASE) / 0x14;
     reg = (ea - EXI_BASE) % 0x14;
@@ -638,6 +666,11 @@ void exi_card_counters(uint64_t* reads, uint64_t* writes, uint64_t* ints)
 
 void exi_report(void)
 {
+    if (exi_is_off()) {
+        fprintf(stderr, "[exi] off: %llu register reads, %llu register writes\n", (unsigned long long)g_off_reads,
+                (unsigned long long)g_off_writes);
+        return;
+    }
     exi_card_save();
     fprintf(stderr, "[exi] %llu immediate, %llu DMA transfers; card %llu bytes read, %llu written, %llu interrupts\n",
             (unsigned long long)g_imm, (unsigned long long)g_dma, (unsigned long long)g_card_reads,
