@@ -241,6 +241,9 @@ dvd  g_imm  saved
 dvd  g_len  saved
 dvd  g_mar  saved
 dvd  g_reads  saved
+dvd  g_off  config  # SOA_DVD=off (main.c sets it at the start of every run)
+dvd  g_off_reads  report  # accesses to the drive's registers with it off
+dvd  g_off_writes  report
 
 elfcheck  ok  config
 
@@ -267,6 +270,9 @@ exi  g_sram  saved
 exi  g_sram_init  saved
 exi  v  config  # SOA_CARD_VERBOSE
 exi  warned  report
+exi  g_off  config  # SOA_EXI=off
+exi  g_off_reads  report  # accesses to the EXI registers with it off
+exi  g_off_writes  report
 
 game  soa_game_table  config  # the game library, loaded at the start
 
@@ -537,6 +543,9 @@ hle  reported  report
 hle  shown  report
 hle  strict  config  # SOA_STRICT
 hle  v  config  # SOA_MMIO
+hle  devices  report  # the names the [hle] report's per-device line prints
+hle  high  config  # SOA_DATE_HIGH, read once: the host holds a resume to the same
+hle  set  config  # (SOA_DATE_HIGH read)
 
 hle_stdio  g_enabled  config
 
@@ -899,6 +908,10 @@ si  latch_frame  config  # a recording's
 si  latch_valid  config
 si  latched  config
 si  said  report
+si  g_play_catch_up  scratch  # set only inside si_pad_sample
+si  g_si_off  config  # SOA_SI=off
+si  g_si_off_reads  report  # accesses to the SI registers with it off
+si  g_si_off_writes  report
 
 snapshot  OPS  config
 snapshot  SECTIONS  config
