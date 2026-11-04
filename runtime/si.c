@@ -730,10 +730,15 @@ static void pad_replay_end(unsigned frame)
  * recording. The frame counter only goes forward, so the lookup is a cursor
  * rather than a search, and a frame the recording says nothing about keeps
  * what the last line set -- that is what makes writing only changes safe. */
+static int g_play_catch_up; /* si_pad_sample: every entry due by the frame, not one a read */
 static int pad_replay(PadState* st, unsigned frame)
 {
     if (!g_play_tried) pad_replay_load();
     if (!g_play_n) return 0;
+    while (g_play_catch_up && g_play_i + 2 < g_play_n && g_play[g_play_i + 2].frame <= frame) {
+        g_play_i++; /* (one entry a frame in a recording: this runs only for hand-made files) */
+        g_play_late++;
+    }
     /* One entry per read, not every entry that is due. A frame the guest
      * never polled would let a while-loop step over that frame's entry
      * without anyone reading it; stepping once hands it over a read late
@@ -946,6 +951,46 @@ static void pad_report(uint8_t out[8])
     out[6] = st.trig[0]; out[7] = st.trig[1];       /* triggers */
 }
 
+/* The frame's sample, for a host that answers the game's pad update natively and so reads the controller once a
+ * game frame, not through the serial interface (soa-ue5's U3.4): the same 8-byte report pad_report gives (the
+ * recording replayed, else the window's input and SOA_PAD's script, all keyed by gx_frame_count; recorded with
+ * SOA_PAD_RECORD), with a recording's cursor caught up to the frame. A recording holds at most one state a frame,
+ * which the serial path, reading the port at least twice a frame, caught up to as well. 1 when port 1 has a
+ * controller (always, as g_present has it). */
+int si_pad_sample(uint8_t out[8])
+{
+    g_play_catch_up = 1;
+    pad_report(out);
+    g_play_catch_up = 0;
+    return g_present[0] ? 1 : 0;
+}
+
+/* ---- SOA_SI=off -------------------------------------------------------------
+ * soa-ue5's U3.4: the serial interface's model is off. A host answers the pad update and the controller's SDK
+ * natively and reads the controller through si_pad_sample, so nothing should reach the registers: an access is
+ * counted, its first few named, and answered with zero (a read) or dropped (a write); a field's poll does nothing
+ * and the interrupt is never pending. The script, the recording and the window stay: they are the host's input. */
+static int g_si_off = -1;
+static uint64_t g_si_off_reads, g_si_off_writes;
+int si_is_off(void)
+{
+    if (g_si_off < 0) {
+        const char* v = getenv("SOA_SI");
+        g_si_off = v && strcmp(v, "off") == 0;
+        if (g_si_off) fprintf(stderr, "[si] off (SOA_SI=off): the serial interface's model off; the host reads the pad\n");
+    }
+    return g_si_off;
+}
+static int si_off_access(CpuState* s, const char* dir, uint32_t ea, unsigned size, uint64_t v)
+{
+    if (g_si_off_reads + g_si_off_writes < 8)
+        fprintf(stderr, "[si] off: %s %08X/%u = %llx at pc %08X lr %08X\n", dir, ea, size, (unsigned long long)v, s->pc,
+                s->lr);
+    if (dir[0] == 'r') g_si_off_reads++;
+    else g_si_off_writes++;
+    return 1;
+}
+
 /* ---- transfers -------------------------------------------------------- */
 
 static void run_command(unsigned chan)
@@ -984,6 +1029,7 @@ static void run_command(unsigned chan)
 void si_poll(void)
 {
     unsigned chan;
+    if (si_is_off()) return;
     for (chan = 0; chan < 4; chan++) {
         uint8_t rep[8];
         if (!((g_poll >> (7 - chan)) & 1)) continue;
@@ -999,13 +1045,14 @@ void si_poll(void)
 
 int si_irq_pending(void)
 {
+    if (si_is_off()) return 0;
     return ((g_comcsr & COMCSR_TCINT) && (g_comcsr & COMCSR_TCINTMSK)) ||
            ((g_comcsr & COMCSR_RDSTINT) && (g_comcsr & COMCSR_RDSTINTMSK));
 }
 
 int si_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out)
 {
-    (void)s;
+    if (ea >= SI_BASE && ea < SI_BASE + 0x100 && si_is_off()) { *out = 0; return si_off_access(s, "read", ea, size, 0); }
     if (ea < SI_BASE || ea >= SI_BASE + 0x100 || size != 4) return 0;
     if (ea >= SI_BASE + 0x80) {
         unsigned off = ea - SI_BASE - 0x80;
@@ -1083,7 +1130,7 @@ void si_motor_stop(void)
 int si_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v)
 {
     uint32_t w = (uint32_t)v;
-    (void)s;
+    if (ea >= SI_BASE && ea < SI_BASE + 0x100 && si_is_off()) return si_off_access(s, "write", ea, size, v);
     if (ea < SI_BASE || ea >= SI_BASE + 0x100 || size != 4) return 0;
     if (ea >= SI_BASE + 0x80) {
         unsigned off = ea - SI_BASE - 0x80;
@@ -1122,7 +1169,10 @@ int si_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v)
 void si_report(void)
 {
     unsigned frames = g_pad_seen ? g_pad_frame + 1 : 0;
-    fprintf(stderr, "[si] %llu direct transfers, %llu polls, %llu input reads; poll reg %08X\n",
+    if (si_is_off())
+        fprintf(stderr, "[si] off: %llu register reads, %llu register writes\n", (unsigned long long)g_si_off_reads,
+                (unsigned long long)g_si_off_writes);
+    else fprintf(stderr, "[si] %llu direct transfers, %llu polls, %llu input reads; poll reg %08X\n",
             (unsigned long long)g_transfers, (unsigned long long)g_polls, (unsigned long long)g_reads, g_poll);
     if (g_motor_asked)
         fprintf(stderr, "[si] rumble: the game asked %llu time(s), the motor turned %llu\n", g_motor_asked,
