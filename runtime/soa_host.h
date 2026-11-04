@@ -803,6 +803,13 @@ SOA_HOST_API int soa_host_charge(uint64_t ticks);
  * every delivery point and every wait found is as it is with the runtime's. Due, the event runs as any other. */
 SOA_HOST_API int soa_host_schedule_quiet(uint64_t at, uint64_t period, SoaHostEvent fn, void* user);
 
+/* Within ABI 24, by name: soa_host_mark_due marks something due for the quiet rule, as a write to a device's register
+ * or a raised line does (and nothing else): the next delivery point with interrupts enabled delivers what is due, and
+ * a back edge there forgets the wait finder's loop states. For an event that does a handler's work natively where
+ * the translation's handler wrote a device register (stage B's native field: the retrace's status cleared) or raised
+ * a line it now runs itself (the sound tick's DSP mail). 1, or 0 when refused (strict mode, a host thread). */
+SOA_HOST_API int soa_host_mark_due(void);
+
 /* ---- Strict mode: a run that repeats under a host (within ABI 24; docs/CLOCK.md) ----
  *
  * The fixed clock makes the guest repeat; what a host does from its own

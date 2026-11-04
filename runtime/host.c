@@ -914,6 +914,13 @@ int soa_host_schedule_quiet(uint64_t at, uint64_t period, SoaHostEvent fn, void*
     return irq_event_add_quiet(at, period, host_event, user, (void (*)(void))fn);
 }
 
+int soa_host_mark_due(void)
+{
+    if (strict_refuses()) return 0;
+    clock_fixed_mark(); /* as a device write or a raised line marks it (hle.c's mmio_write, irq.c's irq_raise) */
+    return 1;
+}
+
 int soa_host_cancel(int id)
 {
     return strict_refuses() ? 0 : irq_event_cancel(id);

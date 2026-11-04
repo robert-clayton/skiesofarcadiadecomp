@@ -26,7 +26,7 @@ from test_host_strict import PROFILE, RUNTIME, STUBS, gnu  # noqa: E402
 
 GUEST = r"""
 #include "soa_host.h"
-extern unsigned g_os_idles, g_os_tb;
+extern unsigned g_os_idles, g_os_tb, g_marks;
 extern uint32_t g_poll_pc;
 void host_frame_end(CpuState* s, unsigned frame);
 
@@ -63,6 +63,11 @@ int soa_main(int argc, char** argv)
     op(&s, NULL, "no call", SOA_HOST_OS_IDLE, 0, 0);
     op(&s, &c, "no value", SOA_HOST_OS_TB_LO, 0, 0);
     op(&s, &c, "unknown", 4u, 0, 1);
+    {
+        unsigned marks = g_marks;
+        int r = soa_host_mark_due();
+        printf("mark due: %d marks %u\n", r, g_marks - marks);
+    }
     fflush(stdout);
     exit(0);
 }
@@ -133,4 +138,5 @@ def test_the_os_service_is_only_for_the_answer_that_asks(built):
         "no call: 0 idles 0 tb 0 value 7 pc 00000000",
         "no value: 0 idles 0 tb 0 value 7 pc 00000000",
         "unknown: 0 idles 0 tb 0 value 7 pc 00000000",
+        "mark due: 1 marks 1",  # soa_host_mark_due: the quiet rule's mark, as a device write's
     ]
