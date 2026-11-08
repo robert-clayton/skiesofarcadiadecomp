@@ -52,6 +52,7 @@ int gx_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v);
 unsigned gx_pe_irq_pending(void);
 void gx_report(void);
 uint64_t gx_pipe_bytes(void); /* the bytes sent down the gather pipe so far */
+uint64_t gx_drawn_bytes(void); /* the same, or with SOA_GX=off the bytes the host drew: what the wait finder takes for drawing */
 #define IRQ_PI_PE_TOKEN 18
 #define IRQ_PI_PE_FINISH 19
 int aram_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out);
@@ -786,7 +787,7 @@ static int deliver_and_reschedule(CpuState* s)
 
 typedef struct {
     uint32_t pc, seen; /* seen: 0 empty, 1 noted, 2 noted twice the same, with the floats */
-    uint64_t stores;   /* gx_pipe_bytes() when noted: a loop that drew something is not a wait */
+    uint64_t stores;   /* gx_drawn_bytes() when noted (the pipe's bytes, or with SOA_GX=off the host's): a loop that drew something is not a wait */
     uint64_t mark;     /* the table's running sum just after this back edge last came by */
     uint64_t pass;     /* the sum over the other back edges of the last pass (seen == 2) */
     uint64_t answers;  /* swap.c's count of native answers when this back edge last came by */
@@ -1068,7 +1069,7 @@ static int quiet_match(QuietSlot* q, const CpuState* s, uint64_t* sum, int fresh
 {
     uint64_t f = quiet_state_hash(s), before = *sum, answers = g_answers ? *g_answers : 0;
     *sum += f;
-    if (!fresh && q->seen && q->pc == s->pc && q->stores == gx_pipe_bytes() && q->cr == s->cr && q->lr == s->lr &&
+    if (!fresh && q->seen && q->pc == s->pc && q->stores == gx_drawn_bytes() && q->cr == s->cr && q->lr == s->lr &&
         q->ctr == s->ctr && q->xer == s->xer && !memcmp(q->gpr, s->gpr, sizeof q->gpr)) {
         uint64_t pass = before - q->mark;
         int changed = 0;
@@ -1091,7 +1092,7 @@ static int quiet_match(QuietSlot* q, const CpuState* s, uint64_t* sum, int fresh
         memcpy(q->fpr, s->fpr, sizeof q->fpr);
         return 1;
     }
-    q->pc = s->pc, q->seen = 1, q->stores = gx_pipe_bytes(), q->mark = *sum;
+    q->pc = s->pc, q->seen = 1, q->stores = gx_drawn_bytes(), q->mark = *sum;
     q->answers = answers, q->memory_ok = 0;
     q->cr = s->cr, q->lr = s->lr, q->ctr = s->ctr, q->xer = s->xer;
     memcpy(q->gpr, s->gpr, sizeof q->gpr);

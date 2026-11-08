@@ -74,6 +74,7 @@ int gx_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v) { (void)s, (vo
 unsigned gx_pe_irq_pending(void) { return 0; }
 void gx_report(void) {}
 uint64_t gx_pipe_bytes(void) { return 0; }
+uint64_t gx_drawn_bytes(void) { return 0; }
 void gxr_memory_hazard(void) {} /* no rasterizer: no copy landing */
 int aram_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out) { (void)s, (void)ea, (void)size, (void)out; return 0; }
 int aram_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v) { (void)s, (void)ea, (void)size, (void)v; return 0; }

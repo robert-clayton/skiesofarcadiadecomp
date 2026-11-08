@@ -102,6 +102,7 @@ void threads_report(void) {}
 unsigned gx_frame_count(void) { return 20; }
 uint64_t irq_retrace_count(void) { return 40; }
 uint64_t gx_pipe_bytes(void) { return 0; }
+uint64_t gx_drawn_bytes(void) { return 0; }
 void guest_backtrace(CpuState* s, uint32_t sp) { (void)s; (void)sp; }
 int device_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out)
 { (void)s; (void)ea; (void)size; (void)out; return 0; }

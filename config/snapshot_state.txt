@@ -322,11 +322,19 @@ gx  g_frame  saved  # the frames presented: what every frame-keyed switch counts
 gx  g_frame_hook  config
 gx  g_frame_limit  config  # SOA_FRAMES (a replay's stop is si.c's to set again)
 gx  g_gx_parsing  scratch
+gx  g_host_drawn  config  # SOA_GX=off: the host's drawn-bytes counter (soa_host_gx_native, before the run starts)
+gx  g_host_pe  config  # SOA_GX=off: the host's pending pixel-engine interrupts (soa_host_gx_native)
+gx  g_host_pe_user  config
 gx  g_in_list  saved  # 0 at the safe point
 gx  g_last_unknown  saved
 gx  g_list_addr  saved
 gx  g_list_called  config
 gx  g_list_recording  config
+gx  g_off  config  # SOA_GX=off
+gx  g_off_frames  report  # frames the host ended with it off
+gx  g_off_pipe  report  # pipe bytes, and accesses to the CP, PE and PI FIFO registers, with it off
+gx  g_off_reads  report
+gx  g_off_writes  report
 gx  g_pe_mmio  saved
 gx  g_pi_fifo  saved
 gx  g_pipe  saved  # a command not yet whole
