@@ -751,6 +751,31 @@ int soa_host_gx_register_at(SoaHostCall* call, uint32_t address,
     return gx_register_access(call, address, size, flags, value, pc, t_guest);
 }
 
+/* SOA_GX=off (gx.c, soa-ue5's U4.1): the host answers the CP, PE and PI FIFO natively. */
+int gx_is_off(void);
+int gx_set_native(unsigned (*pe_pending)(void* user), void* user, const volatile uint64_t* drawn);
+int gx_off_frame_end(CpuState* s);
+void hle_mmio_charge(CpuState* s, uint32_t ea, unsigned size, unsigned write, uint64_t v);
+int soa_host_gx_off(void) { return gx_is_off(); }
+int soa_host_gx_native(unsigned (*pe_pending)(void* user), void* user, const volatile uint64_t* drawn)
+{
+    return gx_set_native(pe_pending, user, drawn);
+}
+int soa_host_gx_frame_end(void* runtime)
+{
+    if (!runtime || !t_guest) return 0;
+    return gx_off_frame_end((CpuState*)runtime);
+}
+int soa_host_gx_charge(void* runtime, uint32_t address, unsigned size, unsigned flags, uint64_t value)
+{
+    const int half = size == 2 && !(address & 1u) &&
+        ((address >= 0xCC000000u && address < 0xCC000080u) || (address >= 0xCC001000u && address < 0xCC001010u));
+    const int word = size == 4 && !(address & 3u) && address >= 0xCC00300Cu && address <= 0xCC003014u;
+    if (!runtime || !t_guest || !gx_is_off() || (flags & ~SOA_HOST_GX_WRITE) || (!half && !word)) return 0;
+    hle_mmio_charge((CpuState*)runtime, address, size, flags & SOA_HOST_GX_WRITE, value);
+    return 1;
+}
+
 /* Compatibility for the original prototype; current CPU PC is already live. */
 int soa_host_gx_register(SoaHostCall* call, uint32_t address,
                          unsigned size, unsigned flags, uint64_t* value)

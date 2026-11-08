@@ -110,6 +110,14 @@ void hook_80237BA8(CpuState* s) { g_os_idles++, g_poll_pc = s->pc; }
 uint32_t guest_timebase_lo(CpuState* s) { g_os_tb++, g_poll_pc = s->pc; return 0x11112222u; }
 uint32_t guest_timebase_hi(CpuState* s) { g_os_tb++, g_poll_pc = s->pc; return 0x00000033u; }
 
+/* SOA_GX=off's runtime (gx.c, hle.c): the switch a test sets, the frames ended and the charges, counted */
+int g_gx_off_stub;
+unsigned g_gx_frames, g_gx_charge_reads, g_gx_charge_writes;
+int gx_is_off(void) { return g_gx_off_stub; }
+int gx_set_native(unsigned (*pe)(void*), void* user, const volatile uint64_t* drawn) { (void)pe, (void)user, (void)drawn; return g_gx_off_stub; }
+int gx_off_frame_end(CpuState* s) { (void)s; if (!g_gx_off_stub) return 0; g_gx_frames++; return 1; }
+void hle_mmio_charge(CpuState* s, uint32_t ea, unsigned size, unsigned write, uint64_t v) { (void)s, (void)ea, (void)size, (void)v; if (write) g_gx_charge_writes++; else g_gx_charge_reads++; }
+
 unsigned g_gx_reads, g_gx_writes;
 uint64_t g_gx_value;
 uint16_t mmio_read16(CpuState* s, uint32_t a) { (void)s; (void)a; ++g_gx_reads; return (uint16_t)g_gx_value; }

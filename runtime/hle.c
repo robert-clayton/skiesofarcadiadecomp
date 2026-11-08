@@ -155,6 +155,20 @@ static int g_clock_fixed;
         if (g_clock_fixed) clock_fixed_mark();                 \
     }
 
+/* SOA_GX=off (gx.c; soa_host_gx_charge): a CP, PE or PI FIFO register access a host answered natively is charged
+ * as the wrappers above charge it -- the recorder told, the fixed clock moved after a read and marked after a write
+ * -- but reaches no device and is not counted among the MMIO accesses (the [hle] report holds the GX devices to 0). */
+void hle_mmio_charge(CpuState* s, uint32_t ea, unsigned size, unsigned write, uint64_t v)
+{
+    if (write) {
+        RECORD_NOTE(s, 1 | (int)size << 8, ea, v);
+        if (g_clock_fixed) clock_fixed_mark();
+    } else {
+        RECORD_NOTE(s, 4 | (int)size << 8, ea, v);
+        if (g_clock_fixed) clock_fixed_after_read();
+    }
+}
+
 MMIO_READ(uint8_t, 8)
 MMIO_READ(uint16_t, 16)
 MMIO_READ(uint32_t, 32)

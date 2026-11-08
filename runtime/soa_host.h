@@ -1048,6 +1048,26 @@ SOA_HOST_API int soa_host_gx_register(SoaHostCall* call, uint32_t address,
  * never changes PC, registers, clocks, the recorder or the device. */
 SOA_HOST_API int soa_host_gx_register_at(SoaHostCall* call, uint32_t address,
                                         unsigned size, unsigned flags, uint64_t* value, uint32_t pc);
+
+/* SOA_GX=off (soa-ue5's U4.1, "the no-FIFO mode"): the runtime's command-processor model (gx.c) and renderer (gxr)
+ * are off, and the host answers natively what the game reads back of them. Optional by symbol lookup; each refuses
+ * (returns 0, does nothing) without the switch.
+ *   soa_host_gx_off: 1 when the run has SOA_GX=off.
+ *   soa_host_gx_native: the host's pixel engine and drawing, before the run starts: pe_pending(user) is asked where
+ *     gx.c's own pending interrupts were (bit 0 a token, bit 1 a draw-done finish), so they are delivered in the
+ *     same place and order; *drawn, which the host counts, is the bytes it would have sent down the gather pipe,
+ *     which the fixed clock's wait finder takes for drawing where it took the pipe's bytes (a loop that drew
+ *     something is not a wait). Either may be null.
+ *   soa_host_gx_frame_end: the frame's end a display copy makes (gx.c's at a copy to the external frame buffer):
+ *     the frame hook (the host's frame end, strict mode's hold, pokes and mods), the frame count, SOA_FRAMES's end.
+ *     On the guest's thread, with its CpuState (an answer's call->runtime, or a pipe writer's first argument).
+ *   soa_host_gx_charge: a CP or PE halfword's or a PI FIFO word's access the host answered, charged as the mmio
+ *     wrappers charge one (the recorder told; under the fixed clock a read moves it, a write marks it) without a
+ *     device access or an MMIO count. flags: SOA_HOST_GX_WRITE for a write; value: what was read or written. */
+SOA_HOST_API int soa_host_gx_off(void);
+SOA_HOST_API int soa_host_gx_native(unsigned (*pe_pending)(void* user), void* user, const volatile uint64_t* drawn);
+SOA_HOST_API int soa_host_gx_frame_end(void* runtime);
+SOA_HOST_API int soa_host_gx_charge(void* runtime, uint32_t address, unsigned size, unsigned flags, uint64_t value);
 #ifdef __cplusplus
 }
 #endif
