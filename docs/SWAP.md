@@ -380,6 +380,47 @@ own blocks and not its callees': every function that talks to GX directly,
 the list a native draw (soa-ue5's Layer 2) has to cover. docs/RECORD.md, "Who
 writes the pipe", has the format and a measured census.
 
+### The no-FIFO mode (within ABI 24)
+
+`SOA_GX=off` turns the command processor's model (`gx.c`) and the renderer
+(`gxr`) off, for a host that draws from its own scene list and answers what
+the game reads back of the graphics hardware natively (soa-ue5's U4.1). A
+store to the write-gather pipe is counted and dropped; an access to a CP or
+PE register or to the PI FIFO's base, end or write pointer is counted, read
+as 0 and written nowhere; nothing is parsed, drawn, copied or captured. The
+end-of-run report gives a `[gx] off:` line with the counts, which a check
+holds to zero: a host that answers everything leaves the runtime's model
+untouched. Without the switch nothing changes.
+
+What the stream did for the rest of the runtime, the host does through four
+entries, each resolved by name and each refusing (0, nothing done) without
+the switch:
+
+- `soa_host_gx_off()`: 1 when the run has the switch.
+- `soa_host_gx_native(pe_pending, user, drawn)`: before the run starts.
+  `pe_pending(user)` is asked where `gx_pe_irq_pending` read the PE's
+  interrupt status (bit 0 a draw-sync token, bit 1 a draw-done finish), so the
+  host's interrupts are delivered in the same place and order as the model's;
+  `*drawn` is the bytes the host would have sent down the pipe, which the
+  fixed clock's wait finder adds to the pipe's (a loop that drew something is
+  not a wait).
+- `soa_host_gx_frame_end(runtime)`: the frame's end a copy to the external
+  frame buffer made: the frame hook (the host's frame end, strict mode's
+  hold, pokes and mods), the frame count and `SOA_FRAMES`' end, without the
+  renderer. On the guest's thread only.
+- `soa_host_gx_charge(runtime, address, size, flags, value)`: a CP or PE
+  halfword's or a PI FIFO word's access that the host answered, charged as
+  the MMIO wrappers charge one (`hle_mmio_charge`: the recorder told; under the
+  fixed clock a read moves the clock and a write marks it) with no device
+  access and no MMIO count. Anything else is refused: another address, a
+  misaligned or wrong-sized access, a flag other than `SOA_HOST_GX_WRITE`, no
+  runtime or another thread.
+
+`test_gx_off.py` builds `gx.c` on its own and holds both sides: the model as
+before without the switch, and with it nothing reaching the model, the
+host's interrupts and bytes, its frame end and the report.
+`test_host_gx_off.py` holds `host.c`'s refusals.
+
 ## A swap on against off
 
 The check for any swap that does not change timing semantics: the same pad
@@ -448,6 +489,16 @@ The checks:
   guest. The byte guard is portable C.
 
 ## What changed (and what to rebuild)
+
+- **Within host ABI 24** (2026-11-08, branch u4-nofifo): the no-FIFO mode,
+  `SOA_GX=off` in `gx.c`, and `soa_host_gx_off`, `soa_host_gx_native`,
+  `soa_host_gx_frame_end` and `soa_host_gx_charge` added after the rest of the
+  header (above, "The no-FIFO mode"); `hle.c`'s `hle_mmio_charge`, `irq.c`'s
+  wait finder reading `gx_drawn_bytes`. Nothing before it changed, so the ABI
+  number did not. `test_host_strict.py`'s stand-ins gain the four runtime
+  functions (counted, for the new `test_host_gx_off.py`); `test_gx_off.py` is
+  new; `config/snapshot_state.txt` gains `gx.c`'s new variables. A
+  runtime-only change: `--link`.
 
 - **Within host ABI 24** (2026-11-03, branch stageb3): `soa_host_schedule_quiet`,
   an event added without marking anything due for the quiet rule (above, "A
