@@ -24,6 +24,11 @@ so it compiles all of the backend's C on any machine, glslang or not; without
 the headers it is reported as not compiled, and --require-gxv, which CI
 passes, makes that a failure.
 
+--no-gx compiles the runtime a second time as a build without GX has it
+(soa-ue5's U4.2; recompile.py --no-gx): every runtime file but gx.c, gxr.c,
+gxr_tev.c and gxv.c, with SOA_NO_GX=1 (gx_none.c in their place), into
+<out>/no-gx, so one run checks both builds.
+
 window_sdl.c and audio_sdl.c, the window and the sound off Windows
 (portability L10), are empty without SOA_SDL, so on Linux's gcc and clang
 they are compiled again with SOA_SDL=1 against SDL3's headers (python
@@ -72,11 +77,15 @@ UNCOVERED: dict[str, str] = {}
 STRICT = list(toolchain.MSVC.strict)
 
 
+# What a build without GX leaves out (recompile.py's GX_FILES, soa-ue5's U4.2).
+GX_FILES = ("gx.c", "gxr.c", "gxr_tev.c", "gxv.c")
+
+
 def compile_one(
-    path: Path, out: Path, prof: toolchain.Profile = toolchain.MSVC
+    path: Path, out: Path, prof: toolchain.Profile = toolchain.MSVC, defines: tuple[str, ...] = ()
 ) -> tuple[Path, int, str]:
     proc = toolchain.cc(
-        [*prof.cflags, *prof.strict, "/c", f"/I{RUNTIME}", str(path), f"/Fo{out}/"],
+        [*prof.cflags, *prof.strict, *defines, "/c", f"/I{RUNTIME}", str(path), f"/Fo{out}/"],
         ROOT,
         prof,
     )
@@ -161,6 +170,11 @@ def main() -> int:
         action="store_true",
         help="fail when the SDL window and sound cannot be compiled (no SDL3 headers; gcc and clang only)",
     )
+    ap.add_argument(
+        "--no-gx",
+        action="store_true",
+        help="compile the build without GX too (SOA_NO_GX, the four GX files left out) into <out>/no-gx",
+    )
     args = ap.parse_args()
     prof = toolchain.profile(args.cc)
     if args.out is None:
@@ -197,6 +211,22 @@ def main() -> int:
             for line in out.splitlines():
                 if line.strip() and line.strip() != path.name:
                     print(f"      {line}")
+
+    # The build without GX (--no-gx): every file but the four, with SOA_NO_GX, into a directory of its own.
+    nogx_failed: list[Path] = []
+    nogx = [p for p in covered if p.name not in GX_FILES]
+    if args.no_gx:
+        (args.out / "no-gx").mkdir(parents=True, exist_ok=True)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+            for path, rc, out in pool.map(
+                lambda p: compile_one(p, args.out / "no-gx", prof, ("/DSOA_NO_GX=1",)), nogx
+            ):
+                print(f"{'ok  ' if rc == 0 else 'FAIL'} {path.name} without GX")
+                if rc != 0:
+                    nogx_failed.append(path)
+                for line in out.splitlines():
+                    if line.strip() and line.strip() != path.name:
+                        print(f"      {line}")
 
     # The backend: gxv.c again, with SOA_GXV=1, into a directory of its own so
     # its object does not replace the stub's.
@@ -237,6 +267,8 @@ def main() -> int:
         sdl_ok = False
 
     print(f"\ncompiled {len(covered) - len(failed)}/{len(covered)} runtime translation units")
+    if args.no_gx:
+        print(f"without GX (SOA_NO_GX): compiled {len(nogx) - len(nogx_failed)}/{len(nogx)}")
     print(f"gxv.c: {gxv_note}")
     print(f"the SDL window and sound: {sdl_note}")
     if UNCOVERED:
@@ -245,8 +277,8 @@ def main() -> int:
             print(f"  {name}: {why}")
     else:
         print("not compiled here: nothing, every runtime/*.c is covered")
-    if failed:
-        print(f"::error::{len(failed)} runtime file(s) failed to compile")
+    if failed or nogx_failed:
+        print(f"::error::{len(failed) + len(nogx_failed)} runtime file(s) failed to compile")
         return 1
     if not backend_ok:
         print(f"::error::gxv.c {gxv_note}")

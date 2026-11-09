@@ -25,6 +25,14 @@ translated, the link builds no native unit and defines SOA_NO_DECOMP, and the
 self test says the swap's comparison is skipped. Translate, compile and link
 with it together: chunks translated without it name functions it never links.
 
+--no-gx (with --split or --host; soa-ue5's U4.2) links libsoa_runtime.so
+without GX: gx.c, gxr.c, gxr_tev.c and gxv.c left out, SOA_NO_GX defined,
+runtime/gx_none.c answering what the rest of the runtime asks of them as the
+full build does with SOA_GX=off. For a host that answers GX natively (its
+no-FIFO mode). The full runtime is linked beside it as gx/libsoa_runtime.so,
+the same exports and soname, for a host's switch back to GX; the game library
+links against the runtime without GX, so it needs nothing GX alone has.
+
 --reproducible (mingw; distribution 3.8) links with no timestamp, no PDB and
 the source tree's path mapped to `.`, so two builds of the same package and
 disc give the same soa.exe byte for byte, in any folder. --progress prints a
@@ -350,12 +358,22 @@ def link_command(
     ]
 
 
+# A build without GX (--no-gx) leaves these out; runtime/gx_none.c stands in.
+GX_FILES = ("gx.c", "gxr.c", "gxr_tev.c", "gxv.c")
+
+
+def runtime_sources(no_gx: bool = False) -> list[Path]:
+    """runtime/*.c, sorted; without GX_FILES for a build without GX."""
+    return [p for p in sorted(RUNTIME.glob("*.c")) if not (no_gx and p.name in GX_FILES)]
+
+
 def split_link_plan(
     p: toolchain.Profile,
     out: Path,
     gxv: bool = False,
     defines: tuple[str, ...] = (),
     sdl: tuple[list[str], list[str]] | None = None,
+    no_gx: bool = False,
 ) -> list[tuple[list[str], Path]]:
     """--split's links (specs/android.md L12a), Android's arrangement on Linux:
     libsoa_runtime.so (every runtime file with SOA_SPLIT, and runtime_seam.c),
@@ -363,28 +381,39 @@ def split_link_plan(
     objects, disc_sys.c and game_table.c, hidden but for soa_game), which
     needs the runtime by name and may not leave a symbol it does not have
     (--no-undefined); and the launcher. Both libraries are laid out for 16 KB
-    pages, as Android's must be. Then the mods, as the single-file build's."""
+    pages, as Android's must be. Then the mods, as the single-file build's.
+    no_gx: the runtime without GX (GX_FILES out, SOA_NO_GX), and the full one
+    beside it as gx/libsoa_runtime.so."""
     objs = sorted(out.glob("chunk_*" + p.objext)) + [out / ("dispatch" + p.objext)]
-    runtime = [
-        *p.cflags,
-        "-fPIC",
-        "-shared",
-        "/DSOA_SPLIT=1",
-        *defines,
-        f"/I{RUNTIME}",
-        f"/I{out}",
-        *(["/DSOA_GXV=1", f"/I{out / 'gxv'}", f"/I{shaders.HEADERS}"] if gxv else []),
-        *(sdl[0] if sdl else []),
-        f"/Fe{out / seam.RUNTIME_SONAME}",
-        *map(str, sorted(RUNTIME.glob("*.c"))),
-        str(out / "runtime_seam.c"),
-        f"-Wl,-soname,{seam.RUNTIME_SONAME}",
-        f"-Wl,--version-script={out / 'runtime.map'}",
-        "-Wl,-z,max-page-size=16384",
-        *(sdl[1] if sdl else []),
-        *p.linker,
-        "-ldl",
-    ]
+
+    def runtime_link(where: Path, without_gx: bool) -> list[str]:
+        return [
+            *p.cflags,
+            "-fPIC",
+            "-shared",
+            "/DSOA_SPLIT=1",
+            *defines,
+            *(["/DSOA_NO_GX=1"] if without_gx else []),
+            f"/I{RUNTIME}",
+            f"/I{out}",
+            *(
+                ["/DSOA_GXV=1", f"/I{out / 'gxv'}", f"/I{shaders.HEADERS}"]
+                if gxv and not without_gx
+                else []
+            ),
+            *(sdl[0] if sdl else []),
+            f"/Fe{where / seam.RUNTIME_SONAME}",
+            *map(str, runtime_sources(without_gx)),
+            str(out / "runtime_seam.c"),
+            f"-Wl,-soname,{seam.RUNTIME_SONAME}",
+            f"-Wl,--version-script={out / 'runtime.map'}",
+            "-Wl,-z,max-page-size=16384",
+            *(sdl[1] if sdl else []),
+            *p.linker,
+            "-ldl",
+        ]
+
+    runtime = runtime_link(out, no_gx)
     game = [
         *p.cflags,
         "-fPIC",
@@ -413,6 +442,9 @@ def split_link_plan(
         *p.linker,
     ]
     plan = [(runtime, Path(".")), (game, Path(".")), (launcher, Path("."))]
+    if no_gx:  # the full runtime beside it, for a host's switch back to GX
+        (out / "gx").mkdir(parents=True, exist_ok=True)
+        plan.insert(1, (runtime_link(out / "gx", False), Path(".")))
     plan += [
         (gnu_mod_dll_command(p, src, mod_out_dir(p, out, src)), mod_out_dir(p, out, src))
         for src in mod_dll_sources()
@@ -609,6 +641,12 @@ def main() -> int:
         "(specs/android.md L12a), into <the profile's directory>-split; implies --no-decomp",
     )
     ap.add_argument(
+        "--no-gx",
+        action="store_true",
+        help="with --split or --host: the runtime without GX (gx.c, gxr.c, gxr_tev.c and gxv.c out, SOA_NO_GX), "
+        "the full one beside it as gx/libsoa_runtime.so (soa-ue5's U4.2)",
+    )
+    ap.add_argument(
         "--host",
         action="store_true",
         help="--split for a program that loads the runtime and is its window and sound "
@@ -627,6 +665,8 @@ def main() -> int:
         args.split = True
         if args.out is None:
             args.out = Path(prof.out + "-host")
+    if args.no_gx and not args.split and not args.host:
+        ap.error("--no-gx is a split build's runtime: with --split or --host")
     if args.split:
         if prof.name not in ("gcc", "clang"):
             ap.error("--split builds Android's arrangement on Linux: --cc gcc or --cc clang")
@@ -908,7 +948,7 @@ def main() -> int:
         if android:
             plan = android_link_plan(prof, args.out)
         elif args.split:
-            plan = split_link_plan(prof, args.out, gxv, defines, sdl)
+            plan = split_link_plan(prof, args.out, gxv, defines, sdl, args.no_gx)
         else:
             plan = link_plan(
                 prof, args.out, dc_files, dc_defines, gxv, defines, args.reproducible, sdl
