@@ -776,6 +776,19 @@ int soa_host_gx_charge(void* runtime, uint32_t address, unsigned size, unsigned 
     return 1;
 }
 
+/* SOA_AUDIO=off (soa-ue5's U3.3): the audio's device models off (dsp.c). soa_host_audio_charge is the one access the
+ * host still makes of them, the OS's interrupt masks' (SetInterruptMask's DSP and AI groups: the DSP interface's control
+ * register, a halfword at 0xCC00500A, and AI's control word at 0xCC006C00), charged as gx_charge charges GX's. */
+int audio_is_off(void);
+int soa_host_audio_off(void) { return audio_is_off(); }
+int soa_host_audio_charge(void* runtime, uint32_t address, unsigned size, unsigned flags, uint64_t value)
+{
+    const int ok = (size == 2 && address == 0xCC00500Au) || (size == 4 && address == 0xCC006C00u);
+    if (!runtime || !t_guest || !audio_is_off() || (flags & ~SOA_HOST_GX_WRITE) || !ok) return 0;
+    hle_mmio_charge((CpuState*)runtime, address, size, flags & SOA_HOST_GX_WRITE, value);
+    return 1;
+}
+
 /* Compatibility for the original prototype; current CPU PC is already live. */
 int soa_host_gx_register(SoaHostCall* call, uint32_t address,
                          unsigned size, unsigned flags, uint64_t* value)

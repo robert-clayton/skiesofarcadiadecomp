@@ -1068,6 +1068,19 @@ SOA_HOST_API int soa_host_gx_off(void);
 SOA_HOST_API int soa_host_gx_native(unsigned (*pe_pending)(void* user), void* user, const volatile uint64_t* drawn);
 SOA_HOST_API int soa_host_gx_frame_end(void* runtime);
 SOA_HOST_API int soa_host_gx_charge(void* runtime, uint32_t address, unsigned size, unsigned flags, uint64_t value);
+
+/* SOA_AUDIO=off (soa-ue5's U3.3): the audio's device models -- AI's registers, the DSP's mailboxes and AI DMA, ARAM and
+ * its DMA engine, the AX microcode's mixer, the output -- are off, for a host that answers the SDK's audio natively and
+ * mixes the sound driver's voices itself. Optional by symbol lookup; each refuses (returns 0, does nothing) without the
+ * switch.
+ *   soa_host_audio_off: 1 when the run has SOA_AUDIO=off.
+ *   soa_host_audio_charge: an access of the OS's interrupt masks (SetInterruptMask's DSP and AI groups) the host
+ *     answered: the DSP interface's control register (a halfword at 0xCC00500A) or AI's control word (0xCC006C00),
+ *     charged as soa_host_gx_charge charges one (the recorder told; under the fixed clock a read moves it, a write
+ *     marks it) without a device access or an MMIO count. On the guest's thread, with its CpuState. flags:
+ *     SOA_HOST_GX_WRITE for a write; value: what was read or written. */
+SOA_HOST_API int soa_host_audio_off(void);
+SOA_HOST_API int soa_host_audio_charge(void* runtime, uint32_t address, unsigned size, unsigned flags, uint64_t value);
 #ifdef __cplusplus
 }
 #endif

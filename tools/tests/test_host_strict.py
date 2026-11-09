@@ -117,6 +117,9 @@ int gx_is_off(void) { return g_gx_off_stub; }
 int gx_set_native(unsigned (*pe)(void*), void* user, const volatile uint64_t* drawn) { (void)pe, (void)user, (void)drawn; return g_gx_off_stub; }
 int gx_off_frame_end(CpuState* s) { (void)s; if (!g_gx_off_stub) return 0; g_gx_frames++; return 1; }
 void hle_mmio_charge(CpuState* s, uint32_t ea, unsigned size, unsigned write, uint64_t v) { (void)s, (void)ea, (void)size, (void)v; if (write) g_gx_charge_writes++; else g_gx_charge_reads++; }
+/* SOA_AUDIO=off's switch (dsp.c), which a test sets; its charges are hle_mmio_charge's above */
+int g_audio_off_stub;
+int audio_is_off(void) { return g_audio_off_stub; }
 
 unsigned g_gx_reads, g_gx_writes;
 uint64_t g_gx_value;
