@@ -421,6 +421,35 @@ before without the switch, and with it nothing reaching the model, the
 host's interrupts and bytes, its frame end and the report.
 `test_host_gx_off.py` holds `host.c`'s refusals.
 
+### The audio's models off (within ABI 24)
+
+`SOA_AUDIO=off` turns the audio's device models off, for a host that answers
+the SDK's audio (the AI, ARAM, ARQ and DSP functions) natively and mixes the
+sound driver's voices itself (soa-ue5's U3.3). An access to AI's registers
+(`0xCC006C00`-`0xCC006C1F`, in `irq.c`) or the DSP interface's
+(`0xCC005000`-`0xCC0051FF`: the mailboxes and AI DMA in `dsp.c`, ARAM's DMA and
+the DSP control register in `aram.c`) is counted, its first eight named, read
+as 0 and written nowhere. ARAM's 16 MB is never allocated and its census of
+where samples came from reads no disc file; no AI block is played, so neither
+the AX mixer (`ax.c`) nor the output (`audio_out.c`) runs; nothing is due;
+`__OSInitAudioSystem`'s native answer (`hle_os.c`) leaves the models alone.
+The report's `[audio] off:` line gives the counts, which a check holds to
+zero beside the `[hle]` report's DSP and AI totals. Without the switch nothing
+changes.
+
+Two entries, each resolved by name and refusing (0, nothing done) without the
+switch:
+
+- `soa_host_audio_off()`: 1 when the run has the switch.
+- `soa_host_audio_charge(runtime, address, size, flags, value)`: the one
+  access of the audio's registers the host still answers, the OS's interrupt
+  masks' (SetInterruptMask's DSP group, the control halfword at `0xCC00500A`,
+  and AI's, the control word at `0xCC006C00`), charged as
+  `soa_host_gx_charge` charges GX's. Anything else is refused.
+
+`test_audio_off.py` builds `dsp.c` and `aram.c` alone and runs one driver
+both ways; `test_host_audio_off.py` holds `host.c`'s refusals.
+
 ## A swap on against off
 
 The check for any swap that does not change timing semantics: the same pad
