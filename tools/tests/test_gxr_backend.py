@@ -194,7 +194,7 @@ def driver(tmp_path_factory):
         pytest.skip(f"no {PROFILE.name}")
     tmp = tmp_path_factory.mktemp("backend")
     (tmp / "backend.c").write_text(DRIVER, encoding="utf-8")
-    sources = [RUNTIME / f for f in ("gx.c", "gxr.c", "gxr_tev.c", "png.c")] + [tmp / "backend.c"]
+    sources = [RUNTIME / f for f in ("gx.c", "gx_frame.c", "gxr.c", "gxr_tev.c", "png.c")] + [tmp / "backend.c"]
     p = toolchain.cc(
         [*PROFILE.cflags, "/c", "/I", str(RUNTIME), *map(str, sources), "/Fo" + str(tmp) + os.sep],
         tmp,

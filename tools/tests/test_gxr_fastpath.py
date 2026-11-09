@@ -257,7 +257,7 @@ needs_msvc = pytest.mark.skipif(
 
 @needs_msvc
 def test_the_tev_shapes_give_the_general_answer(tmp_path):
-    out = build(tmp_path, "tev", TEV_DRIVER, ["gx.c", "gxr.c", "png.c"])
+    out = build(tmp_path, "tev", TEV_DRIVER, ["gx.c", "gx_frame.c", "gxr.c", "png.c"])
     m = re.search(
         r"\[fastpath\] tev (\d+) setups, (\d+) recognised \((\d+) (\d+) (\d+) / (\d+) (\d+) (\d+)\), (\d+) pixels, (\d+) mismatches",
         out,
@@ -273,7 +273,7 @@ def test_the_tev_shapes_give_the_general_answer(tmp_path):
 
 @needs_msvc
 def test_the_simd_bilinear_gives_the_scalar_answer(tmp_path):
-    out = build(tmp_path, "bilinear", BILINEAR_DRIVER, ["gx.c", "gxr.c", "png.c"])
+    out = build(tmp_path, "bilinear", BILINEAR_DRIVER, ["gx.c", "gx_frame.c", "gxr.c", "png.c"])
     if "[fastpath] simd 1" not in out:
         pytest.skip("this CPU has no SSE4.1, so there is no SIMD path to compare")
     m = re.search(r"\[fastpath\] bilinear (\d+) samples, (\d+) mismatches", out)
@@ -282,6 +282,6 @@ def test_the_simd_bilinear_gives_the_scalar_answer(tmp_path):
 
 @needs_msvc
 def test_the_blend_cases_give_the_general_answer(tmp_path):
-    out = build(tmp_path, "blend", BLEND_DRIVER, ["gx.c", "gxr_tev.c", "png.c"])
+    out = build(tmp_path, "blend", BLEND_DRIVER, ["gx.c", "gx_frame.c", "gxr_tev.c", "png.c"])
     m = re.search(r"\[fastpath\] blend (\d+) pixels, (\d+) mismatches", out)
     assert m and int(m[1]) > 0 and m[2] == "0", out

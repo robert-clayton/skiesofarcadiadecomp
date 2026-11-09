@@ -38,7 +38,7 @@ import fifopair  # noqa: E402
 from soa import toolchain  # noqa: E402
 
 RUNTIME = ROOT / "runtime"
-SOURCES = ["gx.c", "gxr.c", "gxr_tev.c", "png.c"]
+SOURCES = ["gx.c", "gx_frame.c", "gxr.c", "gxr_tev.c", "png.c"]
 GXR = (RUNTIME / "gxr.c").read_text(encoding="utf-8")
 
 # The stream helpers and setup() are test_gxr_queue.py's, whole: viewport

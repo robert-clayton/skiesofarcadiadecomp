@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from soa import toolchain  # noqa: E402
 
 RUNTIME = ROOT / "runtime"
-SOURCES = ["gx.c", "gxr.c", "png.c"]  # gxr_tev.c comes in through the driver
+SOURCES = ["gx.c", "gx_frame.c", "gxr.c", "png.c"]  # gxr_tev.c comes in through the driver
 
 # (comp0, ref0, comp1, ref1, logic, passes every alpha 0-255?)
 # Compares: 0 never, 1 <, 2 ==, 3 <=, 4 >, 5 !=, 6 >=, 7 always.

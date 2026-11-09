@@ -6,7 +6,7 @@
 runtime/selftest.c draws a full-screen quad and the title screen's cloud
 triangle through the real GX front end and counts what comes out, but it can
 only run inside the port, which needs the user's disc. The renderer itself
-needs nothing: gx.c, gxr.c, gxr_tev.c and png.c reach only two symbols outside
+needs nothing: gx.c, gx_frame.c, gxr.c, gxr_tev.c and png.c reach only two symbols outside
 themselves, and tools/citest/render_driver.c supplies both, so the same checks
 link into a binary of their own and run anywhere. This is the one check in
 tools/citest/ that looks at a pixel rather than at whether the C compiles.
@@ -40,7 +40,7 @@ HERE = Path(__file__).resolve().parent
 RUNTIME = ROOT / "runtime"
 # The renderer and the front end that feeds it. No recompiled code, no device
 # models, no window: anything else in runtime/ would drag in the whole port.
-SOURCES = [RUNTIME / name for name in ("gx.c", "gxr.c", "gxr_tev.c", "png.c")]
+SOURCES = [RUNTIME / name for name in ("gx.c", "gx_frame.c", "gxr.c", "gxr_tev.c", "png.c")]
 SOURCES.append(HERE / "render_driver.c")
 
 

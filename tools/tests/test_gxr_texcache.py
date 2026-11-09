@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from soa import toolchain  # noqa: E402
 
 RUNTIME = ROOT / "runtime"
-SOURCES = ["gx.c", "gxr.c", "png.c"]  # gxr_tev.c comes in through the driver
+SOURCES = ["gx.c", "gx_frame.c", "gxr.c", "png.c"]  # gxr_tev.c comes in through the driver
 
 DRIVER = r"""
 #define _CRT_SECURE_NO_WARNINGS

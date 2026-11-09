@@ -230,7 +230,7 @@ SOA_REPLAY_CANDIDATE(wrong, "wrong", DRAWER_ADDR, wrong, 0, SOA_REPLAY_NONE)
 SOA_REPLAY_CANDIDATE(silent, "silent", DRAWER_ADDR, silent, 0, SOA_REPLAY_NONE)
 """
 
-GX_SOURCES = ["record.c", "swap.c", "gx.c"]
+GX_SOURCES = ["record.c", "swap.c", "gx.c", "gx_frame.c"]
 
 
 def write_program(tmp: Path):

@@ -196,7 +196,7 @@ VENDOR = ROOT / "vendor"
 # The renderer, the backend (runtime/gxv.c, built with SOA_GXV=1 and the
 # shaders tools/soa/shaders.py compiles) and plat.c, whose loader it opens
 # Vulkan with; the driver is the spike's own.
-SOURCES = [RUNTIME / n for n in ("gx.c", "gxr.c", "gxr_tev.c", "png.c", "gxv.c", "picture.c")]
+SOURCES = [RUNTIME / n for n in ("gx.c", "gx_frame.c", "gxr.c", "gxr_tev.c", "png.c", "gxv.c", "picture.c")]
 SOURCES += [*toolchain.runtime_support_sources(), SPIKE / "driver.c"]
 SKIP = 3
 

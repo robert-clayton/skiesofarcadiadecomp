@@ -21,6 +21,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "cpu.h"
 #include "gx_state.h"
+#include "snapshot.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -212,110 +213,37 @@ static void dllog_cp(void)
 static uint8_t* g_cap;
 static size_t g_cap_len, g_cap_cap;
 static uint32_t g_cap_cp[0x100], g_cap_xf[0x1100], g_cap_bp[0x100];
-static unsigned g_frame;
 static const char* g_dump_list = NULL;
 static int g_dump_checked;
-
-/* SOA_FRAMES=n stops the run here rather than in the renderer, so it counts
- * the frames the game presents whether or not anything is being drawn, and
- * counts the same ones SOA_PAD scripts against. main sets it once the guest
- * is about to run, which keeps --replay and the selftest out of it. */
-static unsigned g_frame_limit;
-void hle_report(void);
 void gxr_flush(void);
 
-/* Something to do at each frame boundary, if anyone has asked. main.c hangs
- * SOA_POKE off this rather than gx.c calling into main.c, because the renderer
- * links on its own -- render_check.py and the four gxr tests build gx.c, gxr.c,
- * gxr_tev.c and png.c with two stubs and no main.c, and PLAN A1 counts those
- * two stubs as a property worth keeping. A direct call compiled fine and broke
- * 29 tests at the link step, which is the failure the compile-only CI job
- * cannot see. */
-static void (*g_frame_hook)(CpuState*, unsigned);
-
+/* The frame -- its count, the frame hook, SOA_FRAMES's stop -- and the
+ * display-list hooks' registration are gx_frame.c's, which every build has
+ * (soa-ue5's U4.2: a build without GX ends its frames through the host). The
+ * frame's end below is the runtime's, with this file's captures around it. */
+void gx_frame_hook_run(CpuState* s);
+int gx_frame_next(void);
+void gx_frame_stop(void (*finish)(void));
+void gx_frame_snap(Snap* sn);
 void gx_set_frame_hook(void (*fn)(CpuState*, unsigned));
+extern void (*g_gx_list_recording)(CpuState*, uint32_t);
+extern uint32_t (*g_gx_list_called)(CpuState*, uint32_t, uint32_t, uint32_t);
+#define g_list_recording g_gx_list_recording
+#define g_list_called g_gx_list_called
 
-void gx_set_frame_hook(void (*fn)(CpuState*, unsigned))
-{
-    g_frame_hook = fn;
-}
-
-/* Something that follows the game's display lists: runtime/ninja.c, for the
- * models whose strips the game records into a list instead of drawing them
- * (ninja.c's draw modes). `recording` is told when GXBeginDisplayList starts
- * a list at `addr`, whatever that buffer held before. `called` is asked
- * before the list at `addr`, `size` bytes long, is parsed, and again each
- * time the parse reaches the point it named: `done` bytes are parsed, GX's
- * registers are as the list's commands have left them so far, and it answers
- * how many more bytes to parse before the next ask -- 0, or more than are
- * left, for the rest. Pointers for the same reason as the frame hook above:
- * the renderer links without ninja.c. */
-static void (*g_list_recording)(CpuState*, uint32_t);
-static uint32_t (*g_list_called)(CpuState*, uint32_t, uint32_t, uint32_t);
-
-void gx_set_list_hooks(void (*recording)(CpuState* s, uint32_t addr),
-                       uint32_t (*called)(CpuState* s, uint32_t addr, uint32_t size, uint32_t done))
-{
-    g_list_recording = recording;
-    g_list_called = called;
-}
-
-/* SOA_GX=off (soa-ue5's U4.1, "the no-FIFO mode"): the command processor's model and the renderer are off. A host
- * answers natively what the game reads back of them -- CP status, the PI FIFO pointers, the pixel engine's token and
- * finish, the display lists' bytes in RAM and their lengths -- and keeps feeding its own draw machine, but nothing
- * reaches this file: a store to the gather pipe is counted and dropped, an access to a CP, PE or PI FIFO register
- * counted, its first few named, and answered with zero (a read) or dropped (a write), and nothing is parsed, drawn,
- * copied or captured. What the stream did for the rest of the runtime the host does through soa_host.h's GX block:
- * the frame's end at its display copy (soa_host_gx_frame_end, which runs this file's frame end without the
- * renderer), a register access's clock charge (soa_host_gx_charge, the mmio wrappers' own), the pixel engine's
- * interrupts (soa_host_gx_native's pending callback, asked where gx_pe_irq_pending was) and the bytes it drew
- * (its counter, which the quiet rule's wait finder reads where it read the pipe's bytes). The report gives the
- * counts, which a check run holds to 0 (soa-ue5's U4.2 gate). Without the switch the runtime is as before. */
-static int g_off = -1;
-static uint64_t g_off_reads, g_off_writes, g_off_pipe, g_off_frames;
-static unsigned (*g_host_pe)(void* user);
-static void* g_host_pe_user;
-static const volatile uint64_t* g_host_drawn;
-int gx_is_off(void)
-{
-    if (g_off < 0) {
-        const char* v = getenv("SOA_GX");
-        g_off = v && strcmp(v, "off") == 0;
-        if (g_off) fprintf(stderr, "[gx] off (SOA_GX=off): no command stream parsed, nothing drawn; the host answers the CP, PE and PI FIFO\n");
-    }
-    return g_off;
-}
-static void off_access(CpuState* s, const char* dir, uint32_t ea, unsigned size, uint64_t v)
-{
-    if (g_off_reads + g_off_writes < 8)
-        fprintf(stderr, "[gx] off: %s %08X/%u = %llx at pc %08X lr %08X\n", dir, ea, size, (unsigned long long)v,
-                s ? s->pc : 0u, s ? s->lr : 0u);
-    if (dir[0] == 'r') g_off_reads++;
-    else g_off_writes++;
-}
-/* The host's native GX (soa_host_gx_native): its pending pixel-engine interrupts, and the bytes it drew. */
-int gx_set_native(unsigned (*pe_pending)(void* user), void* user, const volatile uint64_t* drawn)
-{
-    if (!gx_is_off()) return 0;
-    g_host_pe = pe_pending;
-    g_host_pe_user = user;
-    g_host_drawn = drawn;
-    return 1;
-}
-static void frame_end(CpuState* s);
-/* The frame's end the display copy made, for a host that sees that copy itself (soa_host_gx_frame_end). */
-int gx_off_frame_end(CpuState* s)
-{
-    if (!gx_is_off() || !s) return 0;
-    g_off_frames++;
-    frame_end(s);
-    return 1;
-}
-
-void gx_set_frame_limit(unsigned frames)
-{
-    g_frame_limit = frames;
-}
+/* SOA_GX=off (soa-ue5's U4.1, "the no-FIFO mode"): gx_frame.c's switch (g_gx_off, gx_is_off). With it nothing
+ * reaches this file: a store to the gather pipe is counted and dropped there, an access to a CP, PE or PI FIFO
+ * register counted there and answered with zero (a read) or dropped (a write), and nothing is parsed, drawn, copied
+ * or captured; the host ends each frame (gx_off_frame_end). Without it the runtime is as before. */
+extern int g_gx_off;
+#define g_off g_gx_off
+int gx_is_off(void);
+void gx_off_access(CpuState* s, const char* dir, uint32_t ea, unsigned size, uint64_t v);
+void gx_off_pipe(CpuState* s, unsigned size, uint64_t v);
+unsigned gx_off_pe_pending(void);
+uint64_t gx_off_drawn(void);
+void gx_off_report(void);
+#define off_access gx_off_access
 
 static int frame_wanted(unsigned frame)
 {
@@ -393,13 +321,14 @@ static void frame_end(CpuState* s)
     /* A frame being captured is finished first, so its hook and its .ram see
      * every copy it made, as they did before H14 let a frame end with the
      * workers still drawing it. */
-    if (g_off <= 0 && frame_wanted(g_frame)) gxr_flush();
+    unsigned frame = gx_frame_count();
+    if (g_off <= 0 && frame_wanted(frame)) gxr_flush();
     /* Before the capture below, so a frame that is both poked and dumped is
      * dumped with the poke already in it. */
-    if (g_frame_hook) g_frame_hook(s, g_frame);
-    if (g_off <= 0 && frame_wanted(g_frame)) {
+    gx_frame_hook_run(s);
+    if (g_off <= 0 && frame_wanted(frame)) {
         const char* dir = dump_dir();
-        snprintf(path, sizeof path, "%s/%04u.regs", dir, g_frame);
+        snprintf(path, sizeof path, "%s/%04u.regs", dir, frame);
         {
             FILE* f = fopen(path, "wb");
             if (f) {
@@ -409,26 +338,18 @@ static void frame_end(CpuState* s)
                 fclose(f);
             } else fprintf(stderr, "[gx] cannot write %s (mkdir %s)\n", path, dir);
         }
-        snprintf(path, sizeof path, "%s/%04u.fifo", dir, g_frame);
+        snprintf(path, sizeof path, "%s/%04u.fifo", dir, frame);
         write_file(path, g_cap, g_cap_len);
-        snprintf(path, sizeof path, "%s/%04u.ram", dir, g_frame);
+        snprintf(path, sizeof path, "%s/%04u.ram", dir, frame);
         write_file(path, s->mem, MEM1_SIZE);
-        fprintf(stderr, "[gx] captured frame %u into %s: %zu command bytes\n", g_frame, dir,
+        fprintf(stderr, "[gx] captured frame %u into %s: %zu command bytes\n", frame, dir,
                 g_cap_len);
     }
-    g_frame++;
-    if (g_frame_limit && g_frame >= g_frame_limit) {
+    if (gx_frame_next())
         /* The copy for this frame is already queued (load_bp calls the
          * renderer before us), so flushing here finishes it -- any snapshot
-         * is written and the counters are real before the report. Leave with
-         * _Exit (C99's _exit) for the reason window.c does: the rasterizer's workers are
-         * spinning, and CRT teardown around them can hang. */
-        fprintf(stderr, "[boot] %u frames done (SOA_FRAMES)\n", g_frame);
-        if (g_off <= 0) gxr_flush();
-        hle_report();
-        fflush(NULL);
-        _Exit(0);
-    }
+         * is written and the counters are real before the report. */
+        gx_frame_stop(g_off <= 0 ? gxr_flush : NULL);
     g_cap_len = 0;
     memcpy(g_cap_cp, g_cp, sizeof g_cp);
     memcpy(g_cap_xf, g_xf, sizeof g_xf);
@@ -683,82 +604,11 @@ static void dl_bracket(CpuState* s)
     g_dl_rec = rec;
 }
 
-/* SOA_GX_WRITERS=1: which guest code feeds the gather pipe, by the block
- * doing the store and the link register at the time (its caller, for a leaf
- * function), with the bytes each pair wrote; the busiest at exit. Finds the
- * routines that emit vertices, which the address alone of a draw command
- * cannot: the stream carries no return addresses. */
-#define WRITERS_CAP 4096
-typedef struct { uint32_t pc, lr; uint64_t bytes; } Writer;
-static Writer g_writers[WRITERS_CAP];
-static int g_writers_on = -1;
-
-static int writer_cmp(const void* a, const void* b)
-{
-    uint64_t x = ((const Writer*)a)->bytes, y = ((const Writer*)b)->bytes;
-    return x < y ? 1 : x > y ? -1 : 0;
-}
-
-static void writers_report(void)
-{
-    unsigned i, n = 0;
-    uint64_t total = 0;
-    for (i = 0; i < WRITERS_CAP; i++)
-        if (g_writers[i].bytes) { g_writers[n++] = g_writers[i]; total += g_writers[i].bytes; }
-    qsort(g_writers, n, sizeof g_writers[0], writer_cmp);
-    fprintf(stderr, "[writers] %u block/caller pairs wrote %llu gather-pipe bytes; the busiest:\n", n,
-            (unsigned long long)total);
-    for (i = 0; i < n && i < 40; i++)
-        fprintf(stderr, "[writers]   block %08X lr %08X  %llu bytes (%.1f%%)\n", g_writers[i].pc, g_writers[i].lr,
-                (unsigned long long)g_writers[i].bytes, total ? 100.0 * g_writers[i].bytes / total : 0.0);
-}
-
-static void writer_note(const CpuState* s, unsigned size)
-{
-    unsigned h = ((s->pc * 2654435761u) ^ (s->lr * 40503u)) & (WRITERS_CAP - 1), k;
-    for (k = 0; k < WRITERS_CAP; k++, h = (h + 1) & (WRITERS_CAP - 1)) {
-        Writer* w = &g_writers[h];
-        if (w->bytes && (w->pc != s->pc || w->lr != s->lr)) continue;
-        w->pc = s->pc;
-        w->lr = s->lr;
-        w->bytes += size;
-        return;
-    }
-}
-
-/* Who else watches the pipe's bytes: the census (SOA_PIPE_CENSUS, swap.c's:
- * the bytes each translated function writes itself; main.c hands it over
- * with gx_set_pipe_census) and the recorder (record.c sets g_record_pipe for
- * the length of a recorded call, so the bytes the call writes are kept with
- * it). One test of g_pipe_watch on the way in when none of them is on. */
-void (*g_record_pipe)(CpuState* s, unsigned size, uint64_t v);
-static void (*g_census_note)(uint32_t pc, unsigned size);
-static int g_pipe_watch = -1; /* writers, census or the recorder: -1 until first asked */
-
-void gx_pipe_watch_changed(void) { g_pipe_watch = -1; } /* record.c, as it sets or clears g_record_pipe */
-
-void gx_set_pipe_census(void (*note)(uint32_t pc, unsigned size))
-{
-    g_census_note = note;
-    g_pipe_watch = -1;
-}
-
-static void pipe_watch(CpuState* s, unsigned size, uint64_t v)
-{
-    void (*rec)(CpuState*, unsigned, uint64_t);
-    if (g_pipe_watch < 0) {
-        if (g_writers_on < 0) {
-            const char* e = getenv("SOA_GX_WRITERS");
-            g_writers_on = e && atoi(e);
-        }
-        g_pipe_watch = g_writers_on || g_census_note || g_record_pipe;
-        if (!g_pipe_watch) return;
-    }
-    if (g_writers_on) writer_note(s, size);
-    if (g_census_note) g_census_note(s->pc, size);
-    rec = g_record_pipe;
-    if (rec) rec(s, size, v);
-}
+/* The pipe's watchers -- SOA_GX_WRITERS, the census (SOA_PIPE_CENSUS) and the recorder (g_record_pipe) -- are
+ * gx_frame.c's, which every build has: one test of g_gx_pipe_watch on the way in when none of them is on. */
+extern int g_gx_pipe_watch;
+void gx_pipe_watch(CpuState* s, unsigned size, uint64_t v);
+void gx_writers_report(void);
 
 void gx_image(GxImage* out)
 {
@@ -782,12 +632,9 @@ const uint8_t* gx_pipe_left(uint32_t* len)
 void gx_pipe_write(CpuState* s, unsigned size, uint64_t v)
 {
     unsigned i;
-    if (g_pipe_watch) pipe_watch(s, size, v);
+    if (g_gx_pipe_watch) gx_pipe_watch(s, size, v);
     if (g_off != 0 && gx_is_off()) { /* SOA_GX=off: counted, and nothing else */
-        if (g_off_pipe < 8)
-            fprintf(stderr, "[gx] off: %u pipe byte(s) %llx at pc %08X lr %08X\n", size, (unsigned long long)v, s ? s->pc : 0u,
-                    s ? s->lr : 0u);
-        g_off_pipe += size;
+        gx_off_pipe(s, size, v);
         g_bytes += size;
         return;
     }
@@ -808,7 +655,7 @@ void gx_pipe_write(CpuState* s, unsigned size, uint64_t v)
 
 uint64_t gx_pipe_bytes(void) { return g_bytes; }
 /* What the quiet rule's wait finder takes for drawing (irq.c): the pipe's bytes, and with SOA_GX=off the host's. */
-uint64_t gx_drawn_bytes(void) { return g_off > 0 && g_host_drawn ? g_bytes + *g_host_drawn : g_bytes; }
+uint64_t gx_drawn_bytes(void) { return g_off > 0 ? g_bytes + gx_off_drawn() : g_bytes; }
 
 /* ---- MMIO ------------------------------------------------------------- */
 
@@ -878,7 +725,7 @@ int gx_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v)
 unsigned gx_pe_irq_pending(void)
 {
     unsigned isr = g_pe_mmio[PE_ISR], due = 0;
-    if (g_off > 0) return g_host_pe ? g_host_pe(g_host_pe_user) & 3u : 0u; /* SOA_GX=off: the host's pixel engine */
+    if (g_off > 0) return gx_off_pe_pending(); /* SOA_GX=off: the host's pixel engine */
     if ((isr & ISR_TOKEN) && (isr & ISR_TOKEN_EN)) due |= 1;
     if ((isr & ISR_FINISH) && (isr & ISR_FINISH_EN)) due |= 2;
     return due;
@@ -886,11 +733,7 @@ unsigned gx_pe_irq_pending(void)
 
 void gx_report(void)
 {
-    if (g_off > 0)
-        fprintf(stderr, "[gx] off: %llu register reads, %llu register writes, %llu pipe bytes; %llu frames ended by the host, "
-                        "%llu bytes the host drew\n",
-                (unsigned long long)g_off_reads, (unsigned long long)g_off_writes, (unsigned long long)g_off_pipe,
-                (unsigned long long)g_off_frames, (unsigned long long)(g_host_drawn ? *g_host_drawn : 0u));
+    gx_off_report();
     fprintf(stderr,
             "[gx] %llu pipe bytes, %llu commands: %llu BP, %llu XF, %llu CP loads, %llu display "
             "lists, %llu draws (%llu vertices); %llu draw-dones, %llu tokens, %llu EFB copies, "
@@ -907,13 +750,12 @@ void gx_report(void)
             g_dl_overflows ? ", some overflowed their buffers" : "");
     gx_dllog_report();
     gxr_report();
-    if (g_writers_on > 0) writers_report(); /* SOA_GX_WRITERS */
+    gx_writers_report(); /* SOA_GX_WRITERS */
 }
 
 /* ---- replay ------------------------------------------------------------
  * Feed a captured frame through the same parser with MEM1 restored, so the
  * renderer sees exactly what it saw in the game. */
-unsigned gx_frame_count(void) { return g_frame; }
 const uint32_t* gx_cp_regs(void) { return g_cp; }
 const uint32_t* gx_xf_regs(void) { return g_xf; }
 const uint32_t* gx_bp_regs(void) { return g_bp; }
@@ -1035,7 +877,7 @@ int gx_replay_pair(CpuState* s, const char* a, const char* b)
     int pass;
     g_dump_checked = 1;
     g_dump_list = NULL;
-    g_frame_hook = NULL;
+    gx_set_frame_hook(NULL);
     fprintf(stderr, "[pair] a pair replay: no capture is written and no frame hook runs between the passes\n");
     if (t_env && *t_env) {
         char* end;
@@ -1093,7 +935,6 @@ int gx_replay_pair(CpuState* s, const char* a, const char* b)
  * frame count (what SOA_FRAMES, SOA_PAD and every frame-keyed switch count),
  * the counts the report gives -- the pipe's bytes among them, which the quiet
  * rule compares -- and a capture's registers as the frame began. */
-#include "snapshot.h"
 void gx_snap(Snap* sn)
 {
     uint64_t pipe_len = g_pipe_len, cap_len = g_cap_len;
@@ -1108,7 +949,7 @@ void gx_snap(Snap* sn)
     SNAP(sn, g_pe_mmio);
     SNAP(sn, g_pi_fifo);
     SNAP(sn, g_dl_rec);
-    SNAP(sn, g_frame);
+    gx_frame_snap(sn); /* the frame count (gx_frame.c's), where it always was */
     SNAP(sn, pipe_len);
     if (pipe_len > PIPE_CAP) {
         snap_fail(sn, "the gather pipe holds %llu bytes, more than its %u", (unsigned long long)pipe_len, (unsigned)PIPE_CAP);

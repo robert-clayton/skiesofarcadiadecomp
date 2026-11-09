@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from soa import toolchain  # noqa: E402
 
 RUNTIME = ROOT / "runtime"
-SOURCES = ["gx.c", "gxr.c", "gxr_tev.c", "png.c"]
+SOURCES = ["gx.c", "gx_frame.c", "gxr.c", "gxr_tev.c", "png.c"]
 
 # The register recipe down to "---- the stream ----" is the short form of the
 # one in tools/citest/render_driver.c: enough state for a draw to reach the

@@ -289,7 +289,6 @@ gx  g_cap_cap  scratch
 gx  g_cap_cp  saved
 gx  g_cap_len  saved
 gx  g_cap_xf  saved
-gx  g_census_note  config
 gx  g_cmds  saved
 gx  g_cp  saved
 gx  g_cp_loads  saved
@@ -321,39 +320,41 @@ gx  g_dump_checked  saved  # SOA_FIFO_DUMP read again on loading
 gx  g_dump_list  saved
 gx  g_efb_copies  saved
 gx  g_finishes  saved
-gx  g_frame  saved  # the frames presented: what every frame-keyed switch counts
-gx  g_frame_hook  config
-gx  g_frame_limit  config  # SOA_FRAMES (a replay's stop is si.c's to set again)
 gx  g_gx_parsing  scratch
-gx  g_host_drawn  config  # SOA_GX=off: the host's drawn-bytes counter (soa_host_gx_native, before the run starts)
-gx  g_host_pe  config  # SOA_GX=off: the host's pending pixel-engine interrupts (soa_host_gx_native)
-gx  g_host_pe_user  config
 gx  g_in_list  saved  # 0 at the safe point
 gx  g_last_unknown  saved
 gx  g_list_addr  saved
-gx  g_list_called  config
-gx  g_list_recording  config
-gx  g_off  config  # SOA_GX=off
-gx  g_off_frames  report  # frames the host ended with it off
-gx  g_off_pipe  report  # pipe bytes, and accesses to the CP, PE and PI FIFO registers, with it off
-gx  g_off_reads  report
-gx  g_off_writes  report
 gx  g_pe_mmio  saved
 gx  g_pi_fifo  saved
 gx  g_pipe  saved  # a command not yet whole
 gx  g_pipe_len  saved
-gx  g_pipe_watch  config
-gx  g_record_pipe  refused
 gx  g_replaying  refused
 gx  g_tokens  saved
 gx  g_unknown  saved
 gx  g_verts  saved
-gx  g_writers  report
-gx  g_writers_on  config
 gx  g_xf  saved
 gx  g_xf_loads  saved
 gx  g_xfb_copies  saved
 gx  warned  report
+
+gx_frame  g_census_note  config
+gx_frame  g_frame  saved  # the frames presented: what every frame-keyed switch counts
+gx_frame  g_frame_hook  config
+gx_frame  g_frame_limit  config  # SOA_FRAMES (a replay's stop is si.c's to set again)
+gx_frame  g_gx_list_called  config
+gx_frame  g_gx_list_recording  config
+gx_frame  g_gx_off  config  # SOA_GX=off
+gx_frame  g_gx_pipe_watch  config
+gx_frame  g_host_drawn  config  # SOA_GX=off: the host's drawn-bytes counter (soa_host_gx_native, before the run starts)
+gx_frame  g_host_pe  config  # SOA_GX=off: the host's pending pixel-engine interrupts (soa_host_gx_native)
+gx_frame  g_host_pe_user  config
+gx_frame  g_off_frames  report  # frames the host ended with it off
+gx_frame  g_off_pipe  report  # pipe bytes, and accesses to the CP, PE and PI FIFO registers, with it off
+gx_frame  g_off_reads  report
+gx_frame  g_off_writes  report
+gx_frame  g_record_pipe  refused
+gx_frame  g_writers  report
+gx_frame  g_writers_on  config
 
 gxr  dir  config
 gxr  done  config

@@ -114,7 +114,7 @@ def exe(tmp_path_factory):
     out = tmp / "gxoff"
     proc = subprocess.run(
         ["gcc", "-std=c17", "-O1", "-D_GNU_SOURCE", "-fno-strict-aliasing", "-fwrapv", f"-I{RUNTIME}",
-         str(RUNTIME / "gx.c"), str(tmp / "driver.c"), "-lm", "-o", str(out)],
+         str(RUNTIME / "gx.c"), str(RUNTIME / "gx_frame.c"), str(tmp / "driver.c"), "-lm", "-o", str(out)],
         capture_output=True, text=True, timeout=120, check=False,
     )  # fmt: skip
     assert proc.returncode == 0, proc.stdout + proc.stderr

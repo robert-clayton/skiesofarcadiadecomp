@@ -40,7 +40,7 @@ STALLS = ("2:0:300", "2:1:20000", "2:2:20000")  # worker 2 held before draws, co
 
 # ---- test_gxr_overlap.py's driver: the ordering around EFB copies (H14) ----
 
-OVERLAP_SOURCES = ["gx.c", "gxr.c", "png.c"]  # gxr_tev.c comes in through the driver
+OVERLAP_SOURCES = ["gx.c", "gx_frame.c", "gxr.c", "png.c"]  # gxr_tev.c comes in through the driver
 
 OVERLAP_DRIVER = r"""
 #define _CRT_SECURE_NO_WARNINGS
@@ -427,7 +427,7 @@ OVERLAP_FINAL = (
 
 # ---- test_gxr_queue.py's driver: the handshake around gxr_flush ----
 
-QUEUE_SOURCES = ["gx.c", "gxr.c", "gxr_tev.c", "png.c"]
+QUEUE_SOURCES = ["gx.c", "gx_frame.c", "gxr.c", "gxr_tev.c", "png.c"]
 
 # The stream drives the flush in every shape the queue has: a copy to memory
 # followed by a draw sampling that destination (the flush that fires from

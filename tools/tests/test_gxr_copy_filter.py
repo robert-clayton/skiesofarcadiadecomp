@@ -37,7 +37,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from soa import toolchain  # noqa: E402
 
 RUNTIME = ROOT / "runtime"
-SOURCES = ["gx.c", "gxr.c", "gxr_tev.c", "png.c"]
+SOURCES = ["gx.c", "gx_frame.c", "gxr.c", "gxr_tev.c", "png.c"]
 
 # The two coefficient sets that matter, packed as the hardware takes them:
 # w0..w3 in BP 0x53 at bits 0, 6, 12, 18 and w4..w6 in BP 0x54 at 0, 6, 12.
