@@ -41,6 +41,7 @@
 
 void dsp_reset(void);
 void dsp_stub_boot(void);
+int audio_is_off(void); /* dsp.c: SOA_AUDIO=off */
 
 static uint8_t* g_aram;
 static int g_ar_busy;
@@ -166,6 +167,7 @@ static void src_build(void);
 
 void aram_census_prepare(void)
 {
+    if (audio_is_off()) return; /* SOA_AUDIO=off: no ARAM, and no disc read for its census */
     if (!g_src_ready) src_build();
 }
 
@@ -426,7 +428,7 @@ static void dma(CpuState* s, uint32_t cnt)
 /* From the interrupt code: a DMA whose time is up completes with ARINT. */
 void aram_poll(CpuState* s)
 {
-    if (g_ar_busy && tb_now(s) >= g_ar_due) { g_ar_busy = 0; g_csr |= CSR_ARINT; }
+    if (g_ar_busy && !audio_is_off() && tb_now(s) >= g_ar_due) { g_ar_busy = 0; g_csr |= CSR_ARINT; }
 }
 
 /* The fixed-step clock's idle skip (irq.c): when the DMA in flight is due. */
@@ -499,7 +501,7 @@ int aram_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v)
 
 uint8_t* aram_memory(void)
 {
-    if (!g_aram) g_aram = (uint8_t*)calloc(1, ARAM_SIZE);
+    if (!g_aram && !audio_is_off()) g_aram = (uint8_t*)calloc(1, ARAM_SIZE);
     return g_aram;
 }
 
@@ -527,6 +529,7 @@ int ai_dma_irq_pending(void)
 
 void aram_report(void)
 {
+    if (audio_is_off()) return; /* dsp_report gives SOA_AUDIO=off's count */
     fprintf(stderr, "[aram] %llu DMAs, %llu bytes\n", (unsigned long long)g_dmas,
             (unsigned long long)g_dma_bytes);
     {

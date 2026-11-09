@@ -61,6 +61,7 @@ int aram_irq_pending(void);
 void aram_report(void);
 #define IRQ_DSP_ARAM 6
 int dsp_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out);
+int audio_off_mmio(CpuState* s, uint32_t ea, unsigned size, int write, uint64_t v, uint64_t* out); /* dsp.c: SOA_AUDIO=off */
 int dsp_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v);
 int dsp_irq_pending(void);
 int ai_dma_irq_pending(void);
@@ -152,6 +153,7 @@ int device_read(CpuState* s, uint32_t ea, unsigned size, uint64_t* out)
     }
     if (size == 4 && ea == 0xCC003000u) { *out = g_pi_cause | PI_RSWST_RELEASED; return 1; }
     if (size == 4 && ea == 0xCC003004u) { *out = g_pi_mask; return 1; }
+    if (audio_off_mmio(s, ea, size, 0, 0, out)) return 1;
     if (size == 4 && ea >= 0xCC006C00u && ea < 0xCC006C10u) { *out = ai_read(s, ea); return 1; }
     if (exi_read(s, ea, size, out)) return 1;
     if (si_read(s, ea, size, out)) return 1;
@@ -171,6 +173,7 @@ void device_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v)
     }
     if (size == 4 && ea == 0xCC003000u) { g_pi_cause &= ~(uint32_t)v; return; } /* write-one-to-clear */
     if (size == 4 && ea == 0xCC003004u) { g_pi_mask = (uint32_t)v; return; }
+    if (audio_off_mmio(s, ea, size, 1, v, NULL)) return;
     if (size == 4 && ea >= 0xCC006C00u && ea < 0xCC006C10u) { ai_write(s, ea, (uint32_t)v); return; }
     if (exi_write(s, ea, size, v)) return;
     if (si_write(s, ea, size, v)) return;

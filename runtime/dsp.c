@@ -27,6 +27,7 @@
 #include "cpu.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define DSP_BASE 0xCC005000u
 #define TB_HZ 40500000ull
@@ -66,6 +67,41 @@ uint64_t guest_time_device(CpuState* s); /* hle.c: the timebase as a device read
 static uint64_t tb_now(CpuState* s)
 {
     return guest_time_device(s);
+}
+
+/* SOA_AUDIO=off (soa-ue5's U3.3): the audio's device models are off -- AI's registers (irq.c), the DSP's mailboxes and
+ * its AI DMA (here), ARAM and its DMA engine with the DSP's control register (aram.c), the AX microcode's mixer (ax.c)
+ * and the output (audio_out.c) -- for a host that answers the SDK's audio natively (the AI, ARAM, ARQ and DSP functions,
+ * the driver's AX lists mixed in the host, ARAM a host buffer). Nothing should reach the registers: an access to AI's
+ * (0xCC006C00-0xCC006C1F) or the DSP interface's (0xCC005000-0xCC0051FF) is counted, its first few named, and answered
+ * with zero (a read) or dropped (a write). ARAM is never allocated, its census never reads the disc, no AI block is
+ * played and no output opened. The report gives the count, which a check run holds to 0 (and the [hle] report's DSP
+ * and AI lines with it). Without the switch the runtime is as before. */
+static int g_audio_off = -1;
+static uint64_t g_audio_off_reads, g_audio_off_writes;
+int audio_is_off(void)
+{
+    if (g_audio_off < 0) {
+        const char* v = getenv("SOA_AUDIO");
+        g_audio_off = v && strcmp(v, "off") == 0;
+        if (g_audio_off)
+            fprintf(stderr, "[audio] off (SOA_AUDIO=off): no AI, DSP, ARAM or AX model, no output; the host answers the audio\n");
+    }
+    return g_audio_off;
+}
+/* irq.c's device_read and device_write ask this first: 1 when the access is the audio's and the models are off. */
+int audio_off_mmio(CpuState* s, uint32_t ea, unsigned size, int write, uint64_t v, uint64_t* out)
+{
+    if (!((ea >= 0xCC005000u && ea < 0xCC005200u) || (ea >= 0xCC006C00u && ea < 0xCC006C20u)) || !audio_is_off()) return 0;
+    if (g_audio_off_reads + g_audio_off_writes < 8)
+        fprintf(stderr, "[audio] off: %s %08X/%u = %llx at pc %08X lr %08X\n", write ? "write" : "read", ea, size,
+                (unsigned long long)v, s ? s->pc : 0u, s ? s->lr : 0u);
+    if (write) g_audio_off_writes++;
+    else {
+        g_audio_off_reads++;
+        if (out) *out = 0;
+    }
+    return 1;
 }
 
 static void push_out(uint32_t mail, int irq)
@@ -235,6 +271,7 @@ int dsp_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v)
  * it (FINDINGS "M19, followed up"). */
 void dsp_poll(CpuState* s)
 {
+    if (audio_is_off()) return; /* SOA_AUDIO=off: no AI DMA */
     if ((g_dma_ctrl & 0x8000u) && g_dma_period && tb_now(s) >= g_dma_due) {
         uint32_t bytes = (g_dma_ctrl & 0x7FFFu) * 32u;
         g_dma_due += g_dma_period;
@@ -249,6 +286,7 @@ void dsp_poll(CpuState* s)
 /* The fixed-step clock's idle skip (irq.c): when the AI DMA's block ends. */
 int dsp_next_due(uint64_t* due)
 {
+    if (audio_is_off()) return 0;
     if (!(g_dma_ctrl & 0x8000u) || !g_dma_period) return 0;
     *due = g_dma_due;
     return 1;
@@ -268,6 +306,11 @@ void dsp_dma_backdate(unsigned periods)
 
 void dsp_report(void)
 {
+    if (audio_is_off()) {
+        fprintf(stderr, "[audio] off: %llu register reads, %llu register writes\n", (unsigned long long)g_audio_off_reads,
+                (unsigned long long)g_audio_off_writes);
+        return;
+    }
     ax_report();
     audio_report();
     fprintf(stderr,

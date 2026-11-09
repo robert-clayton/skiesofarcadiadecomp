@@ -16,8 +16,11 @@ void device_write(CpuState* s, uint32_t ea, unsigned size, uint64_t v);
  * zeroed, so only the register state it leaves behind matters: AR_SIZE set,
  * the DSP halted with DSPINIT, and a reset issued -- after which the ROM
  * has announced itself in the outgoing mailbox, which DSPInit relies on. */
+int audio_is_off(void); /* dsp.c: SOA_AUDIO=off */
 void fn_80232B90(CpuState* s)
 {
+    /* With the audio's models off (SOA_AUDIO=off) the host answers the DSP and ARAM: there is nothing to leave set. */
+    if (audio_is_off()) return;
     device_write(s, 0xCC005012u, 2, 0x43);
     device_write(s, 0xCC00500Au, 2, 0x8AC);
     device_write(s, 0xCC00500Au, 2, 0x8AD);

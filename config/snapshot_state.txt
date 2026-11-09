@@ -229,6 +229,9 @@ dsp  g_out_tail  saved
 dsp  g_rom_after_stub  saved
 dsp  g_unknown  saved
 dsp  noax  config  # SOA_NOAX
+dsp  g_audio_off  config  # SOA_AUDIO=off
+dsp  g_audio_off_reads  report  # accesses to AI's and the DSP interface's registers with it off
+dsp  g_audio_off_writes  report
 
 dvd  g_busy  saved  # a command in flight: its data is in memory already
 dvd  g_bytes  saved
