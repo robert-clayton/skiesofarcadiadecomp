@@ -119,4 +119,11 @@ int snapshot_precheck(char* why, size_t cap);
  * on the fixed clock. 1 when on. */
 int snapshot_foreign(void);
 
+
+/* A resume into the host's answer of main (snapshot.c): on before the start, the resume calls main's replacement with
+ * the point handed over; the answer takes it (snapshot_resume_take: the point, then 0; spr[1000] cleared). */
+void snapshot_resume_answer(int on);
+int snapshot_resume_answered(void);
+uint32_t snapshot_resume_take(void* runtime); /* the CpuState */
+
 #endif

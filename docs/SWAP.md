@@ -506,6 +506,40 @@ guarded byte, so every call takes the slow path, as counting does; it changes no
 `SOA_COUNT_CALLS`'s translated column, the resume aside). `swap_set_stop_hook` names what runs before a strict stop
 (`main.c`: `hle_report`). `tools/tests/test_swap_trap.py` holds it.
 
+### A run without the game library (`soa_host_without_game`)
+
+The step after the trap (soa-ue5's U5a): a host that answers main and every function the game calls loads no game
+library at all. `soa_host_without_game()` before `soa_host_start` (whose `game` may then be NULL) makes the runtime's
+table a stand-in (`runtime/nogame.c`): the addresses the host asked to replace before the start (`swap.c`'s kept
+requests) and the functions the runtime answers itself (`<out>/runtime_seam.c`'s `soa_runtime_answers`, this mode's
+`config/hle.txt` bindings). Its dispatch calls the runtime's own answer, or the replacement through the guard's slow path
+(`soa_swap_enter`: the quiet rule's delivery, the counts and the trap as with the library); anything else stops the run
+(exit 3, after the runtime's report) with the address, why and the guest's call chain: an address no answer covers (a
+call through a pointer the host never bound), a replacement's hand-back (`SWAP_GAMES`) and a request for a translation
+(`swap_original`, `SWAP_BOTH`). `dispatch_known` says yes to every address, so every call reaches that verdict. There
+are no twins: `runtime_seam.c`'s forwarders dispatch when the table has none. The executable, `boot.bin` and the file
+table are not built in (no library): `main.c` reads the image's, with `SOA_DVD=off` too (the image opened for them alone,
+the drive's model off). A resume needs `soa_host_resume_answer` (below): main has no translation to enter.
+`tools/tests/test_nogame.py` holds it.
+
+### A resume into main's answer (`soa_host_resume_answer`, `soa_host_resume_pc`)
+
+A snapshot resumes at main's safe point (`0x801DCB84`, `config/resumepoints.txt`), which the translation enters past its
+guard, so a host's answer of main never saw it (soa-ue5's Frame took main over at the first frame end instead).
+`soa_host_resume_answer(1)` before the start says the host's answer of main takes a resume: `snapshot_resume_run` then
+calls main's replacement (with nothing else: no delivery, no count, as the translation's resume has none), and the
+answer reads `soa_host_resume_pc(call->runtime)` at its entry: the point, then 0, its read clearing the CpuState's
+resume word as the translation's switch does. An answer that hands the call back leaves the point untaken and the
+translation resumes as before (the trap counts it as a `resume`).
+
+### Charging a device register a host answers (`soa_host_mmio_charge`)
+
+`soa_host_gx_charge` and `soa_host_audio_charge` charge the registers of a device that is off. An OS answer that reads a
+register the runtime still models (the reset switch's PI word `0xCC003000`, say) charges it with
+`soa_host_mmio_charge(runtime, address, size, flags, value)`: any register in `0xCC000000`-`0xCCFFFFFF`, aligned, 1 to 8
+bytes, on the guest's thread; the recorder told, the fixed clock moved after a read (one of the `[clock]` line's hardware
+reads) or marked after a write, no device reached and no MMIO counted.
+
 ## A swap on against off
 
 The check for any swap that does not change timing semantics: the same pad
@@ -574,6 +608,14 @@ The checks:
   guest. The byte guard is portable C.
 
 ## What changed (and what to rebuild)
+
+- **Within host ABI 24** (2026-11-09, branch u5-trap): a run without the game library (`soa_host_without_game`,
+  `runtime/nogame.c`), a resume into main's answer (`soa_host_resume_answer`, `soa_host_resume_pc`) and
+  `soa_host_mmio_charge`, added after the rest of the header (above); `swap.c`'s `swap_pending_addresses` and
+  `swap_answer_now`; `runtime_seam.c` gains `soa_runtime_answers` and its twin forwarders dispatch when the table has no
+  twin; `main.c` reads the image's system files under `SOA_DVD=off` when no library is loaded. Nothing before it changed.
+  `test_nogame.py` is new; `test_host_strict.py`'s stand-ins gain the six new runtime functions. A runtime-only change
+  (`runtime_seam.c` is the runtime's): `--link`.
 
 - **Within host ABI 24** (2026-11-09, branch u5-trap): the trap, `SOA_TRAP_TRANSLATED`, `SOA_TRAP_FILE` and
   `SOA_TRAP_ALLOW` (above, "The trap"); `swap.h`'s `SWAP_TRAP` bit, `swap_trap_note`, `swap_trap_entries`,

@@ -66,8 +66,15 @@ typedef struct {
 SOA_GAME_EXPORT const SoaGame* soa_game(void);
 
 #ifdef SOA_SPLIT
-/* runtime/game.c: the loaded library's table */
+/* runtime/game.c: the loaded library's table (or runtime/nogame.c's stand-in) */
 extern const SoaGame* soa_game_table;
+/* <out>/runtime_seam.c: the functions the runtime answers itself, by address (runtime/nogame.c) */
+typedef struct {
+    uint32_t address;
+    SoaFn fn;
+} SoaRuntimeAnswer;
+extern const SoaRuntimeAnswer soa_runtime_answers[];
+extern const unsigned soa_runtime_answer_count;
 #endif
 
 #endif

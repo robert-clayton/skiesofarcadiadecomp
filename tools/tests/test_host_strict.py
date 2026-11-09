@@ -86,6 +86,13 @@ void watchdog_fallback(void) {}
 /* snapshot.c's, which a run here never takes or resumes */
 int snapshot_resuming(void) { return 0; }
 int snapshot_precheck(char* why, size_t cap) { (void)why, (void)cap; return 0; }
+/* U5a: the resume into main's answer (snapshot.c) and the run without a game library (nogame.c) */
+void snapshot_resume_answer(int on) { (void)on; }
+int snapshot_resume_answered(void) { return 0; }
+uint32_t snapshot_resume_take(void* runtime) { (void)runtime; return 0; }
+int soa_nogame(void) { return 0; }
+void soa_nogame_set(int on) { (void)on; }
+int soa_nogame_build(char* why, size_t cap) { (void)why, (void)cap; return 1; }
 int snapshot_request(const char* path) { (void)path; return 0; }
 int snapshot_status(long* frame, char* why, size_t cap) { (void)frame, (void)why, (void)cap; return 0; }
 int snapshot_arm_resume(const char* path, char* why, size_t cap) { (void)path, (void)why, (void)cap; return 1; }

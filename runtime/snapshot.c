@@ -807,6 +807,30 @@ int snapshot_precheck(char* why, size_t cap)
 
 void snapshot_after_load(CpuState* s); /* the fix-ups once every section is in */
 
+/* A resume into main's answer (soa_host_resume_answer, soa_host_resume_pc; docs/SNAPSHOT.md): the host says its answer
+ * of main takes a resume; the point is handed to it, and taken (spr[1000] cleared) when it reads it. */
+static int g_resume_answer;
+static uint32_t g_resume_pc;
+
+void snapshot_resume_answer(int on)
+{
+    g_resume_answer = on != 0;
+}
+
+int snapshot_resume_answered(void)
+{
+    return g_resume_answer;
+}
+
+uint32_t snapshot_resume_take(void* runtime)
+{
+    CpuState* s = (CpuState*)runtime;
+    uint32_t pc = g_resume_pc;
+    g_resume_pc = 0;
+    if (pc && s) s->spr[RESUME_SPR] = 0u; /* as the translation's resume switch clears it */
+    return pc;
+}
+
 int snapshot_resume_run(CpuState* s)
 {
     char why[600];
@@ -838,6 +862,16 @@ int snapshot_resume_run(CpuState* s)
     /* main, entered at the top of its loop with every register as it was:
      * the call of VIGetRetraceCount there is the safe point again */
     s->spr[RESUME_SPR] = RESUME_PC;
+    if (g_resume_answer) {
+        /* the host's answer of main takes the resume (snapshot_resume_answer): it reads the point at its entry
+         * (snapshot_resume_take) and goes on from there; one that hands the call back leaves it untaken */
+        g_resume_pc = RESUME_PC;
+        if (swap_answer_now(s, RESUME_FN) >= 0 && !g_resume_pc) {
+            fprintf(stderr, "[snapshot] main's answer returned after a resume\n");
+            return 0;
+        }
+        g_resume_pc = 0;
+    }
     swap_trap_note(s, RESUME_FN, SWAP_TRAP_RESUME); /* main's translation entered past its guard (swap.h, the trap) */
     dispatch(s, RESUME_FN);
     fprintf(stderr, "[snapshot] main returned after a resume\n");

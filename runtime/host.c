@@ -33,6 +33,9 @@
 #include <string.h>
 
 int soa_load_game(const char* path, char* why, size_t cap); /* game.c */
+int soa_nogame(void);                                       /* nogame.c */
+void soa_nogame_set(int on);
+int soa_nogame_build(char* why, size_t cap);
 int soa_main(int argc, char** argv);                        /* main.c's main, under SOA_SPLIT */
 long gxr_presented(void);
 void watchdog_fallback(void);
@@ -82,8 +85,13 @@ int soa_host_start(const SoaHostStart* start, char* why, size_t cap)
                  SOA_HOST_ABI);
         return 1;
     }
-    if (!start->game || !*start->game) {
+    if (!soa_nogame() && (!start->game || !*start->game)) {
         snprintf(why, cap, "no game library named (libsoa_game.so from the same build)");
+        return 1;
+    }
+    /* without the game library (soa_host_without_game) a resume goes to main's answer, never its translation */
+    if (soa_nogame() && snapshot_resuming() && !snapshot_resume_answered()) {
+        snprintf(why, cap, "a run without the game library resumes only into main's answer (soa_host_resume_answer)");
         return 1;
     }
     if (plat_cas32(&g_state, SOA_HOST_IDLE, SOA_HOST_RUNNING) != SOA_HOST_IDLE) {
@@ -94,7 +102,7 @@ int soa_host_start(const SoaHostStart* start, char* why, size_t cap)
         snprintf(why, cap, "the disc path is longer than %zu bytes", sizeof g_disc - 1);
         goto refused;
     }
-    if (soa_load_game(start->game, why, cap) != 0) goto refused;
+    if (soa_nogame() ? soa_nogame_build(why, cap) != 0 : soa_load_game(start->game, why, cap) != 0) goto refused;
     swap_attach(); /* what the host asked to swap before there was a game */
     /* A resumed run (soa_host_resume, SOA_RESUME): the game library has the
      * resume point and the host has set the snapshot's replacements and given
@@ -125,6 +133,29 @@ int soa_host_start(const SoaHostStart* start, char* why, size_t cap)
 refused:
     plat_cas32(&g_state, SOA_HOST_RUNNING, SOA_HOST_IDLE);
     return 1;
+}
+
+int soa_host_without_game(void)
+{
+#ifdef SOA_SPLIT
+    if (plat_load32(&g_state) != SOA_HOST_IDLE) return 0;
+    soa_nogame_set(1);
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int soa_host_resume_answer(unsigned on)
+{
+    if (plat_load32(&g_state) != SOA_HOST_IDLE) return 0;
+    snapshot_resume_answer(on != 0);
+    return 1;
+}
+
+uint32_t soa_host_resume_pc(void* runtime)
+{
+    return snapshot_resume_take(runtime);
 }
 
 int soa_host_state(int* rc)
@@ -790,6 +821,18 @@ int soa_host_audio_charge(void* runtime, uint32_t address, unsigned size, unsign
 {
     const int ok = (size == 2 && address == 0xCC00500Au) || (size == 4 && address == 0xCC006C00u);
     if (!runtime || !t_guest || !audio_is_off() || (flags & ~SOA_HOST_GX_WRITE) || !ok) return 0;
+    hle_mmio_charge((CpuState*)runtime, address, size, flags & SOA_HOST_GX_WRITE, value);
+    return 1;
+}
+
+/* soa-ue5's U5a (soa_host_mmio_charge): any device register's access a host answered natively, charged as the mmio
+ * wrappers charge one (the recorder told; under the fixed clock a read moves it and counts among the clock's hardware
+ * reads, a write marks it) without a device access or an MMIO count. For the OS's answers that read or write a
+ * register the runtime's devices model (the reset switch's PI word, say), so the clock is the translation's. */
+int soa_host_mmio_charge(void* runtime, uint32_t address, unsigned size, unsigned flags, uint64_t value)
+{
+    const int ok = (address >> 24) == 0xCCu && (size == 1 || size == 2 || size == 4 || size == 8) && !(address & (size - 1u));
+    if (!runtime || !t_guest || (flags & ~SOA_HOST_GX_WRITE) || !ok) return 0;
     hle_mmio_charge((CpuState*)runtime, address, size, flags & SOA_HOST_GX_WRITE, value);
     return 1;
 }

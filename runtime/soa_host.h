@@ -1086,6 +1086,31 @@ SOA_HOST_API int soa_host_gx_charge(void* runtime, uint32_t address, unsigned si
  *     SOA_HOST_GX_WRITE for a write; value: what was read or written. */
 SOA_HOST_API int soa_host_audio_off(void);
 SOA_HOST_API int soa_host_audio_charge(void* runtime, uint32_t address, unsigned size, unsigned flags, uint64_t value);
+
+/* soa-ue5's U5a: a host that answers main and every function the game calls (docs/SWAP.md, "A run without the game
+ * library"; docs/SNAPSHOT.md). Optional by symbol lookup.
+ *   soa_host_resume_answer(on), before soa_host_start: the host's answer of main takes a snapshot's resume, so the
+ *     resume calls it (not main's translation, which enters past its guard) with the resume point handed over; the
+ *     answer reads it at its entry with soa_host_resume_pc and goes on from there. An answer that hands the call back
+ *     leaves it untaken and the translation resumes as before. 1 done, 0 after the start.
+ *   soa_host_resume_pc(runtime): at main's answer's entry (its call->runtime), the resume point handed to it (main's
+ *     safe point, 0x801DCB84), then 0; 0 when the entry is not a resume. Taking it clears the CpuState's resume word,
+ *     as the translation's resume switch does.
+ *   soa_host_without_game(), before soa_host_start: the run loads no game library (soa_host_start's game may be NULL):
+ *     its table is made from the addresses replaced before the start and the functions the runtime answers itself;
+ *     a call of any other address, an answer's hand-back or a request for a translation stops the run (exit 3) with
+ *     the address and the guest's call chain. The executable, boot.bin and the file table are read from the image
+ *     (with SOA_DVD=off as well; the drive's model stays off). A resume needs soa_host_resume_answer. 1 done; 0 after
+ *     the start or in a build that is not split. */
+/*   soa_host_mmio_charge(runtime, address, size, flags, value): a device register's access (0xCC000000-0xCCFFFFFF,
+ *     size 1, 2, 4 or 8, aligned) the host answered natively, charged as soa_host_gx_charge charges one: the recorder
+ *     told, under the fixed clock a read moves it (one of the clock's hardware reads) and a write marks it, with no
+ *     device access and no MMIO count. On the guest's thread, with its CpuState; flags SOA_HOST_GX_WRITE for a write.
+ *     1 charged, 0 refused. */
+SOA_HOST_API int soa_host_mmio_charge(void* runtime, uint32_t address, unsigned size, unsigned flags, uint64_t value);
+SOA_HOST_API int soa_host_resume_answer(unsigned on);
+SOA_HOST_API uint32_t soa_host_resume_pc(void* runtime);
+SOA_HOST_API int soa_host_without_game(void);
 #ifdef __cplusplus
 }
 #endif

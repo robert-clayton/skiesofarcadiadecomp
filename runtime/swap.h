@@ -93,6 +93,16 @@ int swap_call_original(CpuState* s, uint32_t address, const uint32_t* ints, uint
  * is replaced, as swap_call_original. 0 when address starts no function. */
 int swap_call_exact(CpuState* s, uint32_t address, uint32_t lr, int original);
 
+/* The addresses the requests kept before the table name (each with a
+ * replacement), into out while it fits; returns how many. For a run without
+ * the game library (nogame.c), whose table is made from them. */
+unsigned swap_pending_addresses(uint32_t* out, unsigned max);
+
+/* The replacement at address called now, as the guard would call it but with
+ * nothing else (no delivery, no count): SWAP_ANSWERED or the like, or -1 when
+ * none is set. For a snapshot's resume into main's answer (snapshot.c). */
+int swap_answer_now(CpuState* s, uint32_t address);
+
 /* After a host build has loaded the game library (host.c): the requests
  * kept until then are applied. */
 void swap_attach(void);

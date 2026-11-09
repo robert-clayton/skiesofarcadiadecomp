@@ -212,10 +212,15 @@ def runtime_seam_c(seam: Seam, bound: Iterable[int], runtime_rec: str) -> str:
     bound = set(bound)
     exports = runtime_exports(seam, bound)
     forwarders = [f"void fn_{ENTRY:08X}(CpuState* s) {{ soa_game_table->entry(s); }}"]
+    # (a runtime without a game library, runtime/nogame.c, has no twins: the call goes to whatever answers the address)
     forwarders += [
-        f"void {body_name(a, bound)}(CpuState* s) {{ soa_game_table->twin(0x{a:08X}u)(s); }}"
+        f"void {body_name(a, bound)}(CpuState* s) {{ SoaFn f = soa_game_table->twin(0x{a:08X}u); "
+        f"if (f) f(s); else dispatch(s, 0x{a:08X}u); }}"
         for a in seam.twins
     ]
+    own = sorted(bound)
+    decls = "\n".join(f"void fn_{a:08X}(CpuState* s);" for a in own)
+    rows = ",\n".join(f"    {{0x{a:08X}u, fn_{a:08X}}}" for a in own)
     names = ",\n".join(f"    {c_string(n)}" for n in exports)
     libc = ",\n".join(f"    {c_string(n)}" for n in seam.libc)
     return f"""/* Written by tools/recompile.py --split (specs/android.md 3.2): the
@@ -236,6 +241,14 @@ const char* const soa_runtime_libc[] = {{
 {libc}
 }};
 const unsigned soa_runtime_libc_count = {len(seam.libc)};
+
+/* The functions this runtime answers itself (config/hle.txt, this mode's bindings), by address: what a run without a
+ * game library (runtime/nogame.c) dispatches to for them. */
+{decls}
+const SoaRuntimeAnswer soa_runtime_answers[] = {{
+{rows}
+}};
+const unsigned soa_runtime_answer_count = {len(own)};
 
 void dispatch(CpuState* s, uint32_t addr) {{ soa_game_table->dispatch(s, addr); }}
 int dispatch_known(uint32_t addr) {{ return soa_game_table->dispatch_known(addr); }}

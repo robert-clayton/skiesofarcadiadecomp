@@ -172,6 +172,33 @@ int swap_set(uint32_t address, SwapHandler handler, SwapFn fn, void* user)
     return ok;
 }
 
+unsigned swap_pending_addresses(uint32_t* out, unsigned max)
+{
+    unsigned k, n = 0;
+    plat_lock(&g_lock);
+    for (k = 0; k < g_npending; k++)
+        if (g_pending[k].handler) {
+            if (out && n < max) out[n] = g_pending[k].address;
+            n++;
+        }
+    plat_unlock(&g_lock);
+    return n;
+}
+
+int swap_answer_now(CpuState* s, uint32_t address)
+{
+    const SoaGame* g = g_game;
+    int i = g ? index_in(g, address) : -1;
+    Swap w;
+    if (i < 0 || !(((volatile uint8_t*)g->swap)[i] & SWAP_HOOK)) return -1;
+    plat_lock(&g_lock);
+    w = g_swap[i];
+    plat_unlock(&g_lock);
+    if (!w.handler) return -1;
+    s->pc = address;
+    return w.handler(s, address, w.fn, w.user, 0);
+}
+
 void swap_attach(void)
 {
     const SoaGame* g;

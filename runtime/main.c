@@ -48,6 +48,7 @@ void hle_dump(CpuState* s, uint32_t pc);
 void threads_init(CpuState* s);
 int selftest(CpuState* s);
 void swap_env(void); /* swap.c */
+int soa_nogame(void); /* nogame.c: a run without the game library (its system files the image's) */
 void swap_set_stop_hook(void (*fn)(void)); /* swap.c */
 void record_env(CpuState* s); /* record.c */
 int gx_replay(CpuState* s, const char* base);
@@ -1448,7 +1449,7 @@ int main(int argc, char** argv)
         int dvd_off = dvd && strcmp(dvd, "off") == 0;
         disc_set_stop_hook(hle_report); /* a damaged store stops the run with its report (I5) */
         built_in = disc_builtin(why, sizeof why);
-        if (dvd_off && built_in != 1) {
+        if (dvd_off && built_in != 1 && !soa_nogame()) {
             fprintf(stderr, "[boot] SOA_DVD=off needs the build's own system files (I3), and this build has %s\n",
                     built_in < 0 ? why : "none (--no-embed)");
             return 1;
@@ -1456,7 +1457,8 @@ int main(int argc, char** argv)
         if (dvd_off) {
             dvd_set_off();
             no_disc = 1;
-            fprintf(stderr, "[disc] off (SOA_DVD=off): no image opened, the drive's model off; the host serves the files\n");
+            fprintf(stderr, "[disc] off (SOA_DVD=off): %s, the drive's model off; the host serves the files\n",
+                    built_in == 1 ? "no image opened" : "the image opened for its system files alone (no game library)");
         }
         if (built_in < 0 || (!(built_in && no_disc) && disc_open(dir, why, sizeof why) != 0) ||
             disc_system(&dol, &dol_size, &boot, &fst, &fst_size, why, sizeof why) != 0) {
