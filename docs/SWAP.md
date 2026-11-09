@@ -421,6 +421,41 @@ before without the switch, and with it nothing reaching the model, the
 host's interrupts and bytes, its frame end and the report.
 `test_host_gx_off.py` holds `host.c`'s refusals.
 
+### A runtime without GX (within ABI 24)
+
+`recompile.py --no-gx` (with `--split` or `--host`; soa-ue5's U4.2) links
+`libsoa_runtime.so` without `gx.c`, `gxr.c`, `gxr_tev.c` and `gxv.c`, for a
+host that answers GX natively and draws from its own scene list (its no-FIFO
+mode, by default). `SOA_NO_GX` is defined, and `gx_none.c` (empty without it)
+answers what the rest of the runtime asks of the four files exactly as the
+full runtime does with `SOA_GX=off`: the pipe's stores counted and dropped,
+CP, PE and PI FIFO accesses counted and answered 0, the host's interrupts and
+drawn bytes, register shadows of zero, no list recording, nothing presented,
+every renderer hook a no-op, `--replay` refused. `SOA_GX` is always off in such
+a runtime; the `[gx] off:` report line is the same.
+
+What the no-FIFO path needed of `gx.c` is `gx_frame.c`'s, which every build
+has: the frame count and its end (the frame hook, `SOA_FRAMES`' stop, which
+`gx.c` reaches at its display copy with its captures around it and a host at
+its own through `soa_host_gx_frame_end`), the display-list hooks'
+registration (`gx_set_list_hooks`; only `gx.c`'s parse calls them), the pipe's
+watchers (`SOA_GX_WRITERS`, the census, the recorder) and the `SOA_GX=off`
+switch with the host's four entries. The full runtime is as before.
+
+The full runtime is linked beside it as `gx/libsoa_runtime.so` (the same
+exports and soname), for a host's switch back to GX: the game library links
+against the runtime without GX, and takes whichever one the host loaded.
+`soa_host_gx_built()` says which: 1 for the full runtime, 0 without GX (it
+answers without the switch). A save state's `gx` section has `gx.c`'s layout
+with its model empty, so it is byte for byte the full runtime's with
+`SOA_GX=off`; there are no `gxr` and `tex` sections, and a `gx` section whose
+model is not empty (taken with GX drawing) is refused.
+
+`test_gx_none.py` builds `gx_none.c` and `gx_frame.c` with `SOA_NO_GX` and
+`test_gx_off.py`'s driver: the same lines as `gx.c` with `SOA_GX=off`, whatever
+`SOA_GX` says, the same report, the same `gx` section, and the refusal.
+`tools/citest/compile_runtime.py --no-gx` compiles the build without GX too.
+
 ### The audio's models off (within ABI 24)
 
 `SOA_AUDIO=off` turns the audio's device models off, for a host that answers
