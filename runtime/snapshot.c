@@ -23,6 +23,7 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include "snapshot.h"
+#include "swap.h"
 #include "cpu.h"
 #include "plat.h"
 #include "sha1.h"
@@ -837,6 +838,7 @@ int snapshot_resume_run(CpuState* s)
     /* main, entered at the top of its loop with every register as it was:
      * the call of VIGetRetraceCount there is the safe point again */
     s->spr[RESUME_SPR] = RESUME_PC;
+    swap_trap_note(s, RESUME_FN, SWAP_TRAP_RESUME); /* main's translation entered past its guard (swap.h, the trap) */
     dispatch(s, RESUME_FN);
     fprintf(stderr, "[snapshot] main returned after a resume\n");
     return 0;

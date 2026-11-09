@@ -485,6 +485,27 @@ switch:
 `test_audio_off.py` builds `dsp.c` and `aram.c` alone and runs one driver
 both ways; `test_host_audio_off.py` holds `host.c`'s refusals.
 
+### The trap: every translated entry (`SOA_TRAP_TRANSLATED`)
+
+For soa-ue5's U5a (a host that no longer loads the game library must first show nothing of it runs), the runtime notes
+every entry into a translated function's body, as opposed to a call a replacement answered:
+
+- `SOA_TRAP_TRANSLATED=count` (or `1`): each entry is counted by function and by kind, with the first entry's call chain
+  (LR, then each saved LR up the guest's back chain, read from RAM with no device access); at the run's end a line,
+  `[trap] N translated entries in M functions`, and with `SOA_TRAP_FILE=<path>` a line a function: `address`, `entries`,
+  `call`, `handback`, `original`, `resume`, `chain`.
+- `SOA_TRAP_TRANSLATED=strict`: the first entry stops the run (exit 3) after the runtime's report, with its address,
+  kind and call chain on stderr; the functions `SOA_TRAP_ALLOW` lists (comma-separated hex addresses) are counted
+  instead.
+
+The kinds: `call`, the game's call with no replacement set; `handback`, a replacement returned `SWAP_GAMES`;
+`original`, the translation run for a replacement (`swap_original`, `SWAP_BOTH`, `swap_call_original`, an exact call
+with `original`); `resume`, a snapshot's resume into main's translation, which enters past the guard. The functions the
+runtime answers itself (kind 1) have no translation to enter. The trap sets its own bit (`SWAP_TRAP`, 16) in every
+guarded byte, so every call takes the slow path, as counting does; it changes nothing the guest sees (the counts equal
+`SOA_COUNT_CALLS`'s translated column, the resume aside). `swap_set_stop_hook` names what runs before a strict stop
+(`main.c`: `hle_report`). `tools/tests/test_swap_trap.py` holds it.
+
 ## A swap on against off
 
 The check for any swap that does not change timing semantics: the same pad
@@ -553,6 +574,11 @@ The checks:
   guest. The byte guard is portable C.
 
 ## What changed (and what to rebuild)
+
+- **Within host ABI 24** (2026-11-09, branch u5-trap): the trap, `SOA_TRAP_TRANSLATED`, `SOA_TRAP_FILE` and
+  `SOA_TRAP_ALLOW` (above, "The trap"); `swap.h`'s `SWAP_TRAP` bit, `swap_trap_note`, `swap_trap_entries`,
+  `swap_set_stop_hook`; `snapshot.c` notes its resume into main's translation. Nothing a host calls changed.
+  `test_swap_trap.py` is new. A runtime-only change: `--link`.
 
 - **Within host ABI 24** (2026-11-08, branch u4-nofifo): the no-FIFO mode,
   `SOA_GX=off` in `gx.c`, and `soa_host_gx_off`, `soa_host_gx_native`,

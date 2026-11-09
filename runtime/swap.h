@@ -31,6 +31,7 @@
 #define SWAP_COUNT 2u
 #define SWAP_TRACE 4u /* the entry is told to the trace function (swap_trace) */
 #define SWAP_DUE 8u   /* the fixed clock's quiet rule: something has come due, and the next entry delivers it */
+#define SWAP_TRAP 16u /* SOA_TRAP_TRANSLATED: an entry into the translation is noted (swap_trap_note) */
 
 typedef void (*SwapFn)(void); /* the handler's own function, whatever its type: cast back by the handler */
 typedef int (*SwapHandler)(CpuState* s, uint32_t address, SwapFn fn, void* user, int after);
@@ -119,5 +120,24 @@ void swap_due_handler(void (*take)(CpuState* s));
 extern volatile uint64_t g_swap_answers;
 
 int soa_swap_enter(CpuState* s, uint32_t index); /* the guard's slow path */
+
+/* SOA_TRAP_TRANSLATED (swap_env reads it; docs/SWAP.md, "The trap"): every entry into a translated function's body,
+ * not an answered one, noted by function. "count" (or 1): counted, with the first entry's caller and guest call chain,
+ * a report line at the run's end and, with SOA_TRAP_FILE=<path>, every function a line; "strict": the first entry
+ * stops the run (exit 3) with its address and call chain, but for the functions SOA_TRAP_ALLOW lists (comma-separated
+ * addresses), which are counted. An entry is the game's call no replacement answered, a replacement's SWAP_GAMES, a
+ * run of the translation a replacement asked for (swap_original, SWAP_BOTH, swap_call_original, swap_call_exact's
+ * original) and a snapshot's resume into main's translation. The runtime's own answers (kind 1) have no translation
+ * here and are not entries. */
+#define SWAP_TRAP_CALL 0     /* the game's call, no replacement set */
+#define SWAP_TRAP_HANDBACK 1 /* a replacement handed the call back (SWAP_GAMES) */
+#define SWAP_TRAP_ORIGINAL 2 /* the translation run for a replacement */
+#define SWAP_TRAP_RESUME 3   /* a snapshot resumed into the translation (snapshot.c) */
+int swap_trap_on(void);      /* 1 counting, 2 strict, 0 off */
+void swap_trap_note(CpuState* s, uint32_t address, int how);
+/* What runs before the strict trap stops the run (main.c: hle_report, the runtime's report). */
+void swap_set_stop_hook(void (*fn)(void));
+/* The entries so far (all functions), and how many functions had one. */
+uint64_t swap_trap_entries(unsigned* functions);
 
 #endif

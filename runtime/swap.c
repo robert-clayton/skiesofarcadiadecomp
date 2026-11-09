@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+void hle_on_report(void (*fn)(void)); /* hle.c */
 int dispatch_known(uint32_t addr); /* <out>/dispatch.c, or the split build's forwarder */
 
 typedef struct {
@@ -54,6 +55,20 @@ static SwapTraceFn g_trace; /* swap_trace's, with SWAP_TRACE in every byte while
 static void (*g_due_take)(CpuState* s); /* swap_due_handler's */
 static int g_due;                       /* SWAP_DUE is in every byte */
 volatile uint64_t g_swap_answers; /* swap.h */
+/* The trap (swap.h, SOA_TRAP_TRANSLATED): 1 counting, 2 strict; each function's entries by kind, and its first entry's
+ * caller and chain (the LR and the saved LRs up the guest's back chain). */
+#define TRAP_CHAIN 8
+typedef struct {
+    uint64_t by[4];
+    uint32_t chain[TRAP_CHAIN];
+    uint32_t chain_n;
+} TrapRow;
+static int g_trap;
+static TrapRow* g_trap_rows;
+static uint8_t* g_trap_allow;
+static uint64_t g_trap_total;
+static const char* g_trap_path;
+static void trap_note(CpuState* s, uint32_t i, int how);
 
 static const SoaGame* table(void)
 {
@@ -336,6 +351,7 @@ int soa_swap_enter(CpuState* s, uint32_t i)
     if (g_skip == i + 1u) {
         g_skip = 0;
         if (f & SWAP_COUNT) g_translated[i]++;
+        if (f & SWAP_TRAP) trap_note(s, i, SWAP_TRAP_ORIGINAL);
         return 0;
     }
     if (f & SWAP_COUNT) g_calls[i]++;
@@ -343,6 +359,7 @@ int soa_swap_enter(CpuState* s, uint32_t i)
         SwapTraceFn t = g_trace;
         if (t) t(s, g->address[i]);
     }
+    w.handler = NULL;
     if (f & SWAP_HOOK) {
         plat_lock(&g_lock);
         w = g_swap[i];
@@ -364,7 +381,173 @@ int soa_swap_enter(CpuState* s, uint32_t i)
         }
     }
     if (f & SWAP_COUNT) g_translated[i]++;
+    if (f & SWAP_TRAP) trap_note(s, i, w.handler ? SWAP_TRAP_HANDBACK : SWAP_TRAP_CALL);
     return 0;
+}
+
+/* ---- the trap (swap.h) ---------------------------------------------------------------------------------------- */
+static const char* const g_trap_how[4] = {"call", "hand-back", "original", "resume"};
+
+static int trap_index_of(uint32_t address)
+{
+    const SoaGame* g = g_game;
+    uint32_t lo = 0, hi;
+    if (!g) return -1;
+    hi = g->count;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (g->address[mid] < address) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < g->count && g->address[lo] == address ? (int)lo : -1;
+}
+
+/* The guest's call chain at an entry: LR (the caller), then each frame's saved LR up the back chain from r1, read from
+ * RAM directly (no device access, nothing counted). */
+static uint32_t trap_chain(CpuState* s, uint32_t* out, uint32_t max)
+{
+    uint32_t n = 0, sp = s->gpr[1], k;
+    if (max) out[n++] = s->lr;
+    for (k = 0; n < max && k < 64; k++) {
+        uint32_t next, lr;
+        if (sp < 0x80000000u || sp >= 0x81800000u - 8u || (sp & 3u)) break;
+        memcpy(&next, mem_ptr(s, sp), 4);
+        next = BSWAP32(next);
+        if (next < 0x80000000u || next >= 0x81800000u - 8u || next <= sp) break;
+        memcpy(&lr, mem_ptr(s, next + 4u), 4);
+        lr = BSWAP32(lr);
+        if (lr) out[n++] = lr;
+        sp = next;
+    }
+    return n;
+}
+
+int swap_trap_on(void)
+{
+    return g_trap;
+}
+
+uint64_t swap_trap_entries(unsigned* functions)
+{
+    unsigned n = 0;
+    uint32_t i;
+    if (g_trap_rows && g_game)
+        for (i = 0; i < g_game->count; i++)
+            n += (g_trap_rows[i].by[0] | g_trap_rows[i].by[1] | g_trap_rows[i].by[2] | g_trap_rows[i].by[3]) != 0;
+    if (functions) *functions = n;
+    return g_trap_total;
+}
+
+static void (*g_trap_stop)(void); /* swap_set_stop_hook's: the runtime's report before a strict stop */
+
+void swap_set_stop_hook(void (*fn)(void))
+{
+    g_trap_stop = fn;
+}
+
+void swap_trap_note(CpuState* s, uint32_t address, int how)
+{
+    int i = trap_index_of(address);
+    if (i >= 0) trap_note(s, (uint32_t)i, how);
+}
+
+static void trap_note(CpuState* s, uint32_t i, int how)
+{
+    TrapRow* r;
+    uint32_t k, address;
+    if (!g_trap || !g_trap_rows || !g_game || i >= g_game->count || how < 0 || how > 3) return;
+    address = g_game->address[i];
+    r = &g_trap_rows[i];
+    if (!(r->by[0] | r->by[1] | r->by[2] | r->by[3])) r->chain_n = trap_chain(s, r->chain, TRAP_CHAIN);
+    r->by[how]++;
+    g_trap_total++;
+    if (g_trap == 2 && !(g_trap_allow && g_trap_allow[i])) {
+        uint32_t chain[TRAP_CHAIN], n = trap_chain(s, chain, TRAP_CHAIN);
+        fprintf(stderr, "[trap] SOA_TRAP_TRANSLATED=strict: the translation of %08X entered (%s), the game's code where "
+                        "an answer was wanted; the call chain:", address, g_trap_how[how]);
+        for (k = 0; k < n; k++) fprintf(stderr, " %08X", chain[k]);
+        fprintf(stderr, "\n");
+        if (g_trap_stop) g_trap_stop();
+        fflush(stderr);
+        exit(3);
+    }
+}
+
+static void trap_report(void)
+{
+    const SoaGame* g = g_game;
+    unsigned functions = 0;
+    uint64_t total;
+    uint32_t i, k;
+    FILE* f = NULL;
+    if (!g || !g_trap_rows) return;
+    total = swap_trap_entries(&functions);
+    if (g_trap_path) {
+        f = fopen(g_trap_path, "w");
+        if (!f) fprintf(stderr, "[trap] cannot write %s\n", g_trap_path);
+        else fprintf(f, "address\tentries\tcall\thandback\toriginal\tresume\tchain\n");
+    }
+    for (i = 0; f && i < g->count; i++) {
+        const TrapRow* r = &g_trap_rows[i];
+        uint64_t n = r->by[0] + r->by[1] + r->by[2] + r->by[3];
+        if (!n) continue;
+        fprintf(f, "%08X\t%llu\t%llu\t%llu\t%llu\t%llu\t", g->address[i], (unsigned long long)n,
+                (unsigned long long)r->by[0], (unsigned long long)r->by[1], (unsigned long long)r->by[2],
+                (unsigned long long)r->by[3]);
+        for (k = 0; k < r->chain_n; k++) fprintf(f, k ? " %08X" : "%08X", r->chain[k]);
+        fprintf(f, "\n");
+    }
+    if (f) fclose(f);
+    fprintf(stderr, "[trap] %llu translated entries in %u functions (SOA_TRAP_TRANSLATED=%s)%s%s\n",
+            (unsigned long long)total, functions, g_trap == 2 ? "strict" : "count", f ? "; every one in " : "",
+            f ? g_trap_path : "");
+}
+
+static void trap_env(void)
+{
+    const char* e = getenv("SOA_TRAP_TRANSLATED");
+    const char* allow = getenv("SOA_TRAP_ALLOW");
+    const SoaGame* g;
+    uint32_t i;
+    if (!e || !*e || !strcmp(e, "0") || !strcmp(e, "off")) return;
+    plat_lock(&g_lock);
+    g = ready_locked();
+    plat_unlock(&g_lock);
+    if (!g) {
+        fprintf(stderr, "[trap] SOA_TRAP_TRANSLATED: this build has no swap table; nothing is trapped\n");
+        return;
+    }
+    g_trap_rows = (TrapRow*)calloc(g->count, sizeof *g_trap_rows);
+    g_trap_allow = (uint8_t*)calloc(g->count, 1);
+    if (!g_trap_rows || !g_trap_allow) {
+        fprintf(stderr, "[trap] out of memory; nothing is trapped\n");
+        free(g_trap_rows), free(g_trap_allow);
+        g_trap_rows = NULL, g_trap_allow = NULL;
+        return;
+    }
+    if (allow && *allow) {
+        const char* p = allow;
+        while (*p) {
+            char* end;
+            unsigned long a = strtoul(p, &end, 16);
+            int k;
+            if (end == p) break;
+            k = trap_index_of((uint32_t)a);
+            if (k >= 0) g_trap_allow[k] = 1;
+            else fprintf(stderr, "[trap] SOA_TRAP_ALLOW: %08lX is no translated function\n", a);
+            p = *end == ',' ? end + 1 : end;
+        }
+    }
+    g_trap = !strcmp(e, "strict") ? 2 : 1;
+    g_trap_path = getenv("SOA_TRAP_FILE");
+    if (g_trap_path && !*g_trap_path) g_trap_path = NULL;
+    plat_lock(&g_lock);
+    for (i = 0; i < g->count; i++)
+        if (!g->kind[i]) g->swap[i] = (uint8_t)(g->swap[i] | SWAP_TRAP);
+    plat_unlock(&g_lock);
+    hle_on_report(trap_report);
+    fprintf(stderr, "[trap] every entry into a translated function's body %s (SOA_TRAP_TRANSLATED=%s)\n",
+            g_trap == 2 ? "stops the run, but for SOA_TRAP_ALLOW's" : "is counted", e);
 }
 
 /* SOA_COUNT_CALLS=1, or a path: counting from the start of the run, and at
@@ -404,8 +587,6 @@ static void swap_report(void)
             ran, total - native, native, translated, answered, f ? "; every count in " : "", f ? g_count_path : "");
     free(c);
 }
-
-void hle_on_report(void (*fn)(void)); /* hle.c */
 
 /* SOA_PIPE_CENSUS=<path>: every translated function that stores to the
  * write-gather pipe itself, with the bytes and stores it made there (its own
@@ -504,6 +685,7 @@ static void census_report(void)
 void swap_env(void)
 {
     const char* e = getenv("SOA_COUNT_CALLS");
+    trap_env();
     const char* census = getenv("SOA_PIPE_CENSUS");
     if (census && *census && strcmp(census, "0") != 0) {
         const SoaGame* g;

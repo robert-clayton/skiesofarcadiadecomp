@@ -48,6 +48,7 @@ void hle_dump(CpuState* s, uint32_t pc);
 void threads_init(CpuState* s);
 int selftest(CpuState* s);
 void swap_env(void); /* swap.c */
+void swap_set_stop_hook(void (*fn)(void)); /* swap.c */
 void record_env(CpuState* s); /* record.c */
 int gx_replay(CpuState* s, const char* base);
 int gx_replay_pair(CpuState* s, const char* a, const char* b); /* H10: A, B and B.mid.png */
@@ -1552,7 +1553,8 @@ int main(int argc, char** argv)
 #endif
     threads_init(&s);
     if (getenv("SOA_SELFTEST")) return selftest(&s) ? 7 : 0;
-    swap_env(); /* SOA_COUNT_CALLS, SOA_PIPE_CENSUS */
+    swap_set_stop_hook(hle_report); /* the strict trap's stop (SOA_TRAP_TRANSLATED) reports first */
+    swap_env(); /* SOA_COUNT_CALLS, SOA_PIPE_CENSUS, SOA_TRAP_TRANSLATED */
     if (swap_pipe_census_on()) gx_set_pipe_census(swap_pipe_census_note);
     record_env(&s); /* SOA_RECORD (docs/RECORD.md) */
     {
