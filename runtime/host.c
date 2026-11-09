@@ -751,12 +751,17 @@ int soa_host_gx_register_at(SoaHostCall* call, uint32_t address,
     return gx_register_access(call, address, size, flags, value, pc, t_guest);
 }
 
-/* SOA_GX=off (gx.c, soa-ue5's U4.1): the host answers the CP, PE and PI FIFO natively. */
+/* SOA_GX=off (gx_frame.c, soa-ue5's U4.1): the host answers the CP, PE and PI FIFO natively. */
 int gx_is_off(void);
 int gx_set_native(unsigned (*pe_pending)(void* user), void* user, const volatile uint64_t* drawn);
 int gx_off_frame_end(CpuState* s);
 void hle_mmio_charge(CpuState* s, uint32_t ea, unsigned size, unsigned write, uint64_t v);
 int soa_host_gx_off(void) { return gx_is_off(); }
+#ifdef SOA_NO_GX
+int soa_host_gx_built(void) { return 0; }
+#else
+int soa_host_gx_built(void) { return 1; }
+#endif
 int soa_host_gx_native(unsigned (*pe_pending)(void* user), void* user, const volatile uint64_t* drawn)
 {
     return gx_set_native(pe_pending, user, drawn);

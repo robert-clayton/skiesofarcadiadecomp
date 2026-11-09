@@ -1052,7 +1052,11 @@ SOA_HOST_API int soa_host_gx_register_at(SoaHostCall* call, uint32_t address,
 /* SOA_GX=off (soa-ue5's U4.1, "the no-FIFO mode"): the runtime's command-processor model (gx.c) and renderer (gxr)
  * are off, and the host answers natively what the game reads back of them. Optional by symbol lookup; each refuses
  * (returns 0, does nothing) without the switch.
- *   soa_host_gx_off: 1 when the run has SOA_GX=off.
+ *   soa_host_gx_off: 1 when the run has SOA_GX=off (always, in a runtime built without GX).
+ *   soa_host_gx_built: 1 when the runtime has gx.c and gxr (the full build), 0 when it is built without them
+ *     (soa-ue5's U4.2: recompile.py --no-gx). Without them the host must answer GX natively, or the game waits for a
+ *     draw-sync token nothing sends; a host that wants GX loads the full build (--no-gx links it as gx/ beside).
+ *     Unlike the rest, it answers without the switch.
  *   soa_host_gx_native: the host's pixel engine and drawing, before the run starts: pe_pending(user) is asked where
  *     gx.c's own pending interrupts were (bit 0 a token, bit 1 a draw-done finish), so they are delivered in the
  *     same place and order; *drawn, which the host counts, is the bytes it would have sent down the gather pipe,
@@ -1065,6 +1069,7 @@ SOA_HOST_API int soa_host_gx_register_at(SoaHostCall* call, uint32_t address,
  *     wrappers charge one (the recorder told; under the fixed clock a read moves it, a write marks it) without a
  *     device access or an MMIO count. flags: SOA_HOST_GX_WRITE for a write; value: what was read or written. */
 SOA_HOST_API int soa_host_gx_off(void);
+SOA_HOST_API int soa_host_gx_built(void);
 SOA_HOST_API int soa_host_gx_native(unsigned (*pe_pending)(void* user), void* user, const volatile uint64_t* drawn);
 SOA_HOST_API int soa_host_gx_frame_end(void* runtime);
 SOA_HOST_API int soa_host_gx_charge(void* runtime, uint32_t address, unsigned size, unsigned flags, uint64_t value);

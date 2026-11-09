@@ -256,7 +256,10 @@ static const Section SECTIONS[] = {
     {"build", build_snap},   {"swaps", swap_list_snap}, {"events", irq_events_snap}, {"cpu", cpu_snap},
     {"mem", mem_snap},       {"threads", threads_snap}, {"clock", clock_snap},       {"hle", hle_snap},
     {"seed", seed_snap},     {"irq", irq_snap},         {"tick", tick_snap},         {"swap", swap_snap},
-    {"main", main_snap},     {"gx", gx_snap},           {"gxr", gxr_snap},           {"tex", tex_snap},
+    {"main", main_snap},     {"gx", gx_snap},
+#ifndef SOA_NO_GX /* (a build without GX, --no-gx, has no renderer: gx_none.c's "gx" is gx.c's, its model empty) */
+    {"gxr", gxr_snap},       {"tex", tex_snap},
+#endif
     {"dvd", dvd_snap},       {"dsp", dsp_snap},         {"ax", ax_snap},             {"aram", aram_snap},
     {"si", si_snap},         {"exi", exi_snap},         {"record", record_snap},     {"mod", mod_snap},
 #ifdef SOA_HOST
