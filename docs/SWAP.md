@@ -411,8 +411,8 @@ the switch:
 - `soa_host_gx_charge(runtime, address, size, flags, value)`: a CP or PE
   halfword's or a PI FIFO word's access that the host answered, charged as
   the MMIO wrappers charge one (`hle_mmio_charge`: the recorder told; under the
-  fixed clock a read moves the clock and a write marks it) with no device
-  access and no MMIO count. Anything else is refused: another address, a
+  fixed clock a read moves the clock and a write marks it; the spin detector
+  shown it, since soa-ue5's U4.2) with no device access and no MMIO count. Anything else is refused: another address, a
   misaligned or wrong-sized access, a flag other than `SOA_HOST_GX_WRITE`, no
   runtime or another thread.
 

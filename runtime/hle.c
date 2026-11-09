@@ -160,6 +160,10 @@ static int g_clock_fixed;
  * -- but reaches no device and is not counted among the MMIO accesses (the [hle] report holds the GX devices to 0). */
 void hle_mmio_charge(CpuState* s, uint32_t ea, unsigned size, unsigned write, uint64_t v)
 {
+    /* The spin detector sees it too, as the wrappers' note() shows it every access: a loop that polls one register
+     * between reads of another the host answers (the frame end's wait reads the PI's interrupt cause and the PE's
+     * status) is no more a spin than it was with the device's model answering both. */
+    spin_check(s, ea, (int)write);
     if (write) {
         RECORD_NOTE(s, 1 | (int)size << 8, ea, v);
         if (g_clock_fixed) clock_fixed_mark();
