@@ -201,6 +201,8 @@ NOTHING(dsp_snap) NOTHING(dvd_snap) NOTHING(ax_snap) NOTHING(si_snap) NOTHING(ex
 NOTHING(record_snap) NOTHING(mod_snap)
 
 /* what snapshot.c asks of the rest of the runtime */
+int swap_answer_now(CpuState* s, uint32_t address) { (void)s; (void)address; return -1; } /* no replacement of main */
+void swap_trap_note(CpuState* s, uint32_t address, int how) { (void)s; (void)address; (void)how; }
 volatile int g_clock_due;
 void (*g_clock_due_fn)(int on);
 unsigned gx_frame_count(void) { return 7; }

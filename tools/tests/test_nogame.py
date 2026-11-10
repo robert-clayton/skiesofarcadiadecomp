@@ -96,7 +96,14 @@ def build(tmp_path):
     (tmp_path / "main.c").write_text(MAIN, encoding="utf-8")
     sources = ["main.c", str(RUNTIME / "nogame.c"), str(RUNTIME / "swap.c")]
     proc = toolchain.cc(
-        [*PROFILE.cflags, "/DSOA_SPLIT=1", f"/I{RUNTIME}", f"/Fe{tmp_path / 't'}", *sources, *PROFILE.linker],
+        [
+            *PROFILE.cflags,
+            "/DSOA_SPLIT=1",
+            f"/I{RUNTIME}",
+            f"/Fe{tmp_path / 't'}",
+            *sources,
+            *PROFILE.linker,
+        ],
         tmp_path,
         PROFILE,
     )

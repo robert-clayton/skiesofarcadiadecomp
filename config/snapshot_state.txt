@@ -949,6 +949,8 @@ snapshot  g_resume_armed  config
 snapshot  g_resumed  config
 snapshot  g_s  scratch
 snapshot  g_skip_one  config
+snapshot  g_resume_answer  config  # soa_host_resume_answer, before the start
+snapshot  g_resume_pc  scratch  # handed to main's answer at the resume and taken at its entry
 
 swap  g_answered  saved  # while counting
 swap  g_calls  saved
@@ -973,6 +975,13 @@ swap  g_swap  saved  # the host sets them again; "swaps" checks they are the sna
 swap  g_swap_answers  saved  # the quiet rule compares it pass by pass
 swap  g_trace  refused  # SOA_RECORD's
 swap  g_translated  saved
+swap  g_trap  config  # SOA_TRAP_TRANSLATED, read once at the start
+swap  g_trap_allow  config
+swap  g_trap_how  config  # the kinds' names
+swap  g_trap_path  config
+swap  g_trap_rows  report  # the trap's counts, a run's own (a resumed run's start at the resume)
+swap  g_trap_stop  config  # main.c's hle_report
+swap  g_trap_total  report
 
 threads  g_main_fiber  scratch
 threads  g_resumes  saved
@@ -1004,3 +1013,10 @@ trace  g_watch_from  config
 trace  g_watch_len  config
 trace  hits  report
 trace  last_pc  report
+nogame  g_addr  config  # a run without the game library: the stand-in table, made at the start from the host's replacements
+nogame  g_bytes  config  # its guard bytes: the host's replacements set again before a resumed run starts, the due bit from the clock
+nogame  g_kind  config
+nogame  g_n  config
+nogame  g_on  config  # soa_host_without_game, before the start
+nogame  g_own  config
+nogame  g_table  config

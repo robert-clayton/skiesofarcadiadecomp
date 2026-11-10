@@ -113,7 +113,8 @@ def build(tmp_path):
     (tmp_path / "chunk.c").write_text("\n".join(body) + "\n", encoding="utf-8")
     (tmp_path / "disc_sys.c").write_text(embed.disc_sys_c(None), encoding="utf-8")
     (tmp_path / "game_table.c").write_text(
-        seam.game_table_c(seam.Seam((), (), ()), set(), fns, "abi=1", functions=fns), encoding="utf-8"
+        seam.game_table_c(seam.Seam((), (), ()), set(), fns, "abi=1", functions=fns),
+        encoding="utf-8",
     )
     (tmp_path / "main.c").write_text(
         MAIN.replace("CALLER_FN", c_name(CALLER))
@@ -121,9 +122,24 @@ def build(tmp_path):
         .replace("CALLER_ADDR", f"0x{CALLER:08X}u"),
         encoding="utf-8",
     )
-    sources = ["main.c", "chunk.c", "dispatch.c", "game_table.c", "disc_sys.c", str(RUNTIME / "swap.c")]
+    sources = [
+        "main.c",
+        "chunk.c",
+        "dispatch.c",
+        "game_table.c",
+        "disc_sys.c",
+        str(RUNTIME / "swap.c"),
+    ]
     proc = toolchain.cc(
-        [*PROFILE.cflags, "/DSOA_SPLIT=1", f"/I{RUNTIME}", f"/I{tmp_path}", f"/Fe{tmp_path / 't'}", *sources, *PROFILE.linker],
+        [
+            *PROFILE.cflags,
+            "/DSOA_SPLIT=1",
+            f"/I{RUNTIME}",
+            f"/I{tmp_path}",
+            f"/Fe{tmp_path / 't'}",
+            *sources,
+            *PROFILE.linker,
+        ],
         tmp_path,
         PROFILE,
     )
@@ -141,10 +157,14 @@ def run(exe, env, *args):
 def test_every_translated_entry_is_counted_by_kind_and_equals_the_counter(tmp_path):
     exe = build(tmp_path)
     out = tmp_path / "trap.tsv"
-    p = run(exe, {"SOA_TRAP_TRANSLATED": "count", "SOA_TRAP_FILE": str(out), "SOA_COUNT_CALLS": "1"})
+    p = run(
+        exe, {"SOA_TRAP_TRANSLATED": "count", "SOA_TRAP_FILE": str(out), "SOA_COUNT_CALLS": "1"}
+    )
     assert p.returncode == 0, p.stdout + p.stderr
     lines = p.stdout.splitlines()
-    assert lines[0] == "trap 1 flags 18 18"  # SWAP_TRAP (16) and SWAP_COUNT (2) in every guarded byte
+    assert (
+        lines[0] == "trap 1 flags 18 18"
+    )  # SWAP_TRAP (16) and SWAP_COUNT (2) in every guarded byte
     # the caller 4 calls and a resume; the callee a call, a hand-back, an original: 8 entries in 2 functions
     assert lines[1] == "entries 8 in 2"
     # the counter's translated column holds the same (the resume is the trap's alone: it is past the guard)
