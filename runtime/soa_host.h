@@ -63,6 +63,13 @@ enum { SOA_HOST_IDLE, SOA_HOST_RUNNING, SOA_HOST_ENDED };
 
 SOA_HOST_API unsigned soa_host_abi(void);
 
+/* Optional native-memory bridge, with the host core's signature. The full
+ * runtime routes SOA_POKE word stores through write_word; read_word is unused.
+ * NULL clears the hook. Install before soa_host_start; one run per process. */
+SOA_HOST_API void soa_core_set_memory(
+    uint32_t (*read_word)(const uint8_t*, uint32_t),
+    void (*write_word)(uint8_t*, uint32_t, uint32_t, const char*, uint32_t));
+
 /* Loads and checks the game library on the calling thread, then starts the
  * run on a thread of its own and returns 0; or returns nonzero with why in
  * `why`, the run not started. One run per process: the runtime's state is

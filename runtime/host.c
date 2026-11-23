@@ -66,6 +66,7 @@ static void run_main(void* arg)
     argv[2] = NULL;
     fesetenv(FE_DFL_ENV);
     g_rc = soa_main(g_disc[0] ? 2 : 1, argv);
+    soa_core_set_memory(NULL, NULL); /* the run has ended; do not retain its owner's callbacks */
     fprintf(stderr, "[host] the run returned %d\n", g_rc);
     plat_cas32(&g_state, SOA_HOST_RUNNING, SOA_HOST_ENDED);
 }

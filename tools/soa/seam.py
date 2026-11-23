@@ -261,7 +261,7 @@ def version_script(seam: Seam, bound: Iterable[int], host: bool = False) -> str:
     soa_run, and nothing else; SDL, linked in statically, stays inside. A
     host build (--host) exports runtime/soa_host.h's API too, which is every
     name starting soa_host_, for the program that loads it."""
-    names = [*runtime_exports(seam, bound), "soa_run", *(["soa_host_*"] if host else [])]
+    names = [*runtime_exports(seam, bound), "soa_run", *(["soa_host_*", "soa_core_set_memory"] if host else [])]
     body = "\n".join(f"    {n};" for n in names)
     return f"{{\n  global:\n{body}\n  local: *;\n}};\n"
 

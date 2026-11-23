@@ -47,6 +47,9 @@ STUBS = r"""
 #include <time.h>
 
 void audio_set_muted(int on) { (void)on; }
+void soa_core_set_memory(uint32_t (*read_word)(const uint8_t*, uint32_t),
+                         void (*write_word)(uint8_t*, uint32_t, uint32_t, const char*, uint32_t))
+{ (void)read_word; (void)write_word; }
 void ax_tap(void* fn) { (void)fn; }
 void clock_exclude_at(uint64_t a, uint64_t b) { (void)a, (void)b; }
 uint64_t clock_host_ns(void) { return 0; }

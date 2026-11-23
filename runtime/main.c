@@ -22,6 +22,18 @@ void dvd_set_off(void); /* dvd.c: SOA_DVD=off */
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef SOA_HOST
+#include "soa_host.h"
+static void (*host_mapped_write)(uint8_t*, uint32_t, uint32_t, const char*, uint32_t);
+
+void soa_core_set_memory(uint32_t (*read_word)(const uint8_t*, uint32_t),
+                         void (*write_word)(uint8_t*, uint32_t, uint32_t, const char*, uint32_t))
+{
+    (void)read_word;
+    host_mapped_write = write_word;
+}
+#endif
+
 #ifndef ENTRY_FN
 #define ENTRY_FN fn_80003140 /* __start */
 #endif
@@ -1079,7 +1091,12 @@ void poke_at_frame(CpuState* s, unsigned frame)
         gxr_hook_hazard(g_pokes[i].ea, 4); /* the frame may still be copying there (H14) */
         fprintf(stderr, "[poke] frame %u: %08X <- %08X (was %08X)\n", frame, g_pokes[i].ea,
                 g_pokes[i].value, mem_r32(s, g_pokes[i].ea));
-        mem_w32(s, g_pokes[i].ea, g_pokes[i].value);
+#ifdef SOA_HOST
+        if (host_mapped_write)
+            host_mapped_write(s->mem, g_pokes[i].ea, g_pokes[i].value, "SOA_POKE", 0);
+        else
+#endif
+            mem_w32(s, g_pokes[i].ea, g_pokes[i].value);
     }
     /* The mods after the pokes and the peeks before both, so a peek reads
      * what the game wrote and a mod has the last word (PLAN M1). */
